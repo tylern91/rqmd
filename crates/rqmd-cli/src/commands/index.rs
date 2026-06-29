@@ -347,6 +347,7 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
         }
 
         let mut done = 0usize;
+        let mut bytes_processed = 0usize;
         for idx in &todo_indices {
             let doc = &docs[*idx];
             let body = db::get_content(&s.db, &doc.hash)?.unwrap_or_default();
@@ -354,8 +355,6 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
                 continue;
             }
 
-            // Progress bar: qmd's \r stderr line.
-            // Metric note: qmd measures input bytes; rqmd counts docs.
             if is_tty {
                 let pct = if todo_total > 0 {
                     (done as f64 / todo_total as f64) * 100.0
@@ -365,17 +364,21 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
                 let bar = fmt::render_progress_bar(pct, 30);
                 let pct_int = pct.round() as u64;
                 let elapsed = start.elapsed().as_secs_f64();
-                let eta_str = if elapsed > 2.0 && done > 0 {
+                let (throughput_str, eta_str) = if elapsed > 2.0 && done > 0 {
+                    let bps = bytes_processed as f64 / elapsed;
                     let docs_per_sec = done as f64 / elapsed;
                     let remaining = (todo_total - done) as f64 / docs_per_sec.max(0.001);
-                    fmt::format_eta(remaining)
+                    (
+                        format!("{}/s", fmt_bytes(bps as u64)),
+                        fmt::format_eta(remaining),
+                    )
                 } else {
-                    "...".to_string()
+                    (".../s".to_string(), "...".to_string())
                 };
                 let chunks_so_far = total_new_chunks + pending.len();
                 eprint!(
                     "\r\x1b[36m{bar}\x1b[0m \x1b[1m{pct_int:>3}% input\x1b[0m \
-                     \x1b[2m{chunks_so_far} chunks · {done}/{todo_total} docs · ETA {eta_str}\x1b[0m   "
+                     \x1b[2m{chunks_so_far} chunks · {done}/{todo_total} docs · {throughput_str} · ETA {eta_str}\x1b[0m   "
                 );
             }
 
@@ -384,6 +387,7 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
             let chunk_count = new_chunks.len();
             pending.extend(new_chunks);
             done += 1;
+            bytes_processed += body.len();
             total_new_chunks += chunk_count;
 
             // Checkpoint every N docs so an interrupt only re-embeds the last batch.
