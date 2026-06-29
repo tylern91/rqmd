@@ -71,6 +71,14 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>) -> Result<()> {
 
     for col in &cols {
         eprintln!("Embedding collection '{}'...", col.name);
+
+        // Clear stale vector metadata so fresh HNSW vids don't conflict with
+        // rows left by a previous interrupted embed run.
+        let cleared = db::clear_vectors_for_collection(&s.db, &col.name)?;
+        if cleared > 0 {
+            eprintln!("  Cleared {cleared} stale vector(s) for '{}'.", col.name);
+        }
+
         let docs = db::list_documents(&s.db, Some(&col.name))?;
         let mut count = 0usize;
         for doc in &docs {

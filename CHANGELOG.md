@@ -1,5 +1,19 @@
 # rqmd Changelog
 
+## [0.1.1] — 2026-06-29
+
+### Fixed
+
+- `collection add`: stop loading the inference backend (embed + rerank GGUF
+  models) during BM25 indexing. Switched to `open_store_no_backend` +
+  `index_document_fts_only` so model loading is deferred to `rqmd embed`.
+- `rqmd embed`: clear stale `content_vectors` rows before re-embedding a
+  collection. Prevents UNIQUE constraint violation on `vid` when a prior
+  interrupted embed left the DB ahead of the HNSW index.
+- CLI result display: fix hardcoded `rrrqmd://` URI scheme typo in
+  `print_cli`; path labels now use the canonical `rqmd://` URI from
+  `SearchResult.file`.
+
 ## [0.1.0] — Initial release
 
 rqmd is a Rust port of [tobi/qmd](https://github.com/tobi/qmd), the original
