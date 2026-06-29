@@ -1,0 +1,45 @@
+name: Nix
+
+on:
+  push:
+    branches: [release]
+  pull_request:
+    branches: [release]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-flake:
+    name: Flake check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Validate flake structure
+        run: nix flake check --no-build
+
+      - name: Verify dev shell provides Rust toolchain
+        run: nix develop --command cargo --version
+
+      # Full `nix build .` is a follow-up: llama-cpp-2 bundles a CMake-based
+      # C++ library (llama.cpp) that requires cmake 3.x and Metal frameworks on
+      # macOS. Sandbox reproducibility needs additional testing. Track in CHANGELOG.

@@ -1,0 +1,16 @@
+[package]
+name = "rqmd-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "rqmd MCP server — hybrid local document search via Model Context Protocol"
+
+[dependencies]
+anyhow = "1"
+rmcp = { version = "1.8", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+rqmd-core = { path = "../rqmd-core" }
+rqmd-llm = { path = "../rqmd-llm" }
+dirs = "5"
+once_cell = "1"
