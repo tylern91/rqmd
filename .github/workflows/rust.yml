@@ -66,6 +66,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: macos-arm64-${{ matrix.feature-set }}
+          cache-on-failure: true
 
       - name: Check formatting
         if: matrix.feature-set == 'default'
@@ -115,6 +116,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: linux-x64-default
+          cache-on-failure: true
 
       - name: Build (default, Linux CPU-only — no Metal)
         # llama-cpp-2 on Linux uses CPU path; metal feature is macOS-only
@@ -153,6 +155,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: macos-arm64-dist
+          cache-on-failure: true
 
       - name: Build dist binary
         run: cargo build --profile dist -p rqmd-cli
