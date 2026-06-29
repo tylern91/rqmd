@@ -109,6 +109,9 @@ enum Commands {
     Embed {
         #[arg(short = 'c', long)]
         collection: Option<String>,
+        /// Clear all vectors and re-embed from scratch (repairs a diverged index)
+        #[arg(long)]
+        rebuild: bool,
     },
     /// Re-index all collections
     Update {
@@ -299,9 +302,10 @@ fn main() -> Result<()> {
         Commands::Context(cmd) => commands::context::run(&index_dir, cmd),
         Commands::Init => commands::index::run_init(),
         Commands::Status => commands::index::run_status(&index_dir),
-        Commands::Embed { collection } => {
-            commands::index::run_embed(&index_dir, collection.as_deref())
-        }
+        Commands::Embed {
+            collection,
+            rebuild,
+        } => commands::index::run_embed(&index_dir, collection.as_deref(), rebuild),
         Commands::Update { collection } => {
             commands::index::run_update(&index_dir, collection.as_deref())
         }

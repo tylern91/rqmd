@@ -77,7 +77,7 @@ impl Store {
         // Load HNSW index from disk if it exists, otherwise start fresh.
         // A failed load (corrupt file) emits a warning and starts empty — callers
         // must run `rqmd embed` to rebuild before vector search returns results.
-        let hnsw = if config.hnsw_path.exists() {
+        let mut hnsw = if config.hnsw_path.exists() {
             match VectorIndex::load(&config.hnsw_path) {
                 Ok(idx) => idx,
                 Err(e) => {
@@ -93,6 +93,14 @@ impl Store {
         } else {
             VectorIndex::new()?
         };
+
+        // Reconcile the HNSW allocator's next_vid against MAX(content_vectors.vid) in SQLite.
+        // This guards against the case where the HNSW file and the DB diverge (corrupt/short
+        // load falls back to next_vid=0, orphan-vid drift, etc.) — without this, embed()
+        // re-issues vids that existing DB rows already hold, causing a UNIQUE constraint abort.
+        if let Some(max_vid) = db::max_vector_vid(&db)? {
+            hnsw.ensure_next_vid_at_least(max_vid + 1);
+        }
 
         Ok(Self {
             db,
@@ -215,6 +223,12 @@ impl Store {
             });
         }
         Ok(pending)
+    }
+
+    /// Number of vectors currently in the HNSW index (mirrors the usearch file's entry count).
+    /// Used by `rqmd embed` to detect HNSW/DB divergence.
+    pub fn hnsw_size(&self) -> usize {
+        self.hnsw.size()
     }
 
     /// Commit FTS writes and persist the HNSW index to disk.

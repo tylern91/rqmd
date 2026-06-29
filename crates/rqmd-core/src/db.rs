@@ -272,6 +272,23 @@ pub fn hash_has_any_vector(conn: &Connection, hash: &str) -> bool {
         > 0
 }
 
+/// Return the highest vid currently stored in content_vectors, or None if the table is empty.
+/// Used to reconcile the HNSW allocator's `next_vid` against the DB after load so that
+/// freshly-issued vids never collide with existing rows.
+pub fn max_vector_vid(conn: &Connection) -> Result<Option<u64>> {
+    let maybe: Option<i64> = conn
+        .query_row("SELECT MAX(vid) FROM content_vectors", [], |row| row.get(0))
+        .context("max_vector_vid")?;
+    Ok(maybe.map(|v| v as u64))
+}
+
+/// Remove all content_vectors rows — used by `rqmd embed --rebuild` to reset the
+/// entire vector index before re-embedding from scratch.
+pub fn clear_all_vectors(conn: &Connection) -> Result<usize> {
+    let n = conn.execute("DELETE FROM content_vectors", [])?;
+    Ok(n)
+}
+
 /// Insert or update a chunk's vector metadata.
 /// `vid` is the usearch key (caller assigns it from the HNSW index).
 #[allow(clippy::too_many_arguments)]
@@ -407,6 +424,17 @@ pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>> {
             })
         })
         .collect()
+}
+
+/// Return (doc_count, last_modified_rfc3339) for a collection's active documents.
+/// `last_modified` is None when the collection has no active documents.
+pub fn collection_doc_stats(conn: &Connection, collection: &str) -> Result<(i64, Option<String>)> {
+    let (count, latest): (i64, Option<String>) = conn.query_row(
+        "SELECT COUNT(*), MAX(modified_at) FROM documents WHERE collection=?1 AND active=1",
+        params![collection],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((count, latest))
 }
 
 pub fn delete_collection(conn: &Connection, name: &str) -> Result<()> {

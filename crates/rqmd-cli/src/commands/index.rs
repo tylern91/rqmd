@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Instant;
 use walkdir::WalkDir;
@@ -10,13 +11,17 @@ use crate::{format as fmt, store};
 pub fn run_status(index_dir: &Path) -> Result<()> {
     let s = store::open_store_no_backend(index_dir)?;
 
-    let db_path = index_dir.join("index.sqlite");
-    let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+    // ── Index size (single combined line, mirroring qmd's `Size:`) ──────────────
+    let db_size = std::fs::metadata(index_dir.join("index.sqlite"))
+        .map(|m| m.len())
+        .unwrap_or(0);
     let tantivy_size: u64 = dir_size(&index_dir.join("tantivy"));
     let hnsw_size = std::fs::metadata(index_dir.join("hnsw.usearch"))
         .map(|m| m.len())
         .unwrap_or(0);
+    let total_index_size = db_size + tantivy_size + hnsw_size;
 
+    // ── Document counts ──────────────────────────────────────────────────────────
     let total_docs: i64 =
         s.db.query_row("SELECT COUNT(*) FROM documents WHERE active=1", [], |r| {
             r.get(0)
@@ -25,8 +30,6 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
     let total_vecs: i64 =
         s.db.query_row("SELECT COUNT(*) FROM content_vectors", [], |r| r.get(0))
             .unwrap_or(0);
-
-    // Docs without vectors — need embedding.
     let docs_needing_embed: i64 =
         s.db.query_row(
             "SELECT COUNT(DISTINCT d.hash) FROM documents d \
@@ -35,39 +38,160 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
             |r| r.get(0),
         )
         .unwrap_or(0);
+    let last_modified: Option<String> =
+        s.db.query_row(
+            "SELECT MAX(modified_at) FROM documents WHERE active=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
 
-    println!("QMD Status (Rust engine)\n");
-
-    println!("  Index:    {}", index_dir.display());
-    println!("  SQLite:   {}", fmt_bytes(db_size));
-    println!("  Tantivy:  {}", fmt_bytes(tantivy_size));
-    println!("  HNSW:     {}", fmt_bytes(hnsw_size));
+    // ── Header (qmd.ts:492 style, rqmd branding) ────────────────────────────────
+    println!("\x1b[1mQMD Status (Rust engine)\x1b[0m\n");
+    println!("Index: {}", index_dir.display());
+    println!("Size:  {}", fmt_bytes(total_index_size));
     println!();
 
-    println!("  Documents");
-    println!("    Total:    {total_docs}");
-    println!("    Vectors:  {total_vecs}");
+    // ── Documents (qmd.ts:513-521) ───────────────────────────────────────────────
+    println!("\x1b[1mDocuments\x1b[0m");
+    println!("  Total:    {total_docs} files indexed");
+    println!("  Vectors:  {total_vecs} embedded");
     if docs_needing_embed > 0 {
-        // Mirror qmd's yellow "Pending" advisory (qmd.ts:517).
-        eprintln!(
-            "    \x1b[33mPending:  {docs_needing_embed} need embedding\x1b[0m (run 'qmd embed')"
+        println!(
+            "  \x1b[33mPending:  {docs_needing_embed} need embedding\x1b[0m (run 'rqmd embed')"
         );
     }
-    println!();
+    if let Some(ref ts) = last_modified {
+        println!("  Updated:  {}", fmt::format_time_ago(ts));
+    }
 
+    // ── AST Chunking (qmd.ts:539-563: rqmd is regex-only so always "not available") ──
+    println!("\n\x1b[1mAST Chunking\x1b[0m");
+    println!("  Status:   \x1b[2mnot available\x1b[0m");
+
+    // ── Collections (qmd.ts:565-586, per-collection multi-line blocks) ───────────
     let cols = db::list_collections(&s.db)?;
     if cols.is_empty() {
-        println!("  No collections. Run 'qmd collection add .' to index markdown files.");
+        println!(
+            "\n\x1b[2mNo collections. Run 'rqmd collection add .' to index markdown files.\x1b[0m"
+        );
     } else {
-        println!("  Collections");
-        println!("    {:<30}  {:<8}  INCLUDED", "COLLECTION", "DOCS");
-        println!("    {}", "─".repeat(60));
+        println!("\n\x1b[1mCollections\x1b[0m");
         for col in &cols {
-            let count = db::list_documents(&s.db, Some(&col.name))?.len();
-            let incl = if col.include_by_default { "yes" } else { "no" };
-            println!("    {:<30}  {:<8}  {incl}", col.name, count);
+            let (count, last_mod) = db::collection_doc_stats(&s.db, &col.name).unwrap_or((0, None));
+            let last_mod_str = last_mod
+                .as_deref()
+                .map(fmt::format_time_ago)
+                .unwrap_or_else(|| "never".to_string());
+            println!(
+                "  \x1b[36m{}\x1b[0m \x1b[2m(rqmd://{}/)\x1b[0m",
+                col.name, col.name
+            );
+            println!("    \x1b[2mPattern:\x1b[0m  {}", col.pattern);
+            println!("    \x1b[2mFiles:\x1b[0m    {count} (updated {last_mod_str})");
+            if let Ok(Some(ctx)) = db::get_context_for_collection(&s.db, &col.name) {
+                let preview = if ctx.len() > 60 {
+                    format!("{}...", &ctx[..57])
+                } else {
+                    ctx.clone()
+                };
+                println!("    \x1b[2mContexts:\x1b[0m 1");
+                println!("      \x1b[2m/:\x1b[0m {preview}");
+            }
+        }
+
+        // ── Examples (qmd.ts:588-601, using rqmd command names) ─────────────────
+        println!("\n\x1b[1mExamples\x1b[0m");
+        println!("  \x1b[2m# List files in a collection\x1b[0m");
+        if let Some(first) = cols.first() {
+            println!("  rqmd ls {}", first.name);
+        }
+        println!("  \x1b[2m# Get a document\x1b[0m");
+        if let Some(first) = cols.first() {
+            println!("  rqmd get rqmd://{}/path/to/file.md", first.name);
+        }
+        println!("  \x1b[2m# Search within a collection\x1b[0m");
+        if let Some(first) = cols.first() {
+            println!("  rqmd search \"query\" -c {}", first.name);
         }
     }
+
+    // ── Models (qmd.ts:606-617, hf: repo → https://huggingface.co/<org/repo>) ───
+    println!("\n\x1b[1mModels\x1b[0m");
+    println!(
+        "  Embedding:   https://huggingface.co/{}",
+        rqmd_llm::DEFAULT_EMBED_REPO
+    );
+    println!(
+        "  Reranking:   https://huggingface.co/{}",
+        rqmd_llm::DEFAULT_RERANK_REPO
+    );
+    println!(
+        "  Generation:  https://huggingface.co/{}",
+        rqmd_llm::DEFAULT_GENERATE_REPO
+    );
+
+    // ── Tips (qmd.ts:621-654) ────────────────────────────────────────────────────
+    let mut tips: Vec<String> = Vec::new();
+
+    // Tip 1: collections missing context
+    let without_ctx: Vec<&str> = cols
+        .iter()
+        .filter(|c| {
+            db::get_context_for_collection(&s.db, &c.name)
+                .ok()
+                .flatten()
+                .is_none()
+        })
+        .map(|c| c.name.as_str())
+        .collect();
+    if !without_ctx.is_empty() {
+        let names = without_ctx[..without_ctx.len().min(3)].join(", ");
+        let more = if without_ctx.len() > 3 {
+            format!(" +{} more", without_ctx.len() - 3)
+        } else {
+            String::new()
+        };
+        tips.push(format!(
+            "Add context to collections for better search results: {names}{more}"
+        ));
+        tips.push(
+            "  \x1b[2mrqmd context add rqmd://<name>/ \"What this collection contains\"\x1b[0m"
+                .to_string(),
+        );
+    }
+
+    // Tip 2: collections missing update_command (only when >1 collection)
+    if cols.len() > 1 {
+        let without_update: Vec<&str> = cols
+            .iter()
+            .filter(|c| c.update_command.is_none())
+            .map(|c| c.name.as_str())
+            .collect();
+        if !without_update.is_empty() {
+            let names = without_update[..without_update.len().min(3)].join(", ");
+            let more = if without_update.len() > 3 {
+                format!(" +{} more", without_update.len() - 3)
+            } else {
+                String::new()
+            };
+            tips.push(format!(
+                "Add update commands to keep collections fresh: {names}{more}"
+            ));
+            tips.push(
+                "  \x1b[2mrqmd collection update-cmd <name> 'git pull --rebase --ff-only'\x1b[0m"
+                    .to_string(),
+            );
+        }
+    }
+
+    if !tips.is_empty() {
+        println!("\n\x1b[1mTips\x1b[0m");
+        for tip in &tips {
+            println!("  {tip}");
+        }
+    }
+
     Ok(())
 }
 
@@ -108,7 +232,7 @@ fn checkpoint(s: &mut rqmd_core::Store, pending: &mut Vec<PendingVectorMeta>) ->
 /// Lower = more frequent saves (better resume granularity), higher = faster.
 const CHECKPOINT_INTERVAL: usize = 50;
 
-pub fn run_embed(index_dir: &Path, collection: Option<&str>) -> Result<()> {
+pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> Result<()> {
     let cols = {
         let s = store::open_store_no_backend(index_dir)?;
         match collection {
@@ -125,8 +249,35 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    // Fast path: nothing to do.
-    {
+    // --rebuild: clear the vector index and re-embed everything from scratch.
+    // Delete the HNSW file and all content_vectors rows *before* opening the backend
+    // so that Store::open starts with a clean slate (next_vid=0, no DB vids).
+    if rebuild {
+        let hnsw_path = store::store_config(index_dir).hnsw_path;
+        if hnsw_path.exists() {
+            std::fs::remove_file(&hnsw_path)
+                .with_context(|| format!("remove hnsw file: {}", hnsw_path.display()))?;
+        }
+        let s = store::open_store_no_backend(index_dir)?;
+        match collection {
+            Some(c) => {
+                db::clear_vectors_for_collection(&s.db, c)
+                    .context("clear vectors for collection")?;
+            }
+            None => {
+                db::clear_all_vectors(&s.db).context("clear all vectors")?;
+            }
+        }
+        eprintln!(
+            "\x1b[33mrqmd: rebuild mode — cleared {} vectors; re-embedding from scratch\x1b[0m",
+            if collection.is_some() {
+                "collection"
+            } else {
+                "all"
+            }
+        );
+    } else {
+        // Fast path: nothing to do.
         let s = store::open_store_no_backend(index_dir)?;
         let needs_embed: i64 =
             s.db.query_row(
@@ -143,6 +294,22 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>) -> Result<()> {
     }
 
     let mut s = store::open_store_with_backend(index_dir)?;
+
+    // Advisory: detect when the HNSW index is smaller than what the DB references.
+    // next_vid reconciliation (Store::open) prevents the UNIQUE crash; this warning
+    // surfaces latent missing-vector gaps that only --rebuild can fully repair.
+    {
+        let hnsw_size = s.hnsw_size() as i64;
+        let db_vec_count: i64 =
+            s.db.query_row("SELECT COUNT(*) FROM content_vectors", [], |r| r.get(0))
+                .unwrap_or(0);
+        if hnsw_size < db_vec_count {
+            eprintln!(
+                "\x1b[33mrqmd: warning: vector index out of sync ({hnsw_size} indexed \
+                 vs {db_vec_count} expected); run `rqmd embed --rebuild` to repair.\x1b[0m"
+            );
+        }
+    }
     let is_tty = fmt::atty_stderr();
     let start = Instant::now();
 
@@ -152,16 +319,24 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>) -> Result<()> {
     // Buffer for pending vector metadata — flushed every CHECKPOINT_INTERVAL docs.
     let mut pending: Vec<PendingVectorMeta> = Vec::new();
 
+    // Track hashes queued in this run to prevent duplicate-hash drift: multiple documents
+    // with identical bodies share a hash, and embedding each copy adds a vector to HNSW
+    // while the DB ON-CONFLICT UPDATE overwrites the vid — orphaning the previous vid and
+    // widening the HNSW/DB gap on every run.  Deduping by hash here stops that at source.
+    let mut seen_hashes: HashSet<String> = HashSet::new();
+
     for col in &cols {
         // Collect all docs for this collection.  We embed only those whose content
         // hash has no entry in content_vectors (incremental / resumable).
         let docs = db::list_documents(&s.db, Some(&col.name))?;
         let total = docs.len();
 
-        // Collect only docs whose hash has no vector rows yet (incremental / resumable).
+        // Collect only docs whose hash has no vector rows yet (incremental / resumable)
+        // and whose hash has not already been queued in this run (duplicate-hash guard).
         let mut todo_indices: Vec<usize> = Vec::new();
         for (i, doc) in docs.iter().enumerate() {
-            if !db::hash_has_any_vector(&s.db, &doc.hash) {
+            if !db::hash_has_any_vector(&s.db, &doc.hash) && !seen_hashes.contains(&doc.hash) {
+                seen_hashes.insert(doc.hash.clone());
                 todo_indices.push(i);
             }
         }

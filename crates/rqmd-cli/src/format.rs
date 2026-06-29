@@ -122,6 +122,67 @@ pub fn format_eta(secs: f64) -> String {
     }
 }
 
+// ── Time-ago formatting (mirrors qmd's formatTimeAgo) ────────────────────────
+
+/// Parse a fixed-format RFC-3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) to Unix seconds.
+/// Returns None on parse failure (rather than crashing).
+fn parse_rfc3339_utc(ts: &str) -> Option<u64> {
+    // Expected format: "2024-06-29T12:34:56Z" (20 chars).
+    let ts = ts.trim_end_matches('Z');
+    let (date, time) = ts.split_once('T')?;
+    let mut dp = date.splitn(3, '-');
+    let y: u64 = dp.next()?.parse().ok()?;
+    let mo: u64 = dp.next()?.parse().ok()?;
+    let d: u64 = dp.next()?.parse().ok()?;
+    let mut tp = time.splitn(3, ':');
+    let h: u64 = tp.next()?.parse().ok()?;
+    let m: u64 = tp.next()?.parse().ok()?;
+    let s: u64 = tp.next().unwrap_or("0").parse().ok()?;
+
+    // Days from civil epoch (inverse of format_rfc3339 in rqmd-core).
+    let (y, mo) = if mo <= 2 {
+        (y - 1, mo + 9)
+    } else {
+        (y, mo - 3)
+    };
+    let era = y / 400;
+    let yoe = y % 400;
+    let doy = (153 * mo + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe;
+    let days = days.checked_sub(719_468)?;
+    Some(days * 86_400 + h * 3600 + m * 60 + s)
+}
+
+/// Format a stored RFC-3339 UTC timestamp as a human-readable "time ago" string.
+/// Mirrors qmd's `formatTimeAgo` (qmd.ts:369).
+pub fn format_time_ago(rfc3339: &str) -> String {
+    let then = match parse_rfc3339_utc(rfc3339) {
+        Some(s) => s,
+        None => return rfc3339.to_string(),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if now < then {
+        return "just now".to_string();
+    }
+    let diff = now - then;
+    if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86_400 {
+        format!("{}h ago", diff / 3600)
+    } else if diff < 7 * 86_400 {
+        format!("{}d ago", diff / 86_400)
+    } else {
+        // Fall back to the date portion of the timestamp
+        rfc3339.get(..10).unwrap_or(rfc3339).to_string()
+    }
+}
+
 // ── Term highlighting (mirrors qmd's highlightTerms) ──────────────────────────
 
 /// Highlight query terms (len ≥ 3) in bold+yellow when colors are enabled.
