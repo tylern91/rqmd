@@ -1,6 +1,11 @@
 # rqmd Changelog
 
 ## [0.1.2] - 2026-06-29
+### Added
+
+- `embed`: display bytes/s throughput in progress bar (matches qmd's `formatBytes/s` metric).
+  Progress line now shows: `bar% input · N chunks · D/T docs · X.X MB/s · ETA T`
+
 ### Fixed
 
 - `embed`: fix `UNIQUE constraint failed: content_vectors.vid` crash — reconcile
