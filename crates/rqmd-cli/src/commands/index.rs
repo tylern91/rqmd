@@ -481,20 +481,24 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
         let mut count = 0usize;
         let mut processed = 0usize;
 
-        for entry in WalkDir::new(dir)
+        // Pre-collect matching paths so we know the total before indexing begins,
+        // enabling "Indexing: N/total" progress (matching qmd's output).
+        let files: Vec<std::path::PathBuf> = WalkDir::new(dir)
             .follow_links(true)
             .into_iter()
             .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            if let Some(ref ext_filter) = ext {
-                if path.extension().and_then(|e| e.to_str()) != Some(ext_filter.as_str()) {
-                    continue;
+            .map(|e| e.into_path())
+            .filter(|p| p.is_file())
+            .filter(|p| match &ext {
+                Some(ext_filter) => {
+                    p.extension().and_then(|e| e.to_str()) == Some(ext_filter.as_str())
                 }
-            }
+                None => true,
+            })
+            .collect();
+        let total = files.len();
+
+        for path in &files {
             let rel = path
                 .strip_prefix(dir)
                 .unwrap_or(path)
@@ -514,7 +518,7 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
 
             processed += 1;
             if is_tty {
-                let line = format!("Indexing: {processed}/? {rel}");
+                let line = format!("Indexing: {processed}/{total} {rel}");
                 match fmt::term_width() {
                     Some(w) => eprint!("\r{}", fmt::fit_to_width(&line, w.saturating_sub(1))),
                     None => eprint!("\r{line}        "),

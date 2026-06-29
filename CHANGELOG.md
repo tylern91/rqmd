@@ -1,5 +1,16 @@
 # rqmd Changelog
 
+## [0.1.3] - 2026-06-29
+
+### Fixed
+
+- `update`: show real file total in progress (`Indexing: N/total`) by pre-collecting
+  matching paths before the index loop; previously showed a literal `?`.
+- `cli`: bump `rqmd-cli` crate version so `cargo install --path` without `--force`
+  correctly detects and installs new builds.
+
+---
+
 ## [0.1.2] - 2026-06-29
 ### Added
 
