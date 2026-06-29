@@ -170,12 +170,13 @@ impl LlamaCppBackend {
                 })?,
         };
 
-        let backend = LlamaBackend::init().context("LlamaBackend init")?;
-
-        // Route all native llama.cpp / ggml logs through tracing. The subscriber
-        // installed in main() filters by level (WARN by default; DEBUG with --verbose),
-        // so INFO chatter is suppressed without discarding real WARN/ERROR messages.
+        // Install the tracing→log bridge BEFORE LlamaBackend::init() so that
+        // ggml_metal_device_init (which runs during init) routes through the bridge
+        // instead of escaping to the default ggml stderr logger.  The setters are
+        // global and do not require an initialized backend.
         send_logs_to_tracing(LogOptions::default().with_logs_enabled(true));
+
+        let backend = LlamaBackend::init().context("LlamaBackend init")?;
 
         let embed_model = LlamaModel::load_from_file(
             &backend,
@@ -228,7 +229,11 @@ impl InferenceBackend for LlamaCppBackend {
             .new_context(&self._backend, self.embed_ctx_params.clone())
             .context("embed context")?;
         let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
-        batch.add_sequence(&tokens, 0, false)?;
+        // Mean pooling requires every token to be marked as an output so
+        // llama.cpp includes it in the pooled embedding.  Using false triggers
+        // "embeddings required but some input tokens were not marked as outputs
+        // -> overriding" at WARN level; using true is both correct and silent.
+        batch.add_sequence(&tokens, 0, true)?;
         ctx.encode(&mut batch).context("encode")?;
         let emb = ctx.embeddings_seq_ith(0).context("embedding extract")?;
         Ok(emb.to_vec())
@@ -249,7 +254,12 @@ impl InferenceBackend for LlamaCppBackend {
                 .str_to_token(&input, AddBos::Always)
                 .context("rerank tokenization")?;
             let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
-            batch.add_sequence(&tokens, 0, false)?;
+            // Rank pooling reads the last-token logit from embeddings_seq_ith, so the
+            // result is identical whether or not every token is an output.  Passing true
+            // avoids the "embeddings required but some input tokens were not marked as
+            // outputs -> overriding" WARN that llama.cpp emits when output_all=true and
+            // any token has logits=0.
+            batch.add_sequence(&tokens, 0, true)?;
             // Qwen3-Reranker is a causal decoder → decode(), not encode()
             ctx.decode(&mut batch).context("rerank decode")?;
             let score_slice = ctx.embeddings_seq_ith(0).context("rerank score extract")?;

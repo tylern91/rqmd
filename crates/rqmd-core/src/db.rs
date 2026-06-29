@@ -260,6 +260,18 @@ pub fn has_vector(conn: &Connection, hash: &str, seq: i64, fingerprint: &str) ->
     Ok(count > 0)
 }
 
+/// Check whether a content hash has at least one vector row (any seq, any fingerprint).
+/// Used by `rqmd embed` to skip already-embedded documents during an incremental run.
+pub fn hash_has_any_vector(conn: &Connection, hash: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM content_vectors WHERE hash=?1",
+        params![hash],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
 /// Insert or update a chunk's vector metadata.
 /// `vid` is the usearch key (caller assigns it from the HNSW index).
 #[allow(clippy::too_many_arguments)]
@@ -462,4 +474,18 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
         params![key, value],
     )?;
     Ok(())
+}
+
+/// Look up a collection's context string from the store_config table.
+///
+/// Context is stored by the `qmd context add` command with the key
+/// `context:rqmd://<collection>/`. Returns `None` if no context has been set.
+pub fn get_context_for_collection(conn: &Connection, collection: &str) -> Result<Option<String>> {
+    // Try the canonical `context:rqmd://<collection>/` key first, then the
+    // legacy `context:/` (global context) as a fallback.
+    let key = format!("context:rqmd://{collection}/");
+    if let Some(v) = get_config(conn, &key)? {
+        return Ok(Some(v));
+    }
+    get_config(conn, "context:/")
 }

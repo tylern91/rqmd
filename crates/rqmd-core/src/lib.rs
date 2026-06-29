@@ -6,5 +6,6 @@ pub mod rrf;
 pub mod store;
 pub mod types;
 
-pub use store::{Store, StoreConfig};
+pub use chunking::{extract_snippet, SnippetResult};
+pub use store::{PendingVectorMeta, Store, StoreConfig};
 pub use types::{Collection, Document, SearchResult};

@@ -198,12 +198,26 @@ fn main() -> Result<()> {
         std::env::set_var("RRQMD_ORT_EP", ep);
     }
 
-    // Always install a tracing subscriber so llama.cpp WARN/ERROR messages surface by
-    // default. INFO/DEBUG are suppressed unless --verbose or RUST_LOG is set. This is
-    // the right default: silent INFO chatter gone, but real problems (WARN+) still show.
+    // Install a tracing subscriber.  Default behaviour mirrors qmd: native llama.cpp /
+    // ggml logs are silent unless the user explicitly opts in via --verbose or RUST_LOG.
+    //
+    // Default filter (no --verbose, no RUST_LOG):
+    //   warn,llama-cpp-2=error,ggml=error
+    //
+    // Rationale: benign WARNs from llama.cpp ("control-looking token", "n_ctx_seq <
+    // n_ctx_train") have no actionable fix; hiding them keeps the output as clean as the
+    // original TypeScript qmd.  ERROR-level messages from those crates still surface.
+    // --verbose (or RUST_LOG) restores full output.
     let rust_log_set = std::env::var("RUST_LOG").is_ok();
     if !rust_log_set {
-        std::env::set_var("RUST_LOG", if cli.verbose { "debug" } else { "warn" });
+        std::env::set_var(
+            "RUST_LOG",
+            if cli.verbose {
+                "debug"
+            } else {
+                "warn,llama-cpp-2=error,ggml=error"
+            },
+        );
     }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
