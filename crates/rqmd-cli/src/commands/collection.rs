@@ -98,10 +98,8 @@ fn add(index_dir: &Path, dir: &str, name: Option<&str>, mask: Option<&str>) -> R
 
         if is_tty {
             let line = format!("  Indexing {} ({})", rel_path, count + 1);
-            match fmt::term_width() {
-                Some(w) => eprint!("\r{}", fmt::fit_to_width(&line, w.saturating_sub(1))),
-                None => eprint!("\r{line} ..."),
-            }
+            let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
+            eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
         }
         match s.index_document_fts_only(&collection_name, &rel_path, &title, &body) {
             Ok(_) => count += 1,

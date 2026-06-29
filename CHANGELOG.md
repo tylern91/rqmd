@@ -6,6 +6,14 @@
 
 - `update`: show real file total in progress (`Indexing: N/total`) by pre-collecting
   matching paths before the index loop; previously showed a literal `?`.
+- `update`, `embed`, `collection add`: fix `term_width()` on Apple Silicon — `ioctl`
+  must be declared variadic (`...`) to match the arm64 AAPCS64 calling convention;
+  the non-variadic declaration put the `Winsize*` argument in the wrong register,
+  causing `term_width()` to always return `None` and the width-clamp to never engage.
+  Progress lines now overwrite in place instead of spawning a new line per update.
+- `update`, `embed`, `collection add`: harden progress rendering by emitting
+  `\r\x1b[2K` (erase-line) before each update and using `unwrap_or(80)` as fallback
+  width so a width-detection miss can no longer cause line wrap.
 - `cli`: bump `rqmd-cli` crate version so `cargo install --path` without `--force`
   correctly detects and installs new builds.
 

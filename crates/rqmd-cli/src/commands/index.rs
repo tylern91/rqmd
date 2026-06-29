@@ -380,10 +380,8 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
                     "\x1b[36m{bar}\x1b[0m \x1b[1m{pct_int:>3}% input\x1b[0m \
                      \x1b[2m{chunks_so_far} chunks · {done}/{todo_total} docs · {throughput_str} · ETA {eta_str}\x1b[0m"
                 );
-                match fmt::term_width() {
-                    Some(w) => eprint!("\r{}", fmt::fit_to_width(&line, w.saturating_sub(1))),
-                    None => eprint!("\r{line}   "),
-                }
+                let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
+                eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
             }
 
             // Embed and stage — do NOT write to DB yet.
@@ -410,10 +408,8 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     if is_tty {
         let bar = fmt::render_progress_bar(100.0, 30);
         let line = format!("\x1b[32m{bar}\x1b[0m \x1b[1m100% input\x1b[0m");
-        match fmt::term_width() {
-            Some(w) => eprint!("\r{}", fmt::fit_to_width(&line, w.saturating_sub(1))),
-            None => eprint!("\r{line}                                    "),
-        }
+        let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
+        eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
     }
 
     // Final checkpoint for any remaining pending rows.
@@ -519,10 +515,8 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             processed += 1;
             if is_tty {
                 let line = format!("Indexing: {processed}/{total} {rel}");
-                match fmt::term_width() {
-                    Some(w) => eprint!("\r{}", fmt::fit_to_width(&line, w.saturating_sub(1))),
-                    None => eprint!("\r{line}        "),
-                }
+                let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
+                eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
             }
 
             if let Err(e) = s.index_document_fts_only(&col.name, &rel, &title, &body) {

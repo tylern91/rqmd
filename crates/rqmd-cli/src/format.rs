@@ -52,7 +52,15 @@ pub fn term_width() -> Option<usize> {
         ws_ypixel: u16,
     }
     extern "C" {
-        fn ioctl(fd: i32, request: std::os::raw::c_ulong, argp: *mut Winsize) -> i32;
+        // ioctl is variadic (int ioctl(int, unsigned long, ...)).
+        // On arm64/AAPCS64 variadic and fixed args use different calling conventions,
+        // so the declaration MUST use `...` or the third argument lands in the wrong
+        // register and the ioctl returns garbage / leaves ws_col = 0 on Apple Silicon.
+        fn ioctl(
+            fd: std::os::raw::c_int,
+            request: std::os::raw::c_ulong,
+            ...
+        ) -> std::os::raw::c_int;
     }
     // TIOCGWINSZ constant differs by platform.
     #[cfg(target_os = "macos")]
