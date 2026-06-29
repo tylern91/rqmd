@@ -376,10 +376,14 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
                     (".../s".to_string(), "...".to_string())
                 };
                 let chunks_so_far = total_new_chunks + pending.len();
-                eprint!(
-                    "\r\x1b[36m{bar}\x1b[0m \x1b[1m{pct_int:>3}% input\x1b[0m \
-                     \x1b[2m{chunks_so_far} chunks · {done}/{todo_total} docs · {throughput_str} · ETA {eta_str}\x1b[0m   "
+                let line = format!(
+                    "\x1b[36m{bar}\x1b[0m \x1b[1m{pct_int:>3}% input\x1b[0m \
+                     \x1b[2m{chunks_so_far} chunks · {done}/{todo_total} docs · {throughput_str} · ETA {eta_str}\x1b[0m"
                 );
+                match fmt::term_width() {
+                    Some(w) => eprint!("\r{}", fmt::fit_to_width(&line, w.saturating_sub(1))),
+                    None => eprint!("\r{line}   "),
+                }
             }
 
             // Embed and stage — do NOT write to DB yet.
@@ -405,9 +409,11 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     // Final 100% bar before the summary line.
     if is_tty {
         let bar = fmt::render_progress_bar(100.0, 30);
-        eprint!(
-            "\r\x1b[32m{bar}\x1b[0m \x1b[1m100% input\x1b[0m                                    "
-        );
+        let line = format!("\x1b[32m{bar}\x1b[0m \x1b[1m100% input\x1b[0m");
+        match fmt::term_width() {
+            Some(w) => eprint!("\r{}", fmt::fit_to_width(&line, w.saturating_sub(1))),
+            None => eprint!("\r{line}                                    "),
+        }
     }
 
     // Final checkpoint for any remaining pending rows.
@@ -508,7 +514,11 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
 
             processed += 1;
             if is_tty {
-                eprint!("\rIndexing: {processed}/? {rel}        ");
+                let line = format!("Indexing: {processed}/? {rel}");
+                match fmt::term_width() {
+                    Some(w) => eprint!("\r{}", fmt::fit_to_width(&line, w.saturating_sub(1))),
+                    None => eprint!("\r{line}        "),
+                }
             }
 
             if let Err(e) = s.index_document_fts_only(&col.name, &rel, &title, &body) {
@@ -540,7 +550,7 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             .unwrap_or(0);
         if needs_embed > 0 {
             println!(
-                "\nRun 'qmd embed' to update embeddings ({needs_embed} unique hashes need vectors)"
+                "\nRun 'rqmd embed' to update embeddings ({needs_embed} unique hashes need vectors)"
             );
         }
     }

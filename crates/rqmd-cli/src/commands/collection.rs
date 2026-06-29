@@ -4,7 +4,7 @@ use walkdir::WalkDir;
 
 use rqmd_core::{db, Collection};
 
-use crate::{store, CollectionCommand};
+use crate::{format as fmt, store, CollectionCommand};
 
 pub fn run(index_dir: &Path, cmd: CollectionCommand) -> Result<()> {
     match cmd {
@@ -44,6 +44,7 @@ fn add(index_dir: &Path, dir: &str, name: Option<&str>, mask: Option<&str>) -> R
     );
 
     let mut s = store::open_store_no_backend(index_dir)?;
+    let is_tty = fmt::atty_stderr();
 
     // Register the collection
     let col = Collection {
@@ -95,7 +96,13 @@ fn add(index_dir: &Path, dir: &str, name: Option<&str>, mask: Option<&str>) -> R
             .trim()
             .to_string();
 
-        print!("\r  Indexing {} ({}) ...", rel_path, count + 1);
+        if is_tty {
+            let line = format!("  Indexing {} ({})", rel_path, count + 1);
+            match fmt::term_width() {
+                Some(w) => eprint!("\r{}", fmt::fit_to_width(&line, w.saturating_sub(1))),
+                None => eprint!("\r{line} ..."),
+            }
+        }
         match s.index_document_fts_only(&collection_name, &rel_path, &title, &body) {
             Ok(_) => count += 1,
             Err(e) => {
@@ -106,8 +113,12 @@ fn add(index_dir: &Path, dir: &str, name: Option<&str>, mask: Option<&str>) -> R
     }
 
     s.flush()?;
+    // Clear the progress line before printing the summary.
+    if is_tty {
+        eprint!("\r{}\r", " ".repeat(fmt::term_width().unwrap_or(80)));
+    }
     println!(
-        "\r  Indexed {count} document(s){}.",
+        "  Indexed {count} document(s){}.",
         if errors > 0 {
             format!(", {errors} error(s)")
         } else {

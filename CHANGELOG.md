@@ -8,6 +8,10 @@
 
 ### Fixed
 
+- `embed`, `update`, `collection add`: clamp progress lines to terminal width via
+  `term_width()` / `fit_to_width()` helpers in `format.rs`; prevents multiline smear
+  when paths or stats exceed the terminal width. Progress is suppressed when not a TTY.
+- `update`: fix advisory message branding — was `'qmd embed'`, now `'rqmd embed'`.
 - `embed`: fix `UNIQUE constraint failed: content_vectors.vid` crash — reconcile
   HNSW `next_vid` with `MAX(content_vectors.vid)` in SQLite on startup; add in-run
   hash dedup to stop duplicate-hash drift; add `--rebuild` flag and divergence advisory.

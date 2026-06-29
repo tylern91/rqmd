@@ -40,6 +40,80 @@ fn libc_isatty(_fd: i32) -> bool {
     false
 }
 
+/// Terminal column count for stderr, via TIOCGWINSZ ioctl.
+/// Returns None if not a tty or the syscall fails.
+#[cfg(unix)]
+pub fn term_width() -> Option<usize> {
+    #[repr(C)]
+    struct Winsize {
+        ws_row: u16,
+        ws_col: u16,
+        ws_xpixel: u16,
+        ws_ypixel: u16,
+    }
+    extern "C" {
+        fn ioctl(fd: i32, request: std::os::raw::c_ulong, argp: *mut Winsize) -> i32;
+    }
+    // TIOCGWINSZ constant differs by platform.
+    #[cfg(target_os = "macos")]
+    const TIOCGWINSZ: std::os::raw::c_ulong = 0x4008_7468;
+    #[cfg(not(target_os = "macos"))]
+    const TIOCGWINSZ: std::os::raw::c_ulong = 0x5413;
+    let mut ws = Winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let rc = unsafe { ioctl(2, TIOCGWINSZ, &mut ws as *mut Winsize) };
+    if rc == 0 && ws.ws_col > 0 {
+        Some(ws.ws_col as usize)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+pub fn term_width() -> Option<usize> {
+    None
+}
+
+/// Fit `s` to exactly `width` visible columns.
+///
+/// Truncates if longer, space-pads if shorter (so a shorter new line erases a
+/// longer previous one).  ANSI SGR escapes (`\x1b[…m`) are copied through and
+/// do NOT count toward width.  A trailing reset is appended so a mid-color
+/// truncation cannot bleed.  Char-based — no byte slicing, UTF-8 safe.
+pub fn fit_to_width(s: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut visible = 0usize;
+    let mut in_escape = false;
+    for c in s.chars() {
+        if in_escape {
+            out.push(c);
+            if c == 'm' {
+                in_escape = false;
+            }
+            continue;
+        }
+        if c == '\x1b' {
+            in_escape = true;
+            out.push(c);
+            continue;
+        }
+        if visible >= width {
+            break;
+        }
+        out.push(c);
+        visible += 1;
+    }
+    out.push_str("\x1b[0m");
+    if visible < width {
+        out.push_str(&" ".repeat(width - visible));
+    }
+    out
+}
+
 fn b(s: &str) -> String {
     if ansi_enabled() {
         format!("{BOLD}{s}{RESET}")
