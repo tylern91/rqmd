@@ -21,6 +21,10 @@ struct Cli {
     #[arg(long, env = "RRQMD_ORT_EP", global = true)]
     ort_ep: Option<String>,
 
+    /// Show native model-loading and inference logs (also enabled by RUST_LOG)
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -192,6 +196,23 @@ fn main() -> Result<()> {
     }
     if let Some(ep) = &cli.ort_ep {
         std::env::set_var("RRQMD_ORT_EP", ep);
+    }
+
+    // Always install a tracing subscriber so llama.cpp WARN/ERROR messages surface by
+    // default. INFO/DEBUG are suppressed unless --verbose or RUST_LOG is set. This is
+    // the right default: silent INFO chatter gone, but real problems (WARN+) still show.
+    let rust_log_set = std::env::var("RUST_LOG").is_ok();
+    if !rust_log_set {
+        std::env::set_var("RUST_LOG", if cli.verbose { "debug" } else { "warn" });
+    }
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+    if cli.verbose || rust_log_set {
+        // Signal to library crates (e.g. rqmd-llm) that verbose mode is on so they
+        // can adjust their own native-library log levels accordingly.
+        std::env::set_var("RRQMD_VERBOSE", "1");
     }
 
     let index_dir = store::resolve_index_dir(cli.index_dir.as_deref())?;

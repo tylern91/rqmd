@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use walkdir::WalkDir;
 
@@ -80,15 +81,28 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>) -> Result<()> {
         }
 
         let docs = db::list_documents(&s.db, Some(&col.name))?;
+        let pb = ProgressBar::new(docs.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "  {spinner:.cyan} [{bar:30.cyan/blue}] {pos}/{len} {msg}",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
+
         let mut count = 0usize;
         for doc in &docs {
+            pb.set_message(doc.path.clone());
             let body = db::get_content(&s.db, &doc.hash)?.unwrap_or_default();
             if body.is_empty() {
+                pb.inc(1);
                 continue;
             }
             s.index_document(&doc.collection, &doc.path, &doc.title, &body)?;
             count += 1;
+            pb.inc(1);
         }
+        pb.finish_and_clear();
         eprintln!("  Embedded {count} doc(s) in '{}'.", col.name);
     }
 
@@ -114,7 +128,10 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let mut s = store::open_store_with_backend(index_dir)?;
+    // Update refreshes BM25 metadata only — no vectors. Run `rqmd embed` afterward
+    // to regenerate embeddings. Using the FTS-only store avoids loading the inference
+    // backend and prevents content_vectors.vid UNIQUE conflicts on re-indexing.
+    let mut s = store::open_store_no_backend(index_dir)?;
 
     for col in &cols {
         eprintln!("Updating collection '{}'...", col.name);
@@ -163,7 +180,7 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
                 .trim_start_matches('#')
                 .trim()
                 .to_string();
-            if let Err(e) = s.index_document(&col.name, &rel, &title, &body) {
+            if let Err(e) = s.index_document_fts_only(&col.name, &rel, &title, &body) {
                 eprintln!("  WARN: {rel}: {e:#}");
             } else {
                 count += 1;

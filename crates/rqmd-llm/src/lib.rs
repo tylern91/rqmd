@@ -23,6 +23,7 @@ use llama_cpp_2::{
     llama_batch::LlamaBatch,
     model::{params::LlamaModelParams, AddBos, LlamaModel},
     sampling::LlamaSampler,
+    send_logs_to_tracing, LogOptions,
 };
 use std::{num::NonZeroU32, path::PathBuf};
 
@@ -170,6 +171,11 @@ impl LlamaCppBackend {
         };
 
         let backend = LlamaBackend::init().context("LlamaBackend init")?;
+
+        // Route all native llama.cpp / ggml logs through tracing. The subscriber
+        // installed in main() filters by level (WARN by default; DEBUG with --verbose),
+        // so INFO chatter is suppressed without discarding real WARN/ERROR messages.
+        send_logs_to_tracing(LogOptions::default().with_logs_enabled(true));
 
         let embed_model = LlamaModel::load_from_file(
             &backend,
@@ -350,10 +356,10 @@ impl BackendKind {
 pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
     match kind {
         BackendKind::Llama => {
-            eprintln!("Loading LlamaCpp backend (downloads GGUF models on first run)...");
+            tracing::info!("Loading LlamaCpp backend (downloads GGUF models on first run)...");
             let b =
                 LlamaCppBackend::new(LlamaCppConfig::default()).context("LlamaCpp backend init")?;
-            eprintln!("LlamaCpp backend ready.");
+            tracing::info!("LlamaCpp backend ready.");
             Ok(Box::new(b))
         }
 
@@ -364,14 +370,14 @@ pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
                 .ok()
                 .and_then(|s| OrtEp::from_str(&s))
                 .unwrap_or(OrtEp::Auto);
-            eprintln!("Loading ORT backend (ep={ep:?}, downloads ONNX model on first run)...");
+            tracing::info!("Loading ORT backend (ep={ep:?}, downloads ONNX model on first run)...");
             let b = OrtBackend::new(OrtConfig {
                 ep,
                 ..OrtConfig::default()
             })
             .context("ORT backend init")?;
             let name = b.embed_model_name().to_string();
-            eprintln!("ORT backend ready ({name})");
+            tracing::info!("ORT backend ready ({name})");
             Ok(Box::new(b))
         }
     }

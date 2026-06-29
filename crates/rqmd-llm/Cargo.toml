@@ -14,6 +14,7 @@ anyhow = "1"
 hf-hub = { version = "0.5", features = ["tokio"] }
 llama-cpp-2 = { version = "0.1.150", features = ["metal", "sampler"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1"
 
 # OrtBackend (optional, enabled via ort-backend feature)
 ort        = { version = "=2.0.0-rc.12", optional = true, features = ["coreml"] }

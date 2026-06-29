@@ -196,6 +196,26 @@ fn best_break_in_window(
         .unwrap_or(window_end)
 }
 
+// ── Char-boundary helpers ─────────────────────────────────────────────────────
+
+/// Advance `pos` to the next UTF-8 char boundary (or text.len()).
+fn snap_char_boundary_forward(text: &str, pos: usize) -> usize {
+    let mut p = pos.min(text.len());
+    while p < text.len() && !text.is_char_boundary(p) {
+        p += 1;
+    }
+    p
+}
+
+/// Retreat `pos` to the previous UTF-8 char boundary (or 0).
+fn snap_char_boundary_backward(text: &str, pos: usize) -> usize {
+    let mut p = pos.min(text.len());
+    while p > 0 && !text.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Split `text` into overlapping chunks of at most CHUNK_SIZE_CHARS characters,
@@ -231,14 +251,19 @@ pub fn chunk_document(text: &str) -> Vec<Chunk> {
 
         let end = break_at.max(ideal_end); // never go backwards
         let end = end.min(text.len());
+        // Snap forward to the next valid UTF-8 char boundary. CHUNK_SIZE_CHARS is in
+        // bytes (chars ≈ bytes for ASCII, but multi-byte chars like em-dash span 2-3
+        // bytes), so ideal_end may land mid-char; regex break_at is always on a
+        // boundary, but ideal_end wins when break_at < ideal_end.
+        let end = snap_char_boundary_forward(text, end);
 
         chunks.push(Chunk {
             text: text[start..end].to_string(),
             pos: start,
         });
 
-        // Advance with overlap
-        start = end.saturating_sub(CHUNK_OVERLAP_CHARS);
+        // Advance with overlap; snap backward to keep start on a char boundary.
+        start = snap_char_boundary_backward(text, end.saturating_sub(CHUNK_OVERLAP_CHARS));
         // Ensure we make progress
         if start >= end {
             start = end;
