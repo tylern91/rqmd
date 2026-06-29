@@ -260,6 +260,35 @@ pub fn has_vector(conn: &Connection, hash: &str, seq: i64, fingerprint: &str) ->
     Ok(count > 0)
 }
 
+/// Check whether a content hash has at least one vector row (any seq, any fingerprint).
+/// Used by `rqmd embed` to skip already-embedded documents during an incremental run.
+pub fn hash_has_any_vector(conn: &Connection, hash: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM content_vectors WHERE hash=?1",
+        params![hash],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+/// Return the highest vid currently stored in content_vectors, or None if the table is empty.
+/// Used to reconcile the HNSW allocator's `next_vid` against the DB after load so that
+/// freshly-issued vids never collide with existing rows.
+pub fn max_vector_vid(conn: &Connection) -> Result<Option<u64>> {
+    let maybe: Option<i64> = conn
+        .query_row("SELECT MAX(vid) FROM content_vectors", [], |row| row.get(0))
+        .context("max_vector_vid")?;
+    Ok(maybe.map(|v| v as u64))
+}
+
+/// Remove all content_vectors rows — used by `rqmd embed --rebuild` to reset the
+/// entire vector index before re-embedding from scratch.
+pub fn clear_all_vectors(conn: &Connection) -> Result<usize> {
+    let n = conn.execute("DELETE FROM content_vectors", [])?;
+    Ok(n)
+}
+
 /// Insert or update a chunk's vector metadata.
 /// `vid` is the usearch key (caller assigns it from the HNSW index).
 #[allow(clippy::too_many_arguments)]
@@ -397,6 +426,17 @@ pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>> {
         .collect()
 }
 
+/// Return (doc_count, last_modified_rfc3339) for a collection's active documents.
+/// `last_modified` is None when the collection has no active documents.
+pub fn collection_doc_stats(conn: &Connection, collection: &str) -> Result<(i64, Option<String>)> {
+    let (count, latest): (i64, Option<String>) = conn.query_row(
+        "SELECT COUNT(*), MAX(modified_at) FROM documents WHERE collection=?1 AND active=1",
+        params![collection],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((count, latest))
+}
+
 pub fn delete_collection(conn: &Connection, name: &str) -> Result<()> {
     conn.execute("DELETE FROM store_collections WHERE name=?1", params![name])?;
     Ok(())
@@ -462,4 +502,18 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
         params![key, value],
     )?;
     Ok(())
+}
+
+/// Look up a collection's context string from the store_config table.
+///
+/// Context is stored by the `qmd context add` command with the key
+/// `context:rqmd://<collection>/`. Returns `None` if no context has been set.
+pub fn get_context_for_collection(conn: &Connection, collection: &str) -> Result<Option<String>> {
+    // Try the canonical `context:rqmd://<collection>/` key first, then the
+    // legacy `context:/` (global context) as a fallback.
+    let key = format!("context:rqmd://{collection}/");
+    if let Some(v) = get_config(conn, &key)? {
+        return Ok(Some(v));
+    }
+    get_config(conn, "context:/")
 }

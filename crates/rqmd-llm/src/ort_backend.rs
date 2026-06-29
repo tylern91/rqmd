@@ -111,6 +111,14 @@ impl OrtBackend {
 
         let ep = resolve_ep(config.ep);
 
+        // Cap ORT native logging. Default: Warning (suppress Info/Verbose model-loader
+        // noise). With RRQMD_VERBOSE=1 (set by --verbose), allow Verbose output.
+        let ort_log_level = if std::env::var("RRQMD_VERBOSE").is_ok() {
+            ort::logging::LogLevel::Verbose
+        } else {
+            ort::logging::LogLevel::Warning
+        };
+
         // ort builder returns Error<SessionBuilder> (not std::error::Error), so use map_err
         let session = ort::session::Session::builder()
             .map_err(|e| anyhow::anyhow!("ORT session builder: {e:?}"))?
@@ -118,6 +126,8 @@ impl OrtBackend {
             .map_err(|e| anyhow::anyhow!("ORT EP registration: {e:?}"))?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
             .map_err(|e| anyhow::anyhow!("ORT opt level: {e:?}"))?
+            .with_log_level(ort_log_level)
+            .map_err(|e| anyhow::anyhow!("ORT log level: {e:?}"))?
             .commit_from_file(&model_path)
             .context("ORT session load")?;
 

@@ -1,5 +1,34 @@
 # rqmd Changelog
 
+## [0.1.2] - 2026-06-29
+### Added
+
+- `embed`: display bytes/s throughput in progress bar (matches qmd's `formatBytes/s` metric).
+  Progress line now shows: `bar% input · N chunks · D/T docs · X.X MB/s · ETA T`
+
+### Fixed
+
+- `embed`, `update`, `collection add`: clamp progress lines to terminal width via
+  `term_width()` / `fit_to_width()` helpers in `format.rs`; prevents multiline smear
+  when paths or stats exceed the terminal width. Progress is suppressed when not a TTY.
+- `update`: fix advisory message branding — was `'qmd embed'`, now `'rqmd embed'`.
+- `embed`: fix `UNIQUE constraint failed: content_vectors.vid` crash — reconcile
+  HNSW `next_vid` with `MAX(content_vectors.vid)` in SQLite on startup; add in-run
+  hash dedup to stop duplicate-hash drift; add `--rebuild` flag and divergence advisory.
+- `embed`: guard embed/rerank token overflow with truncation to context window
+  (`EMBED_CONTEXT_SIZE - 4` tokens); prevents `GGML_ASSERT n_ubatch >= n_tokens` abort.
+- `fts`: normalize Tantivy BM25 score to `[0,1)` using `s/(1+s)` squash (mirrors
+  qmd) so `rqmd search` never displays scores above 100%.
+- `llm`: suppress llama.cpp INFO/WARN noise; send logs to tracing subscriber instead
+  of stderr; add `add_sequence(false)` for Mean-pooling encoders.
+- `embed`: make embed resumable across interrupts; fix `update` UNIQUE constraint;
+  fix char-boundary panic on multi-byte UTF-8 (em dash, CJK) in chunker.
+- `status`: rewrite `rqmd status` to match qmd's layout — single `Size:` line,
+  per-collection multi-line blocks, `Updated`/`AST Chunking`/`Examples`/`Models`/`Tips`
+  sections; correct `rqmd` branding throughout.
+
+---
+
 ## [0.1.1] — 2026-06-29
 
 ### Fixed

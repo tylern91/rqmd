@@ -180,7 +180,14 @@ impl FtsIndex {
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
 
-            results.push((filepath, doc_id, score));
+            // Normalize Tantivy's raw BM25 score (positive, unbounded) to [0,1) using
+            // the same monotonic squash qmd applies at its searchFTS boundary:
+            //   score = |bm25| / (1 + |bm25|)
+            // (qmd src/store.ts:3620 — "Monotonic and query-independent — no per-query
+            // normalization needed").  Tantivy scores are positive (higher = better), so
+            // |x| = x here.  This ensures format_score never renders > 100%.
+            let norm = score / (1.0 + score);
+            results.push((filepath, doc_id, norm));
         }
 
         Ok(results)

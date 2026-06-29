@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     chunking::chunk_document,
     db::{
-        self, content_hash, doc_for_vid, docid_from_hash, get_content, open_db, upsert_content,
-        upsert_document, upsert_vector_meta,
+        self, content_hash, doc_for_vid, docid_from_hash, get_content, get_context_for_collection,
+        open_db, upsert_content, upsert_document, upsert_vector_meta,
     },
     fts::FtsIndex,
     hnsw::VectorIndex,
@@ -27,10 +27,12 @@ use crate::{
 /// Candidate pool size for reranking.
 const RERANK_CANDIDATE_LIMIT: usize = 20;
 
-/// BM25 strong-signal threshold — if the top result exceeds this and the gap
-/// to second place is ≥ STRONG_SIGNAL_MIN_GAP, skip LLM query expansion.
-const STRONG_SIGNAL_MIN_SCORE: f32 = 8.0;
-const STRONG_SIGNAL_MIN_GAP: f32 = 3.0;
+/// BM25 strong-signal threshold — if the top normalized BM25 score exceeds this
+/// and the gap to second place is ≥ STRONG_SIGNAL_MIN_GAP, skip LLM query expansion.
+/// Values match qmd (src/store.ts:330-331); they operate on the [0,1) normalized score
+/// produced by `Fts::search_fts` (raw Tantivy BM25 squashed via s/(1+s)).
+const STRONG_SIGNAL_MIN_SCORE: f32 = 0.85; // qmd STRONG_SIGNAL_MIN_SCORE
+const STRONG_SIGNAL_MIN_GAP: f32 = 0.15; // qmd STRONG_SIGNAL_MIN_GAP
 
 /// Score blend weights for the final result: rerank_score * HI + rrf_score * LO.
 const BLEND_HI: f32 = 0.75;
@@ -52,6 +54,20 @@ pub struct StoreConfig {
     pub hnsw_path: PathBuf,
 }
 
+/// Per-chunk embedding metadata buffered by `embed_document_chunks`.
+/// Written to `content_vectors` only after the HNSW file has been flushed to disk.
+#[derive(Debug)]
+pub struct PendingVectorMeta {
+    pub hash: String,
+    pub seq: i64,
+    pub pos: i64,
+    pub model: String,
+    pub fingerprint: String,
+    pub total_chunks: i64,
+    pub vid: u64,
+    pub now: String,
+}
+
 impl Store {
     /// Open or create a store at the given paths.
     pub fn open(config: StoreConfig, backend: Box<dyn InferenceBackend>) -> Result<Self> {
@@ -61,7 +77,7 @@ impl Store {
         // Load HNSW index from disk if it exists, otherwise start fresh.
         // A failed load (corrupt file) emits a warning and starts empty — callers
         // must run `rqmd embed` to rebuild before vector search returns results.
-        let hnsw = if config.hnsw_path.exists() {
+        let mut hnsw = if config.hnsw_path.exists() {
             match VectorIndex::load(&config.hnsw_path) {
                 Ok(idx) => idx,
                 Err(e) => {
@@ -77,6 +93,14 @@ impl Store {
         } else {
             VectorIndex::new()?
         };
+
+        // Reconcile the HNSW allocator's next_vid against MAX(content_vectors.vid) in SQLite.
+        // This guards against the case where the HNSW file and the DB diverge (corrupt/short
+        // load falls back to next_vid=0, orphan-vid drift, etc.) — without this, embed()
+        // re-issues vids that existing DB rows already hold, causing a UNIQUE constraint abort.
+        if let Some(max_vid) = db::max_vector_vid(&db)? {
+            hnsw.ensure_next_vid_at_least(max_vid + 1);
+        }
 
         Ok(Self {
             db,
@@ -159,6 +183,54 @@ impl Store {
         Ok(())
     }
 
+    /// Chunk and embed a document's body, add vectors to the in-memory HNSW index,
+    /// and return the metadata needed to persist them (but do NOT write to the DB).
+    ///
+    /// Used by `rqmd embed` for incremental, resumable embedding:
+    ///   1. Call this for each un-embedded doc — accumulates vids in HNSW memory.
+    ///   2. Every N docs (and at the end) call `flush()` to persist HNSW to disk.
+    ///   3. Only after flush succeeds, write the returned `PendingVectorMeta` rows to
+    ///      content_vectors in one transaction.
+    ///
+    /// This ordering guarantees that an interrupt either leaves both the HNSW entry
+    /// and the DB row present (safe to skip on resume), or neither (re-embed on next
+    /// run).  It prevents the orphaned-vid problem that previously forced a full clear.
+    pub fn embed_document_chunks(
+        &mut self,
+        hash: &str,
+        body: &str,
+    ) -> Result<Vec<PendingVectorMeta>> {
+        let embed_model = self.backend.embed_model_name().to_string();
+        let fingerprint = embed_fingerprint(&embed_model);
+        let chunks = chunk_document(body);
+        let total = chunks.len();
+        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+        let embeddings = self.backend.embed_batch(&texts).context("embed batch")?;
+        let now = rfc3339_now();
+
+        let mut pending = Vec::with_capacity(total);
+        for (seq, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
+            let vid = self.hnsw.add(embedding).context("hnsw add")?;
+            pending.push(PendingVectorMeta {
+                hash: hash.to_string(),
+                seq: seq as i64,
+                pos: chunk.pos as i64,
+                model: embed_model.clone(),
+                fingerprint: fingerprint.clone(),
+                total_chunks: total as i64,
+                vid,
+                now: now.clone(),
+            });
+        }
+        Ok(pending)
+    }
+
+    /// Number of vectors currently in the HNSW index (mirrors the usearch file's entry count).
+    /// Used by `rqmd embed` to detect HNSW/DB divergence.
+    pub fn hnsw_size(&self) -> usize {
+        self.hnsw.size()
+    }
+
     /// Commit FTS writes and persist the HNSW index to disk.
     pub fn flush(&mut self) -> Result<()> {
         self.fts.commit().context("fts commit")?;
@@ -206,6 +278,9 @@ impl Store {
                     .map(|c| c.text)
                     .unwrap_or_default();
                 let docid = docid_from_hash(&doc.hash).to_string();
+                let ctx = get_context_for_collection(&self.db, &doc.collection)
+                    .ok()
+                    .flatten();
                 results.push(SearchResult {
                     file: format!("rqmd://{filepath}"),
                     title: doc.title.clone(),
@@ -216,6 +291,7 @@ impl Store {
                     docid,
                     collection: doc.collection,
                     path: doc.path,
+                    context: ctx,
                 });
                 if results.len() >= limit {
                     break;
@@ -325,6 +401,9 @@ impl Store {
 
             let (collection_name, rel_path) = split_filepath(&cand.filepath);
             let docid = docid_from_hash(&hash).to_string();
+            let ctx = get_context_for_collection(&self.db, collection_name)
+                .ok()
+                .flatten();
 
             final_results.push(SearchResult {
                 file: format!("rqmd://{}", cand.filepath),
@@ -336,6 +415,7 @@ impl Store {
                 docid,
                 collection: collection_name.to_string(),
                 path: rel_path.to_string(),
+                context: ctx,
             });
         }
 
@@ -371,6 +451,7 @@ impl Store {
                 .map(|c| c.text)
                 .unwrap_or_default();
             let (coll, path) = split_filepath(&filepath);
+            let ctx = get_context_for_collection(&self.db, coll).ok().flatten();
             results.push(SearchResult {
                 file: format!("rqmd://{filepath}"),
                 title: doc.title.clone(),
@@ -381,6 +462,7 @@ impl Store {
                 docid,
                 collection: coll.to_string(),
                 path: path.to_string(),
+                context: ctx,
             });
         }
         Ok(results)

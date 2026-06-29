@@ -21,6 +21,10 @@ struct Cli {
     #[arg(long, env = "RRQMD_ORT_EP", global = true)]
     ort_ep: Option<String>,
 
+    /// Show native model-loading and inference logs (also enabled by RUST_LOG)
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -105,6 +109,9 @@ enum Commands {
     Embed {
         #[arg(short = 'c', long)]
         collection: Option<String>,
+        /// Clear all vectors and re-embed from scratch (repairs a diverged index)
+        #[arg(long)]
+        rebuild: bool,
     },
     /// Re-index all collections
     Update {
@@ -194,6 +201,37 @@ fn main() -> Result<()> {
         std::env::set_var("RRQMD_ORT_EP", ep);
     }
 
+    // Install a tracing subscriber.  Default behaviour mirrors qmd: native llama.cpp /
+    // ggml logs are silent unless the user explicitly opts in via --verbose or RUST_LOG.
+    //
+    // Default filter (no --verbose, no RUST_LOG):
+    //   warn,llama-cpp-2=error,ggml=error
+    //
+    // Rationale: benign WARNs from llama.cpp ("control-looking token", "n_ctx_seq <
+    // n_ctx_train") have no actionable fix; hiding them keeps the output as clean as the
+    // original TypeScript qmd.  ERROR-level messages from those crates still surface.
+    // --verbose (or RUST_LOG) restores full output.
+    let rust_log_set = std::env::var("RUST_LOG").is_ok();
+    if !rust_log_set {
+        std::env::set_var(
+            "RUST_LOG",
+            if cli.verbose {
+                "debug"
+            } else {
+                "warn,llama-cpp-2=error,ggml=error"
+            },
+        );
+    }
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+    if cli.verbose || rust_log_set {
+        // Signal to library crates (e.g. rqmd-llm) that verbose mode is on so they
+        // can adjust their own native-library log levels accordingly.
+        std::env::set_var("RRQMD_VERBOSE", "1");
+    }
+
     let index_dir = store::resolve_index_dir(cli.index_dir.as_deref())?;
 
     match cli.command {
@@ -264,9 +302,10 @@ fn main() -> Result<()> {
         Commands::Context(cmd) => commands::context::run(&index_dir, cmd),
         Commands::Init => commands::index::run_init(),
         Commands::Status => commands::index::run_status(&index_dir),
-        Commands::Embed { collection } => {
-            commands::index::run_embed(&index_dir, collection.as_deref())
-        }
+        Commands::Embed {
+            collection,
+            rebuild,
+        } => commands::index::run_embed(&index_dir, collection.as_deref(), rebuild),
         Commands::Update { collection } => {
             commands::index::run_update(&index_dir, collection.as_deref())
         }

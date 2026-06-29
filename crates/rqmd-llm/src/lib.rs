@@ -23,6 +23,7 @@ use llama_cpp_2::{
     llama_batch::LlamaBatch,
     model::{params::LlamaModelParams, AddBos, LlamaModel},
     sampling::LlamaSampler,
+    send_logs_to_tracing, LogOptions,
 };
 use std::{num::NonZeroU32, path::PathBuf};
 
@@ -37,6 +38,15 @@ pub const DEFAULT_GENERATE_FILE: &str = "qwen3-1.7b-q8_0.gguf";
 
 // Embedding dimension for embeddinggemma-300M (confirmed in spike: dim=768)
 pub const EMBED_DIM: usize = 768;
+
+// Embed context window size (tokens).  Must stay in sync with `with_n_ctx` / `with_n_ubatch`
+// in `LlamaCppBackend::new`.  encoder-mode (llama_encode) requires n_ubatch >= n_tokens —
+// without truncation a token-dense 3600-char chunk can exceed 2048 tokens and trigger a
+// GGML_ASSERT abort.  Guard: truncate inputs to EMBED_CONTEXT_SIZE - EMBED_TOKEN_MARGIN
+// before encoding.  Mirrors qmd's truncateToContextSize (src/llm.ts:1279).
+const EMBED_CONTEXT_SIZE: usize = 2048;
+/// BOS/EOS overhead margin, matching qmd (src/llm.ts:1291 `maxTokens - 4`).
+const EMBED_TOKEN_MARGIN: usize = 4;
 
 // GBNF grammar for query expansion — produces lex:/vec:/hyde: lines
 pub const EXPANSION_GRAMMAR: &str = r#"
@@ -114,6 +124,8 @@ pub struct LlamaCppBackend {
     rerank_model: LlamaModel,
     embed_ctx_params: LlamaContextParams,
     rerank_ctx_params: LlamaContextParams,
+    /// KV context size for the reranker — used to guard against token-overflow aborts.
+    rerank_n_ctx: usize,
     embed_model_name: String,
     rerank_model_name: String,
 }
@@ -169,6 +181,12 @@ impl LlamaCppBackend {
                 })?,
         };
 
+        // Install the tracing→log bridge BEFORE LlamaBackend::init() so that
+        // ggml_metal_device_init (which runs during init) routes through the bridge
+        // instead of escaping to the default ggml stderr logger.  The setters are
+        // global and do not require an initialized backend.
+        send_logs_to_tracing(LogOptions::default().with_logs_enabled(true));
+
         let backend = LlamaBackend::init().context("LlamaBackend init")?;
 
         let embed_model = LlamaModel::load_from_file(
@@ -188,9 +206,9 @@ impl LlamaCppBackend {
         let embed_ctx_params = LlamaContextParams::default()
             .with_embeddings(true)
             .with_pooling_type(LlamaPoolingType::Mean)
-            .with_n_ctx(NonZeroU32::new(2048))
+            .with_n_ctx(NonZeroU32::new(EMBED_CONTEXT_SIZE as u32))
             // encoder requires n_ubatch >= n_tokens; set to match n_ctx
-            .with_n_ubatch(2048);
+            .with_n_ubatch(EMBED_CONTEXT_SIZE as u32);
 
         let rerank_ctx_params = LlamaContextParams::default()
             .with_embeddings(true)
@@ -205,6 +223,7 @@ impl LlamaCppBackend {
             rerank_model,
             embed_ctx_params,
             rerank_ctx_params,
+            rerank_n_ctx: config.rerank_n_ctx as usize,
             embed_model_name: format!("{}/{}", config.embed_repo, config.embed_file),
             rerank_model_name: format!("{}/{}", config.rerank_repo, config.rerank_file),
         })
@@ -213,16 +232,32 @@ impl LlamaCppBackend {
 
 impl InferenceBackend for LlamaCppBackend {
     fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
-        let tokens = self
+        let mut tokens = self
             .embed_model
             .str_to_token(text, AddBos::Always)
             .context("embed tokenization")?;
+        // Guard: encoder (llama_encode) requires n_ubatch >= n_tokens.  Without this
+        // check a token-dense chunk can exceed EMBED_CONTEXT_SIZE and trigger a fatal
+        // GGML_ASSERT abort.  Mirrors qmd's truncateToContextSize (src/llm.ts:1279).
+        let safe_limit = EMBED_CONTEXT_SIZE - EMBED_TOKEN_MARGIN; // 2044
+        if tokens.len() > safe_limit {
+            tracing::debug!(
+                tokens = tokens.len(),
+                limit = safe_limit,
+                "embed input truncated to context window"
+            );
+            tokens.truncate(safe_limit);
+        }
         let mut ctx = self
             .embed_model
             .new_context(&self._backend, self.embed_ctx_params.clone())
             .context("embed context")?;
         let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
-        batch.add_sequence(&tokens, 0, false)?;
+        // Mean pooling requires every token to be marked as an output so
+        // llama.cpp includes it in the pooled embedding.  Using false triggers
+        // "embeddings required but some input tokens were not marked as outputs
+        // -> overriding" at WARN level; using true is both correct and silent.
+        batch.add_sequence(&tokens, 0, true)?;
         ctx.encode(&mut batch).context("encode")?;
         let emb = ctx.embeddings_seq_ith(0).context("embedding extract")?;
         Ok(emb.to_vec())
@@ -238,12 +273,28 @@ impl InferenceBackend for LlamaCppBackend {
                 .new_context(&self._backend, self.rerank_ctx_params.clone())
                 .context("rerank context")?;
             let input = format!("Query: {query}\nDocument: {doc}");
-            let tokens = self
+            let mut tokens = self
                 .rerank_model
                 .str_to_token(&input, AddBos::Always)
                 .context("rerank tokenization")?;
+            // Guard: ctx.decode() also aborts on n_ubatch < n_tokens.
+            // Truncate to the rerank context window with the same BOS/EOS margin.
+            let rerank_limit = self.rerank_n_ctx.saturating_sub(EMBED_TOKEN_MARGIN);
+            if tokens.len() > rerank_limit {
+                tracing::debug!(
+                    tokens = tokens.len(),
+                    limit = rerank_limit,
+                    "rerank input truncated to context window"
+                );
+                tokens.truncate(rerank_limit);
+            }
             let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
-            batch.add_sequence(&tokens, 0, false)?;
+            // Rank pooling reads the last-token logit from embeddings_seq_ith, so the
+            // result is identical whether or not every token is an output.  Passing true
+            // avoids the "embeddings required but some input tokens were not marked as
+            // outputs -> overriding" WARN that llama.cpp emits when output_all=true and
+            // any token has logits=0.
+            batch.add_sequence(&tokens, 0, true)?;
             // Qwen3-Reranker is a causal decoder → decode(), not encode()
             ctx.decode(&mut batch).context("rerank decode")?;
             let score_slice = ctx.embeddings_seq_ith(0).context("rerank score extract")?;
@@ -350,10 +401,10 @@ impl BackendKind {
 pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
     match kind {
         BackendKind::Llama => {
-            eprintln!("Loading LlamaCpp backend (downloads GGUF models on first run)...");
+            tracing::info!("Loading LlamaCpp backend (downloads GGUF models on first run)...");
             let b =
                 LlamaCppBackend::new(LlamaCppConfig::default()).context("LlamaCpp backend init")?;
-            eprintln!("LlamaCpp backend ready.");
+            tracing::info!("LlamaCpp backend ready.");
             Ok(Box::new(b))
         }
 
@@ -364,14 +415,14 @@ pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
                 .ok()
                 .and_then(|s| OrtEp::from_str(&s))
                 .unwrap_or(OrtEp::Auto);
-            eprintln!("Loading ORT backend (ep={ep:?}, downloads ONNX model on first run)...");
+            tracing::info!("Loading ORT backend (ep={ep:?}, downloads ONNX model on first run)...");
             let b = OrtBackend::new(OrtConfig {
                 ep,
                 ..OrtConfig::default()
             })
             .context("ORT backend init")?;
             let name = b.embed_model_name().to_string();
-            eprintln!("ORT backend ready ({name})");
+            tracing::info!("ORT backend ready ({name})");
             Ok(Box::new(b))
         }
     }

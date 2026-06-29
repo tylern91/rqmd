@@ -75,6 +75,18 @@ impl VectorIndex {
         Ok(vid)
     }
 
+    /// Raise `next_vid` to at least `floor` without adding a vector.
+    ///
+    /// Called during `Store::open` to reconcile `next_vid` with `MAX(content_vectors.vid)`
+    /// from SQLite.  When the HNSW file and the DB diverge (e.g. a corrupt load fell back to
+    /// an empty index with `next_vid=0`, or orphan-vid gaps accumulated from duplicate-hash
+    /// drift), this guarantees freshly-issued vids will never collide with existing DB rows.
+    pub fn ensure_next_vid_at_least(&mut self, floor: u64) {
+        if floor > self.next_vid {
+            self.next_vid = floor;
+        }
+    }
+
     /// Add with a specific vid (used when rebuilding from rusqlite).
     pub fn add_with_vid(&mut self, vid: u64, embedding: &[f32]) -> Result<()> {
         if self.inner.capacity() <= self.inner.size() {
