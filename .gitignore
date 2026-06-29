@@ -1,0 +1,16 @@
+# Rust build output
+/target
+**/*.rs.bk
+
+# Runtime index artifacts (generated; not source)
+*.sqlite
+/tantivy
+
+# macOS
+.DS_Store
+
+# Claude Code config (local, not project state)
+.claude/
+
+# Local project index
+.rqmd/

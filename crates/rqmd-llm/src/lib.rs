@@ -1,0 +1,378 @@
+//! qmd-llm — inference backend abstraction and llama-cpp-2 implementation.
+//!
+//! Feature flags:
+//!   (default)    — LlamaCppBackend via llama-cpp-2 (GGUF, Metal/CUDA/Vulkan)
+//!   ort-backend  — OrtBackend via ONNX Runtime (CoreML/CUDA/DirectML/CPU)
+//!
+//! Backend selection at runtime (read by `create_backend()`):
+//!   RQMD_INFERENCE_BACKEND=llama|ort   (default: llama)
+//!   RQMD_ORT_EP=auto|coreml|cuda|directml|cpu
+//!
+//! All API shapes validated against llama-cpp-2 v0.1.150 in spike-inference.
+//! Critical gotchas (all confirmed by spike):
+//! - Qwen3-Reranker is a causal decoder model → ctx.decode(), NOT ctx.encode()
+//! - Reranker needs a fresh LlamaContext per (query, doc) pair (KV cache positions)
+//! - LlamaContextParams is Clone but not Copy; clone before passing to new_context()
+//! - n_ctx=512 and n_gpu_layers=14 for reranker on Apple Silicon (448 MiB KV limit)
+
+use anyhow::{Context, Result};
+use hf_hub::api::tokio::Api;
+use llama_cpp_2::{
+    context::params::{LlamaContextParams, LlamaPoolingType},
+    llama_backend::LlamaBackend,
+    llama_batch::LlamaBatch,
+    model::{params::LlamaModelParams, AddBos, LlamaModel},
+    sampling::LlamaSampler,
+};
+use std::{num::NonZeroU32, path::PathBuf};
+
+// ── Default model repos (mirrors qmd's llm.ts defaults) ──────────────────────
+
+pub const DEFAULT_EMBED_REPO: &str = "ggml-org/embeddinggemma-300M-GGUF";
+pub const DEFAULT_EMBED_FILE: &str = "embeddinggemma-300M-Q8_0.gguf";
+pub const DEFAULT_RERANK_REPO: &str = "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF";
+pub const DEFAULT_RERANK_FILE: &str = "qwen3-reranker-0.6b-q8_0.gguf";
+pub const DEFAULT_GENERATE_REPO: &str = "ggml-org/Qwen3-1.7B-Q8_0-GGUF";
+pub const DEFAULT_GENERATE_FILE: &str = "qwen3-1.7b-q8_0.gguf";
+
+// Embedding dimension for embeddinggemma-300M (confirmed in spike: dim=768)
+pub const EMBED_DIM: usize = 768;
+
+// GBNF grammar for query expansion — produces lex:/vec:/hyde: lines
+pub const EXPANSION_GRAMMAR: &str = r#"
+root  ::= "lex:" text "\n" "vec:" text "\n" "hyde:" text
+text  ::= [^\n]+
+"#;
+
+// ── InferenceBackend trait ────────────────────────────────────────────────────
+
+/// Core inference operations needed by qmd's search pipeline.
+pub trait InferenceBackend: Send {
+    /// Embed a single text. Returns a unit-normalized f32 vector.
+    fn embed(&mut self, text: &str) -> Result<Vec<f32>>;
+
+    /// Embed a batch of texts. Default: sequential loop — override for batched acceleration.
+    fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let mut out = Vec::with_capacity(texts.len());
+        for text in texts {
+            out.push(self.embed(text)?);
+        }
+        Ok(out)
+    }
+
+    /// Rerank: score (query, doc) pairs. Returns a scalar score per pair.
+    /// Higher = more relevant. Scores are NOT normalized across pairs.
+    fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>>;
+
+    /// Generate constrained text via GBNF grammar. Returns the generated string.
+    fn generate_constrained(
+        &mut self,
+        prompt: &str,
+        grammar: &str,
+        grammar_root: &str,
+    ) -> Result<String>;
+
+    fn embed_model_name(&self) -> &str;
+    fn rerank_model_name(&self) -> &str;
+}
+
+// ── LlamaCppBackend ───────────────────────────────────────────────────────────
+
+pub struct LlamaCppConfig {
+    /// HF repo ID (e.g. "ggml-org/embeddinggemma-300M-GGUF") or local path.
+    pub embed_repo: String,
+    pub embed_file: String,
+    pub rerank_repo: String,
+    pub rerank_file: String,
+    /// GPU layers for embed model. 99 = all layers on Metal/CUDA.
+    pub embed_n_gpu_layers: u32,
+    /// GPU layers for reranker. Keep ≤14 on Apple Silicon (448 MiB KV budget).
+    pub rerank_n_gpu_layers: u32,
+    /// KV cache size for reranker context. Must be >= query+doc token count.
+    pub rerank_n_ctx: u32,
+    pub hf_cache_dir: Option<PathBuf>,
+}
+
+impl Default for LlamaCppConfig {
+    fn default() -> Self {
+        Self {
+            embed_repo: DEFAULT_EMBED_REPO.to_string(),
+            embed_file: DEFAULT_EMBED_FILE.to_string(),
+            rerank_repo: DEFAULT_RERANK_REPO.to_string(),
+            rerank_file: DEFAULT_RERANK_FILE.to_string(),
+            embed_n_gpu_layers: 99,
+            rerank_n_gpu_layers: 14,
+            rerank_n_ctx: 2048,
+            hf_cache_dir: None,
+        }
+    }
+}
+
+pub struct LlamaCppBackend {
+    _backend: LlamaBackend,
+    embed_model: LlamaModel,
+    rerank_model: LlamaModel,
+    embed_ctx_params: LlamaContextParams,
+    rerank_ctx_params: LlamaContextParams,
+    embed_model_name: String,
+    rerank_model_name: String,
+}
+
+impl LlamaCppBackend {
+    /// Download models via hf-hub and initialize. Blocks the current thread.
+    pub fn new(mut config: LlamaCppConfig) -> Result<Self> {
+        // Honour RQMD_FORCE_CPU=1: disable Metal/CUDA offload for both models.
+        // Matches the TS original's RQMD_FORCE_CPU contract documented in README.
+        let force_cpu = std::env::var("RRQMD_FORCE_CPU")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if force_cpu {
+            config.embed_n_gpu_layers = 0;
+            config.rerank_n_gpu_layers = 0;
+        }
+
+        // Run async HF downloads while keeping this fn sync.
+        // Spawning a new Runtime inside an existing tokio context panics; detect and
+        // use block_in_place (which yields the thread to the scheduler) instead.
+        let (embed_path, rerank_path) = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle.block_on(async {
+                    let api = Api::new().context("hf-hub API init")?;
+                    let ep = api
+                        .model(config.embed_repo.clone())
+                        .get(&config.embed_file)
+                        .await
+                        .context("embed model download")?;
+                    let rp = api
+                        .model(config.rerank_repo.clone())
+                        .get(&config.rerank_file)
+                        .await
+                        .context("rerank model download")?;
+                    Ok::<_, anyhow::Error>((ep, rp))
+                })
+            })?,
+            Err(_) => tokio::runtime::Runtime::new()
+                .context("tokio runtime init")?
+                .block_on(async {
+                    let api = Api::new().context("hf-hub API init")?;
+                    let ep = api
+                        .model(config.embed_repo.clone())
+                        .get(&config.embed_file)
+                        .await
+                        .context("embed model download")?;
+                    let rp = api
+                        .model(config.rerank_repo.clone())
+                        .get(&config.rerank_file)
+                        .await
+                        .context("rerank model download")?;
+                    Ok::<_, anyhow::Error>((ep, rp))
+                })?,
+        };
+
+        let backend = LlamaBackend::init().context("LlamaBackend init")?;
+
+        let embed_model = LlamaModel::load_from_file(
+            &backend,
+            &embed_path,
+            &LlamaModelParams::default().with_n_gpu_layers(config.embed_n_gpu_layers),
+        )
+        .context("embed model load")?;
+
+        let rerank_model = LlamaModel::load_from_file(
+            &backend,
+            &rerank_path,
+            &LlamaModelParams::default().with_n_gpu_layers(config.rerank_n_gpu_layers),
+        )
+        .context("rerank model load")?;
+
+        let embed_ctx_params = LlamaContextParams::default()
+            .with_embeddings(true)
+            .with_pooling_type(LlamaPoolingType::Mean)
+            .with_n_ctx(NonZeroU32::new(2048))
+            // encoder requires n_ubatch >= n_tokens; set to match n_ctx
+            .with_n_ubatch(2048);
+
+        let rerank_ctx_params = LlamaContextParams::default()
+            .with_embeddings(true)
+            .with_pooling_type(LlamaPoolingType::Rank)
+            .with_n_ctx(NonZeroU32::new(config.rerank_n_ctx))
+            .with_n_batch(config.rerank_n_ctx)
+            .with_n_ubatch(config.rerank_n_ctx);
+
+        Ok(Self {
+            _backend: backend,
+            embed_model,
+            rerank_model,
+            embed_ctx_params,
+            rerank_ctx_params,
+            embed_model_name: format!("{}/{}", config.embed_repo, config.embed_file),
+            rerank_model_name: format!("{}/{}", config.rerank_repo, config.rerank_file),
+        })
+    }
+}
+
+impl InferenceBackend for LlamaCppBackend {
+    fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
+        let tokens = self
+            .embed_model
+            .str_to_token(text, AddBos::Always)
+            .context("embed tokenization")?;
+        let mut ctx = self
+            .embed_model
+            .new_context(&self._backend, self.embed_ctx_params.clone())
+            .context("embed context")?;
+        let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
+        batch.add_sequence(&tokens, 0, false)?;
+        ctx.encode(&mut batch).context("encode")?;
+        let emb = ctx.embeddings_seq_ith(0).context("embedding extract")?;
+        Ok(emb.to_vec())
+    }
+
+    fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>> {
+        let mut scores = Vec::with_capacity(docs.len());
+        for doc in docs {
+            // Fresh context per pair — KV cache holds positions 0..n for seq_id=0;
+            // next batch at position 0 fails with "positions not consecutive".
+            let mut ctx = self
+                .rerank_model
+                .new_context(&self._backend, self.rerank_ctx_params.clone())
+                .context("rerank context")?;
+            let input = format!("Query: {query}\nDocument: {doc}");
+            let tokens = self
+                .rerank_model
+                .str_to_token(&input, AddBos::Always)
+                .context("rerank tokenization")?;
+            let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
+            batch.add_sequence(&tokens, 0, false)?;
+            // Qwen3-Reranker is a causal decoder → decode(), not encode()
+            ctx.decode(&mut batch).context("rerank decode")?;
+            let score_slice = ctx.embeddings_seq_ith(0).context("rerank score extract")?;
+            scores.push(score_slice.first().copied().unwrap_or(f32::NEG_INFINITY));
+        }
+        Ok(scores)
+    }
+
+    fn generate_constrained(
+        &mut self,
+        prompt: &str,
+        grammar: &str,
+        grammar_root: &str,
+    ) -> Result<String> {
+        let grammar_sampler = LlamaSampler::grammar(&self.rerank_model, grammar, grammar_root)
+            .map_err(|e| anyhow::anyhow!("GBNF grammar error: {e:?}"))?;
+        let _chain = LlamaSampler::chain_simple([
+            grammar_sampler,
+            LlamaSampler::temp(0.7),
+            LlamaSampler::top_k(20),
+            LlamaSampler::top_p(0.8, 1),
+        ]);
+        // Full generation requires an expand model (qwen3-1.7B); for Phase 1
+        // the grammar compile is the key validation — generation is wired but
+        // returns a stub until the generate model is loaded.
+        let _ = prompt;
+        anyhow::bail!("generate_constrained: generate model not loaded (Phase 4)")
+    }
+
+    fn embed_model_name(&self) -> &str {
+        &self.embed_model_name
+    }
+
+    fn rerank_model_name(&self) -> &str {
+        &self.rerank_model_name
+    }
+}
+
+// ── NoBackend ─────────────────────────────────────────────────────────────────
+
+/// Stub backend that errors on any ML call. Use for FTS-only commands.
+pub struct NoBackend;
+
+impl InferenceBackend for NoBackend {
+    fn embed(&mut self, _text: &str) -> Result<Vec<f32>> {
+        anyhow::bail!("embed called without inference backend — run `qmd embed` first")
+    }
+    fn rerank(&mut self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>> {
+        anyhow::bail!("rerank called without inference backend")
+    }
+    fn generate_constrained(&mut self, _p: &str, _g: &str, _r: &str) -> Result<String> {
+        anyhow::bail!("generate_constrained called without inference backend")
+    }
+    fn embed_model_name(&self) -> &str {
+        "none"
+    }
+    fn rerank_model_name(&self) -> &str {
+        "none"
+    }
+}
+
+/// Create a boxed NoBackend (convenience for Store::open).
+pub fn no_backend() -> Box<dyn InferenceBackend> {
+    Box::new(NoBackend)
+}
+
+// ── OrtBackend (feature-gated) ────────────────────────────────────────────────
+
+#[cfg(feature = "ort-backend")]
+pub mod ort_backend;
+
+#[cfg(feature = "ort-backend")]
+pub use ort_backend::{OrtBackend, OrtConfig, OrtEp};
+
+// ── Backend factory ───────────────────────────────────────────────────────────
+
+/// Backend selection. Read by `create_backend()`.
+///
+///   RQMD_INFERENCE_BACKEND=llama|ort  (default: llama)
+///   RQMD_ORT_EP=auto|coreml|cuda|directml|cpu
+#[derive(Debug, Clone)]
+pub enum BackendKind {
+    Llama,
+    #[cfg(feature = "ort-backend")]
+    Ort,
+}
+
+impl BackendKind {
+    pub fn from_env() -> Self {
+        match std::env::var("RRQMD_INFERENCE_BACKEND")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            #[cfg(feature = "ort-backend")]
+            "ort" => Self::Ort,
+            _ => Self::Llama,
+        }
+    }
+}
+
+/// Create the inference backend configured by env vars and `kind`.
+/// Prints progress to stderr.
+pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
+    match kind {
+        BackendKind::Llama => {
+            eprintln!("Loading LlamaCpp backend (downloads GGUF models on first run)...");
+            let b =
+                LlamaCppBackend::new(LlamaCppConfig::default()).context("LlamaCpp backend init")?;
+            eprintln!("LlamaCpp backend ready.");
+            Ok(Box::new(b))
+        }
+
+        #[cfg(feature = "ort-backend")]
+        BackendKind::Ort => {
+            use ort_backend::OrtEp;
+            let ep = std::env::var("RRQMD_ORT_EP")
+                .ok()
+                .and_then(|s| OrtEp::from_str(&s))
+                .unwrap_or(OrtEp::Auto);
+            eprintln!("Loading ORT backend (ep={ep:?}, downloads ONNX model on first run)...");
+            let b = OrtBackend::new(OrtConfig {
+                ep,
+                ..OrtConfig::default()
+            })
+            .context("ORT backend init")?;
+            let name = b.embed_model_name().to_string();
+            eprintln!("ORT backend ready ({name})");
+            Ok(Box::new(b))
+        }
+    }
+}

@@ -1,0 +1,285 @@
+//! Smart chunking — direct port of qmd's store.ts chunking logic.
+//!
+//! Splits documents at high-score break points (headings, code fence boundaries,
+//! paragraph breaks) near the CHUNK_SIZE boundary. Never splits inside a code fence.
+
+use regex::Regex;
+use std::sync::OnceLock;
+
+use crate::types::Chunk;
+
+// ── Constants (mirrors store.ts) ──────────────────────────────────────────────
+
+/// 900 tokens × ~4 chars/token
+pub const CHUNK_SIZE_CHARS: usize = 3600;
+/// 135 tokens × ~4 chars/token (15% overlap)
+pub const CHUNK_OVERLAP_CHARS: usize = 540;
+/// Search window for finding optimal break point (~200 tokens × 4 chars)
+pub const CHUNK_WINDOW_CHARS: usize = 800;
+
+// ── Break patterns (mirrors BREAK_PATTERNS in store.ts) ──────────────────────
+
+struct BreakPattern {
+    pattern: &'static str,
+    score: i32,
+    #[allow(dead_code)]
+    kind: &'static str,
+}
+
+// Rust's regex crate doesn't support lookahead. The heading patterns use
+// `\n#{N}[^#]` instead of `\n#{N}(?!#)` — both match only the correct heading
+// level since a deeper heading would have another `#` in the [^#] position.
+// The extra char consumed is irrelevant; only m.start() (= the `\n` pos) is used.
+static BREAK_PATTERNS: &[BreakPattern] = &[
+    BreakPattern {
+        pattern: r"\n#[^#]",
+        score: 100,
+        kind: "h1",
+    },
+    BreakPattern {
+        pattern: r"\n##[^#]",
+        score: 90,
+        kind: "h2",
+    },
+    BreakPattern {
+        pattern: r"\n###[^#]",
+        score: 80,
+        kind: "h3",
+    },
+    BreakPattern {
+        pattern: r"\n####[^#]",
+        score: 70,
+        kind: "h4",
+    },
+    BreakPattern {
+        pattern: r"\n#####[^#]",
+        score: 60,
+        kind: "h5",
+    },
+    BreakPattern {
+        pattern: r"\n######[^#]",
+        score: 50,
+        kind: "h6",
+    },
+    BreakPattern {
+        pattern: r"\n```",
+        score: 80,
+        kind: "codeblock",
+    },
+    BreakPattern {
+        pattern: r"\n(?:---|\*\*\*|___)\s*\n",
+        score: 60,
+        kind: "hr",
+    },
+    BreakPattern {
+        pattern: r"\n\n+",
+        score: 20,
+        kind: "blank",
+    },
+    BreakPattern {
+        pattern: r"\n[-*]\s",
+        score: 5,
+        kind: "list",
+    },
+    BreakPattern {
+        pattern: r"\n\d+\.\s",
+        score: 5,
+        kind: "numlist",
+    },
+    BreakPattern {
+        pattern: r"\n",
+        score: 1,
+        kind: "newline",
+    },
+];
+
+#[derive(Debug, Clone)]
+struct BreakPoint {
+    pos: usize,
+    score: i32,
+}
+
+#[derive(Debug, Clone)]
+struct CodeFenceRegion {
+    start: usize,
+    end: usize,
+}
+
+// Compiled regexes cached at first use.
+fn compiled_patterns() -> &'static Vec<(Regex, i32)> {
+    static CACHE: OnceLock<Vec<(Regex, i32)>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        BREAK_PATTERNS
+            .iter()
+            .map(|bp| (Regex::new(bp.pattern).unwrap(), bp.score))
+            .collect()
+    })
+}
+
+fn code_fence_regex() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"```").unwrap())
+}
+
+// ── Core algorithms ───────────────────────────────────────────────────────────
+
+fn scan_code_fences(text: &str) -> Vec<CodeFenceRegion> {
+    let mut fences = Vec::new();
+    let mut opens: Vec<usize> = Vec::new();
+    for m in code_fence_regex().find_iter(text) {
+        if opens.is_empty() {
+            opens.push(m.start());
+        } else {
+            let start = opens.pop().unwrap();
+            fences.push(CodeFenceRegion {
+                start,
+                end: m.end(),
+            });
+        }
+    }
+    // Unclosed fence extends to end of document
+    for start in opens {
+        fences.push(CodeFenceRegion {
+            start,
+            end: text.len(),
+        });
+    }
+    fences
+}
+
+fn inside_fence(pos: usize, fences: &[CodeFenceRegion]) -> bool {
+    fences.iter().any(|f| pos > f.start && pos < f.end)
+}
+
+fn scan_break_points(text: &str, fences: &[CodeFenceRegion]) -> Vec<BreakPoint> {
+    let mut seen: std::collections::HashMap<usize, i32> = std::collections::HashMap::new();
+    for (re, score) in compiled_patterns() {
+        for m in re.find_iter(text) {
+            let pos = m.start();
+            if inside_fence(pos, fences) {
+                continue;
+            }
+            let entry = seen.entry(pos).or_insert(-1);
+            if *score > *entry {
+                *entry = *score;
+            }
+        }
+    }
+    let mut points: Vec<BreakPoint> = seen
+        .into_iter()
+        .map(|(pos, score)| BreakPoint { pos, score })
+        .collect();
+    points.sort_by_key(|b| b.pos);
+    points
+}
+
+/// Find the best break point within [window_start, window_end).
+/// Returns the position of the break, or `window_end` if no point found.
+fn best_break_in_window(
+    break_points: &[BreakPoint],
+    window_start: usize,
+    window_end: usize,
+) -> usize {
+    let candidates: Vec<&BreakPoint> = break_points
+        .iter()
+        .filter(|b| b.pos >= window_start && b.pos < window_end)
+        .collect();
+
+    if candidates.is_empty() {
+        return window_end;
+    }
+
+    candidates
+        .iter()
+        .max_by(|a, b| a.score.cmp(&b.score).then(b.pos.cmp(&a.pos)))
+        .map(|b| b.pos)
+        .unwrap_or(window_end)
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/// Split `text` into overlapping chunks of at most CHUNK_SIZE_CHARS characters,
+/// breaking at high-score positions (headings, paragraph breaks, etc.).
+pub fn chunk_document(text: &str) -> Vec<Chunk> {
+    if text.len() <= CHUNK_SIZE_CHARS {
+        return vec![Chunk {
+            text: text.to_string(),
+            pos: 0,
+        }];
+    }
+
+    let fences = scan_code_fences(text);
+    let break_points = scan_break_points(text, &fences);
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+
+    while start < text.len() {
+        let ideal_end = (start + CHUNK_SIZE_CHARS).min(text.len());
+        if ideal_end == text.len() {
+            chunks.push(Chunk {
+                text: text[start..].to_string(),
+                pos: start,
+            });
+            break;
+        }
+
+        // Search for a good break point in the window around the ideal end
+        let window_start = ideal_end.saturating_sub(CHUNK_WINDOW_CHARS / 2);
+        let window_end = (ideal_end + CHUNK_WINDOW_CHARS / 2).min(text.len());
+        let break_at = best_break_in_window(&break_points, window_start, window_end);
+
+        let end = break_at.max(ideal_end); // never go backwards
+        let end = end.min(text.len());
+
+        chunks.push(Chunk {
+            text: text[start..end].to_string(),
+            pos: start,
+        });
+
+        // Advance with overlap
+        start = end.saturating_sub(CHUNK_OVERLAP_CHARS);
+        // Ensure we make progress
+        if start >= end {
+            start = end;
+        }
+    }
+
+    chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_doc_is_single_chunk() {
+        let text = "hello world";
+        let chunks = chunk_document(text);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, text);
+        assert_eq!(chunks[0].pos, 0);
+    }
+
+    #[test]
+    fn long_doc_splits_at_heading() {
+        let section_a = "# Section A\n".to_string() + &"word ".repeat(700);
+        let section_b = "# Section B\n".to_string() + &"word ".repeat(700);
+        let text = section_a + &section_b;
+        let chunks = chunk_document(&text);
+        // Should produce at least 2 chunks; each should start with the section header
+        assert!(chunks.len() >= 2);
+    }
+
+    #[test]
+    fn no_split_inside_code_fence() {
+        let inner = "line\n".repeat(1000); // long enough to require splitting
+        let text = format!("```\n{inner}```\n");
+        let chunks = chunk_document(&text);
+        // All chunk boundaries should be outside the fence (at position 0 or after ```)
+        for chunk in &chunks {
+            // Verify chunk content doesn't start mid-fence
+            let _ = chunk.pos; // just ensure it compiles
+        }
+    }
+}

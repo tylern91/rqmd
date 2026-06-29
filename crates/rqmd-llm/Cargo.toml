@@ -1,0 +1,21 @@
+[package]
+name = "rqmd-llm"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+# Enables the OrtBackend: ONNX inference via ort v2 with pluggable EPs
+# (CoreML on macOS, CUDA on Linux, DirectML on Windows, CPU fallback).
+ort-backend = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
+
+[dependencies]
+anyhow = "1"
+hf-hub = { version = "0.5", features = ["tokio"] }
+llama-cpp-2 = { version = "0.1.150", features = ["metal", "sampler"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# OrtBackend (optional, enabled via ort-backend feature)
+ort        = { version = "=2.0.0-rc.12", optional = true, features = ["coreml"] }
+tokenizers = { version = "0.23", optional = true, default-features = false, features = ["http", "fancy-regex"] }
+ndarray    = { version = "0.17", optional = true }

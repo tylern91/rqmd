@@ -1,0 +1,171 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - ".github/workflows/rust.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Disable model downloads in CI — integration tests that need models are skipped
+  RQMD_CI: "1"
+
+jobs:
+  build-macos:
+    name: Build ${{ matrix.feature-set }} (macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - feature-set: default
+            cargo-args: ""
+          - feature-set: ort-backend
+            cargo-args: "-p rqmd-cli --features ort-backend"
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Pin cmake to 3.x (cmake 4.x breaks llama.cpp CMakeLists.txt)
+        run: |
+          pip install "cmake<4" --quiet
+          cmake --version
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-arm64-${{ matrix.feature-set }}
+
+      - name: Check formatting
+        if: matrix.feature-set == 'default'
+        run: cargo fmt --all --check
+
+      - name: Clippy (workspace)
+        if: matrix.feature-set == 'default'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build (default)
+        if: matrix.feature-set == 'default'
+        run: cargo build --workspace
+
+      - name: Build (ort-backend)
+        if: matrix.feature-set == 'ort-backend'
+        run: cargo build ${{ matrix.cargo-args }}
+
+      - name: Unit tests (lib only, no model downloads)
+        if: matrix.feature-set == 'default'
+        run: cargo test --workspace --lib
+
+      - name: Search quality eval (BM25, no model required)
+        if: matrix.feature-set == 'default'
+        run: cargo run --bin rqmd -- eval --mode bm25
+
+  build-linux:
+    name: Build default (Linux x64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          # llama-cpp-2 on Linux needs cmake and a C++ toolchain
+          sudo apt-get install -y cmake build-essential
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-x64-default
+
+      - name: Build (default, Linux CPU-only — no Metal)
+        # llama-cpp-2 on Linux uses CPU path; metal feature is macOS-only
+        env:
+          # Force CPU-only llama.cpp build on Linux (no CUDA in free runners)
+          LLAMA_METAL: "0"
+        run: cargo build --workspace
+
+      - name: Unit tests (lib only)
+        env:
+          LLAMA_METAL: "0"
+        run: cargo test --workspace --lib
+
+  dist-binary:
+    name: Release binary (macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 60
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build-macos, build-linux]
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Pin cmake to 3.x (cmake 4.x breaks llama.cpp CMakeLists.txt)
+        run: |
+          pip install "cmake<4" --quiet
+          cmake --version
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-arm64-dist
+
+      - name: Build dist binary
+        run: cargo build --profile dist -p rqmd-cli
+
+      - name: Show binary info
+        run: |
+          ls -lh target/dist/rqmd
+          file target/dist/rqmd
+          otool -L target/dist/rqmd | head -20
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rqmd-macos-arm64
+          path: target/dist/rqmd
+          retention-days: 30
