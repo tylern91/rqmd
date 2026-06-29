@@ -43,7 +43,7 @@ fn add(index_dir: &Path, dir: &str, name: Option<&str>, mask: Option<&str>) -> R
         abs_dir.display()
     );
 
-    let mut s = store::open_store_with_backend(index_dir)?;
+    let mut s = store::open_store_no_backend(index_dir)?;
 
     // Register the collection
     let col = Collection {
@@ -96,7 +96,7 @@ fn add(index_dir: &Path, dir: &str, name: Option<&str>, mask: Option<&str>) -> R
             .to_string();
 
         print!("\r  Indexing {} ({}) ...", rel_path, count + 1);
-        match s.index_document(&collection_name, &rel_path, &title, &body) {
+        match s.index_document_fts_only(&collection_name, &rel_path, &title, &body) {
             Ok(_) => count += 1,
             Err(e) => {
                 eprintln!("\n  WARN: skipping {rel_path}: {e:#}");

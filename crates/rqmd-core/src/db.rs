@@ -402,6 +402,20 @@ pub fn delete_collection(conn: &Connection, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove all content_vectors rows for a collection's documents.
+///
+/// Called before re-embedding a collection so that fresh HNSW vids (which
+/// restart from the current index size) never conflict with stale vid values
+/// left behind by a previous interrupted embed run.
+pub fn clear_vectors_for_collection(conn: &Connection, collection: &str) -> Result<usize> {
+    let n = conn.execute(
+        "DELETE FROM content_vectors WHERE hash IN \
+         (SELECT hash FROM documents WHERE collection = ?1 AND active = 1)",
+        params![collection],
+    )?;
+    Ok(n)
+}
+
 pub fn rename_collection(conn: &Connection, old: &str, new: &str) -> Result<()> {
     conn.execute(
         "UPDATE store_collections SET name=?2 WHERE name=?1",

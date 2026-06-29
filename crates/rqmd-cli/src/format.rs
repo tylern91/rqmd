@@ -85,7 +85,7 @@ fn print_cli(results: &[SearchResult], show_full: bool) {
     }
     for (i, r) in results.iter().enumerate() {
         let score_label = yellow(&format!("{:.3}", r.score));
-        let path_label = cyan(&format!("rrrqmd://{}/{}", r.collection, r.path));
+        let path_label = cyan(&r.file);
         println!(
             "{} {} {}",
             dim(&format!("[{}]", i + 1)),
