@@ -39,6 +39,15 @@ pub const DEFAULT_GENERATE_FILE: &str = "qwen3-1.7b-q8_0.gguf";
 // Embedding dimension for embeddinggemma-300M (confirmed in spike: dim=768)
 pub const EMBED_DIM: usize = 768;
 
+// Embed context window size (tokens).  Must stay in sync with `with_n_ctx` / `with_n_ubatch`
+// in `LlamaCppBackend::new`.  encoder-mode (llama_encode) requires n_ubatch >= n_tokens —
+// without truncation a token-dense 3600-char chunk can exceed 2048 tokens and trigger a
+// GGML_ASSERT abort.  Guard: truncate inputs to EMBED_CONTEXT_SIZE - EMBED_TOKEN_MARGIN
+// before encoding.  Mirrors qmd's truncateToContextSize (src/llm.ts:1279).
+const EMBED_CONTEXT_SIZE: usize = 2048;
+/// BOS/EOS overhead margin, matching qmd (src/llm.ts:1291 `maxTokens - 4`).
+const EMBED_TOKEN_MARGIN: usize = 4;
+
 // GBNF grammar for query expansion — produces lex:/vec:/hyde: lines
 pub const EXPANSION_GRAMMAR: &str = r#"
 root  ::= "lex:" text "\n" "vec:" text "\n" "hyde:" text
@@ -115,6 +124,8 @@ pub struct LlamaCppBackend {
     rerank_model: LlamaModel,
     embed_ctx_params: LlamaContextParams,
     rerank_ctx_params: LlamaContextParams,
+    /// KV context size for the reranker — used to guard against token-overflow aborts.
+    rerank_n_ctx: usize,
     embed_model_name: String,
     rerank_model_name: String,
 }
@@ -195,9 +206,9 @@ impl LlamaCppBackend {
         let embed_ctx_params = LlamaContextParams::default()
             .with_embeddings(true)
             .with_pooling_type(LlamaPoolingType::Mean)
-            .with_n_ctx(NonZeroU32::new(2048))
+            .with_n_ctx(NonZeroU32::new(EMBED_CONTEXT_SIZE as u32))
             // encoder requires n_ubatch >= n_tokens; set to match n_ctx
-            .with_n_ubatch(2048);
+            .with_n_ubatch(EMBED_CONTEXT_SIZE as u32);
 
         let rerank_ctx_params = LlamaContextParams::default()
             .with_embeddings(true)
@@ -212,6 +223,7 @@ impl LlamaCppBackend {
             rerank_model,
             embed_ctx_params,
             rerank_ctx_params,
+            rerank_n_ctx: config.rerank_n_ctx as usize,
             embed_model_name: format!("{}/{}", config.embed_repo, config.embed_file),
             rerank_model_name: format!("{}/{}", config.rerank_repo, config.rerank_file),
         })
@@ -220,10 +232,22 @@ impl LlamaCppBackend {
 
 impl InferenceBackend for LlamaCppBackend {
     fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
-        let tokens = self
+        let mut tokens = self
             .embed_model
             .str_to_token(text, AddBos::Always)
             .context("embed tokenization")?;
+        // Guard: encoder (llama_encode) requires n_ubatch >= n_tokens.  Without this
+        // check a token-dense chunk can exceed EMBED_CONTEXT_SIZE and trigger a fatal
+        // GGML_ASSERT abort.  Mirrors qmd's truncateToContextSize (src/llm.ts:1279).
+        let safe_limit = EMBED_CONTEXT_SIZE - EMBED_TOKEN_MARGIN; // 2044
+        if tokens.len() > safe_limit {
+            tracing::debug!(
+                tokens = tokens.len(),
+                limit = safe_limit,
+                "embed input truncated to context window"
+            );
+            tokens.truncate(safe_limit);
+        }
         let mut ctx = self
             .embed_model
             .new_context(&self._backend, self.embed_ctx_params.clone())
@@ -249,10 +273,21 @@ impl InferenceBackend for LlamaCppBackend {
                 .new_context(&self._backend, self.rerank_ctx_params.clone())
                 .context("rerank context")?;
             let input = format!("Query: {query}\nDocument: {doc}");
-            let tokens = self
+            let mut tokens = self
                 .rerank_model
                 .str_to_token(&input, AddBos::Always)
                 .context("rerank tokenization")?;
+            // Guard: ctx.decode() also aborts on n_ubatch < n_tokens.
+            // Truncate to the rerank context window with the same BOS/EOS margin.
+            let rerank_limit = self.rerank_n_ctx.saturating_sub(EMBED_TOKEN_MARGIN);
+            if tokens.len() > rerank_limit {
+                tracing::debug!(
+                    tokens = tokens.len(),
+                    limit = rerank_limit,
+                    "rerank input truncated to context window"
+                );
+                tokens.truncate(rerank_limit);
+            }
             let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
             // Rank pooling reads the last-token logit from embeddings_seq_ith, so the
             // result is identical whether or not every token is an output.  Passing true

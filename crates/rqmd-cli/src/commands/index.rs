@@ -27,9 +27,8 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
             .unwrap_or(0);
 
     // Docs without vectors — need embedding.
-    let docs_needing_embed: i64 = s
-        .db
-        .query_row(
+    let docs_needing_embed: i64 =
+        s.db.query_row(
             "SELECT COUNT(DISTINCT d.hash) FROM documents d \
              WHERE d.active=1 AND d.hash NOT IN (SELECT hash FROM content_vectors)",
             [],
@@ -116,7 +115,7 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             Some(c) => vec![db::list_collections(&s.db)?
                 .into_iter()
                 .find(|col| col.name == c)
-                .with_context(|| format!("collection '{c}' not found"))? ],
+                .with_context(|| format!("collection '{c}' not found"))?],
             None => db::list_collections(&s.db)?,
         }
     };
@@ -129,9 +128,8 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>) -> Result<()> {
     // Fast path: nothing to do.
     {
         let s = store::open_store_no_backend(index_dir)?;
-        let needs_embed: i64 = s
-            .db
-            .query_row(
+        let needs_embed: i64 =
+            s.db.query_row(
                 "SELECT COUNT(DISTINCT d.hash) FROM documents d \
                  WHERE d.active=1 AND d.hash NOT IN (SELECT hash FROM content_vectors)",
                 [],
@@ -350,14 +348,11 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
         // Summary line matching qmd's "Indexed: X new, Y updated..." (qmd.ts:735).
         // rqmd's FTS upsert doesn't track new/updated/unchanged separately —
         // report total as "updated" for now.
-        println!(
-            "\nIndexed: 0 new, {count} updated, 0 unchanged, 0 removed"
-        );
+        println!("\nIndexed: 0 new, {count} updated, 0 unchanged, 0 removed");
 
         // "needs embeddings" notice (qmd.ts:747–748).
-        let needs_embed: i64 = s
-            .db
-            .query_row(
+        let needs_embed: i64 =
+            s.db.query_row(
                 "SELECT COUNT(DISTINCT d.hash) FROM documents d \
                  WHERE d.active=1 AND d.hash NOT IN (SELECT hash FROM content_vectors)",
                 [],
@@ -452,9 +447,8 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         }
 
         // Recommended next steps.
-        let needs_embed: i64 = s
-            .db
-            .query_row(
+        let needs_embed: i64 =
+            s.db.query_row(
                 "SELECT COUNT(DISTINCT d.hash) FROM documents d \
                  WHERE d.active=1 AND d.hash NOT IN (SELECT hash FROM content_vectors)",
                 [],

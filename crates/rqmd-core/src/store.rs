@@ -13,9 +13,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     chunking::chunk_document,
     db::{
-        self, content_hash, doc_for_vid, docid_from_hash, get_content,
-        get_context_for_collection, open_db, upsert_content, upsert_document,
-        upsert_vector_meta,
+        self, content_hash, doc_for_vid, docid_from_hash, get_content, get_context_for_collection,
+        open_db, upsert_content, upsert_document, upsert_vector_meta,
     },
     fts::FtsIndex,
     hnsw::VectorIndex,
@@ -28,10 +27,12 @@ use crate::{
 /// Candidate pool size for reranking.
 const RERANK_CANDIDATE_LIMIT: usize = 20;
 
-/// BM25 strong-signal threshold — if the top result exceeds this and the gap
-/// to second place is ≥ STRONG_SIGNAL_MIN_GAP, skip LLM query expansion.
-const STRONG_SIGNAL_MIN_SCORE: f32 = 8.0;
-const STRONG_SIGNAL_MIN_GAP: f32 = 3.0;
+/// BM25 strong-signal threshold — if the top normalized BM25 score exceeds this
+/// and the gap to second place is ≥ STRONG_SIGNAL_MIN_GAP, skip LLM query expansion.
+/// Values match qmd (src/store.ts:330-331); they operate on the [0,1) normalized score
+/// produced by `Fts::search_fts` (raw Tantivy BM25 squashed via s/(1+s)).
+const STRONG_SIGNAL_MIN_SCORE: f32 = 0.85; // qmd STRONG_SIGNAL_MIN_SCORE
+const STRONG_SIGNAL_MIN_GAP: f32 = 0.15; // qmd STRONG_SIGNAL_MIN_GAP
 
 /// Score blend weights for the final result: rerank_score * HI + rrf_score * LO.
 const BLEND_HI: f32 = 0.75;

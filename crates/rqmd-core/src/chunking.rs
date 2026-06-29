@@ -273,6 +273,157 @@ pub fn chunk_document(text: &str) -> Vec<Chunk> {
     chunks
 }
 
+// ── Snippet extraction ────────────────────────────────────────────────────────
+
+/// Result of [`extract_snippet`].
+pub struct SnippetResult {
+    /// 1-indexed line number of the best matching line in the full document.
+    pub line: usize,
+    /// Snippet text with diff-style header: `@@ -start,count @@ (N before, M after)`.
+    pub snippet: String,
+}
+
+/// Extract a query-relevant snippet from a document body.
+///
+/// Mirrors `extractSnippet` in qmd's `store.ts` (lines 4544–4627).  The returned
+/// snippet carries a diff-style header (`@@ -start,count @@ (before, after)`)
+/// so the caller knows where in the file the excerpt was found.
+///
+/// Parameters:
+/// - `body`       — full document text
+/// - `query`      — search query (whitespace-separated terms)
+/// - `max_len`    — maximum character length of the snippet text (default 500)
+/// - `chunk_pos`  — byte offset of the best chunk in `body` (0 = unknown / first chunk)
+/// - `chunk_len`  — character length of the best chunk (0 = unknown)
+/// - `intent`     — optional domain intent string (ignored in this port; reserved for future)
+pub fn extract_snippet(
+    body: &str,
+    query: &str,
+    max_len: usize,
+    chunk_pos: usize,
+    chunk_len: usize,
+    _intent: Option<&str>,
+) -> SnippetResult {
+    let total_lines = body.lines().count();
+
+    // Determine the search region.
+    let (search_body, line_offset) = if chunk_pos > 0 {
+        let search_len = if chunk_len > 0 {
+            chunk_len
+        } else {
+            CHUNK_SIZE_CHARS
+        };
+        // `chunk_pos` is a byte offset; context is added in chars → convert to bytes
+        // by snapping to char boundaries.
+        let ctx_start_byte = snap_char_boundary_backward(body, chunk_pos.saturating_sub(100));
+        let ctx_end_byte =
+            snap_char_boundary_forward(body, (chunk_pos + search_len + 100).min(body.len()));
+        let lo = body[..ctx_start_byte].lines().count().saturating_sub(1);
+        (&body[ctx_start_byte..ctx_end_byte], lo)
+    } else {
+        (body, 0)
+    };
+
+    let lines: Vec<&str> = search_body.lines().collect();
+    let query_terms: Vec<String> = query
+        .to_lowercase()
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect();
+
+    // Score each line by term overlap.
+    let mut best_line = 0usize;
+    let mut best_score: i32 = -1;
+    for (i, line) in lines.iter().enumerate() {
+        let lower = line.to_lowercase();
+        let mut score = 0i32;
+        for term in &query_terms {
+            if lower.contains(term.as_str()) {
+                score += 1;
+            }
+        }
+        if score > best_score {
+            best_score = score;
+            best_line = i;
+        }
+    }
+
+    // If we focused on a chunk window but found no match, fall back to the full body.
+    if chunk_pos > 0 && best_score <= 0 {
+        if chunk_pos == 0 {
+            return extract_snippet(body, query, max_len, 0, 0, None);
+        }
+        // The reranker picked this chunk — anchor on the chunk start.
+        let ctx_start_byte = snap_char_boundary_backward(body, chunk_pos.saturating_sub(100));
+        let lines_before_ctx = body[..ctx_start_byte].lines().count().saturating_sub(1);
+        best_line = if chunk_pos > ctx_start_byte {
+            body[ctx_start_byte..chunk_pos]
+                .lines()
+                .count()
+                .saturating_sub(1)
+        } else {
+            0
+        };
+        return build_snippet_result(
+            body,
+            search_body,
+            &lines,
+            best_line,
+            line_offset,
+            lines_before_ctx,
+            total_lines,
+            max_len,
+        );
+    }
+
+    build_snippet_result(
+        body,
+        search_body,
+        &lines,
+        best_line,
+        line_offset,
+        0,
+        total_lines,
+        max_len,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_snippet_result(
+    _full_body: &str,
+    _search_body: &str,
+    lines: &[&str],
+    best_line: usize,
+    line_offset: usize,
+    _extra_offset: usize,
+    total_lines: usize,
+    max_len: usize,
+) -> SnippetResult {
+    let start = best_line.saturating_sub(1);
+    let end = (best_line + 3).min(lines.len());
+    let snippet_lines = &lines[start..end];
+    let mut snippet_text = snippet_lines.join("\n");
+
+    if snippet_text.len() > max_len {
+        snippet_text.truncate(max_len.saturating_sub(3));
+        snippet_text.push_str("...");
+    }
+
+    let absolute_start = line_offset + start + 1; // 1-indexed
+    let snippet_line_count = snippet_lines.len();
+    let lines_before = absolute_start - 1;
+    let lines_after = total_lines.saturating_sub(absolute_start + snippet_line_count - 1);
+
+    let header = format!(
+        "@@ -{absolute_start},{snippet_line_count} @@ ({lines_before} before, {lines_after} after)"
+    );
+    let snippet = format!("{header}\n{snippet_text}");
+    let line = line_offset + best_line + 1;
+
+    SnippetResult { line, snippet }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
