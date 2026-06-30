@@ -430,15 +430,18 @@ impl InferenceBackend for LlamaCppBackend {
         let grammar_sampler =
             LlamaSampler::grammar(&self.generate_model, grammar, grammar_root)
                 .map_err(|e| anyhow::anyhow!("GBNF grammar error: {e:?}"))?;
-        // Order matters: temp/top_k/top_p narrow the distribution first, then
-        // grammar filters to valid continuations, then dist does the actual
-        // selection.  Without dist at the end cur_p.selected stays -1 and
-        // llama.cpp aborts with GGML_ASSERT(cur_p.selected >= 0).
+        // Grammar MUST be first: it constrains the full vocabulary to valid
+        // continuations before top_k/top_p narrow further.  If top_k/top_p
+        // run first they can eliminate all grammar-valid tokens, causing
+        // llama.cpp to throw a C++ exception that aborts through Rust FFI.
+        // dist() MUST be last: grammar/temp/top_k/top_p are filters only —
+        // none sets cur_p.selected.  Without dist the sampler aborts with
+        // GGML_ASSERT(cur_p.selected >= 0) in llama_sampler_sample.
         let mut sampler = LlamaSampler::chain_simple([
+            grammar_sampler,
             LlamaSampler::temp(0.7),
             LlamaSampler::top_k(40),
             LlamaSampler::top_p(0.9, 1),
-            grammar_sampler,
             LlamaSampler::dist(1337),
         ]);
 
