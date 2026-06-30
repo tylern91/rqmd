@@ -573,8 +573,7 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
 
     // Check models cache — delegate to rqmd-llm so the path and repo IDs always
     // match what the downloader uses, and HF_HOME / HF_HUB_CACHE are honoured.
-    let model_report =
-        rqmd_llm::model_cache_report(&rqmd_llm::LlamaCppConfig::default());
+    let model_report = rqmd_llm::model_cache_report(&rqmd_llm::LlamaCppConfig::default());
     println!("  Model cache:   {}", model_report.cache_root.display());
     println!(
         "  Embed model:   {}",

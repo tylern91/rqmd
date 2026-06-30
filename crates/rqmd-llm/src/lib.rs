@@ -107,9 +107,8 @@ pub struct ModelCacheReport {
 pub fn model_cache_report(config: &LlamaCppConfig) -> ModelCacheReport {
     // from_env() honours HF_HOME; falls back to ~/.cache/huggingface/hub.
     let cache = Cache::from_env();
-    let cached = |repo: &str, file: &str| -> bool {
-        cache.model(repo.to_string()).get(file).is_some()
-    };
+    let cached =
+        |repo: &str, file: &str| -> bool { cache.model(repo.to_string()).get(file).is_some() };
     ModelCacheReport {
         cache_root: cache.path().clone(),
         embed_cached: cached(&config.embed_repo, &config.embed_file),
