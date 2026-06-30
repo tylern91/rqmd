@@ -30,14 +30,7 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
     let total_vecs: i64 =
         s.db.query_row("SELECT COUNT(*) FROM content_vectors", [], |r| r.get(0))
             .unwrap_or(0);
-    let docs_needing_embed: i64 =
-        s.db.query_row(
-            "SELECT COUNT(DISTINCT d.hash) FROM documents d \
-             WHERE d.active=1 AND d.hash NOT IN (SELECT hash FROM content_vectors)",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
+    let docs_needing_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(0);
     let last_modified: Option<String> =
         s.db.query_row(
             "SELECT MAX(modified_at) FROM documents WHERE active=1",
@@ -279,14 +272,7 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     } else {
         // Fast path: nothing to do.
         let s = store::open_store_no_backend(index_dir)?;
-        let needs_embed: i64 =
-            s.db.query_row(
-                "SELECT COUNT(DISTINCT d.hash) FROM documents d \
-                 WHERE d.active=1 AND d.hash NOT IN (SELECT hash FROM content_vectors)",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(1);
+        let needs_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(1);
         if needs_embed == 0 {
             println!("\x1b[32m✓ All content hashes already have embeddings.\x1b[0m");
             return Ok(());
@@ -529,7 +515,7 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
         s.flush()?;
 
         if is_tty {
-            eprint!("\r                                                            \r");
+            eprint!("\r\x1b[2K");
         }
 
         // Summary line matching qmd's "Indexed: X new, Y updated..." (qmd.ts:735).
@@ -538,14 +524,7 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
         println!("\nIndexed: 0 new, {count} updated, 0 unchanged, 0 removed");
 
         // "needs embeddings" notice (qmd.ts:747–748).
-        let needs_embed: i64 =
-            s.db.query_row(
-                "SELECT COUNT(DISTINCT d.hash) FROM documents d \
-                 WHERE d.active=1 AND d.hash NOT IN (SELECT hash FROM content_vectors)",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+        let needs_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(0);
         if needs_embed > 0 {
             println!(
                 "\nRun 'rqmd embed' to update embeddings ({needs_embed} unique hashes need vectors)"
@@ -634,14 +613,7 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         }
 
         // Recommended next steps.
-        let needs_embed: i64 =
-            s.db.query_row(
-                "SELECT COUNT(DISTINCT d.hash) FROM documents d \
-                 WHERE d.active=1 AND d.hash NOT IN (SELECT hash FROM content_vectors)",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+        let needs_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(0);
         if needs_embed > 0 {
             println!("\n  Recommended next step");
             println!("    Run 'qmd embed' to generate embeddings ({needs_embed} hashes pending)");
