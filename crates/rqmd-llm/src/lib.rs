@@ -182,51 +182,50 @@ impl LlamaCppBackend {
         // Run async HF downloads while keeping this fn sync.
         // Spawning a new Runtime inside an existing tokio context panics; detect and
         // use block_in_place (which yields the thread to the scheduler) instead.
-        let (embed_path, rerank_path, generate_path) =
-            match tokio::runtime::Handle::try_current() {
-                Ok(handle) => tokio::task::block_in_place(|| {
-                    handle.block_on(async {
-                        let api = Api::new().context("hf-hub API init")?;
-                        let ep = api
-                            .model(config.embed_repo.clone())
-                            .get(&config.embed_file)
-                            .await
-                            .context("embed model download")?;
-                        let rp = api
-                            .model(config.rerank_repo.clone())
-                            .get(&config.rerank_file)
-                            .await
-                            .context("rerank model download")?;
-                        let gp = api
-                            .model(config.generate_repo.clone())
-                            .get(&config.generate_file)
-                            .await
-                            .context("generate model download")?;
-                        Ok::<_, anyhow::Error>((ep, rp, gp))
-                    })
+        let (embed_path, rerank_path, generate_path) = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle.block_on(async {
+                    let api = Api::new().context("hf-hub API init")?;
+                    let ep = api
+                        .model(config.embed_repo.clone())
+                        .get(&config.embed_file)
+                        .await
+                        .context("embed model download")?;
+                    let rp = api
+                        .model(config.rerank_repo.clone())
+                        .get(&config.rerank_file)
+                        .await
+                        .context("rerank model download")?;
+                    let gp = api
+                        .model(config.generate_repo.clone())
+                        .get(&config.generate_file)
+                        .await
+                        .context("generate model download")?;
+                    Ok::<_, anyhow::Error>((ep, rp, gp))
+                })
+            })?,
+            Err(_) => tokio::runtime::Runtime::new()
+                .context("tokio runtime init")?
+                .block_on(async {
+                    let api = Api::new().context("hf-hub API init")?;
+                    let ep = api
+                        .model(config.embed_repo.clone())
+                        .get(&config.embed_file)
+                        .await
+                        .context("embed model download")?;
+                    let rp = api
+                        .model(config.rerank_repo.clone())
+                        .get(&config.rerank_file)
+                        .await
+                        .context("rerank model download")?;
+                    let gp = api
+                        .model(config.generate_repo.clone())
+                        .get(&config.generate_file)
+                        .await
+                        .context("generate model download")?;
+                    Ok::<_, anyhow::Error>((ep, rp, gp))
                 })?,
-                Err(_) => tokio::runtime::Runtime::new()
-                    .context("tokio runtime init")?
-                    .block_on(async {
-                        let api = Api::new().context("hf-hub API init")?;
-                        let ep = api
-                            .model(config.embed_repo.clone())
-                            .get(&config.embed_file)
-                            .await
-                            .context("embed model download")?;
-                        let rp = api
-                            .model(config.rerank_repo.clone())
-                            .get(&config.rerank_file)
-                            .await
-                            .context("rerank model download")?;
-                        let gp = api
-                            .model(config.generate_repo.clone())
-                            .get(&config.generate_file)
-                            .await
-                            .context("generate model download")?;
-                        Ok::<_, anyhow::Error>((ep, rp, gp))
-                    })?,
-            };
+        };
 
         // Install the tracing→log bridge BEFORE LlamaBackend::init() so that
         // ggml_metal_device_init (which runs during init) routes through the bridge
@@ -409,7 +408,9 @@ impl InferenceBackend for LlamaCppBackend {
         let mut batch = LlamaBatch::new(n_prompt.max(1), 1);
         for (i, &tok) in tokens.iter().enumerate() {
             let last = i == n_prompt - 1;
-            batch.add(tok, i as i32, &[0], last).context("batch add (prompt)")?;
+            batch
+                .add(tok, i as i32, &[0], last)
+                .context("batch add (prompt)")?;
         }
         ctx.decode(&mut batch).context("generate prompt decode")?;
 
@@ -467,7 +468,9 @@ impl InferenceBackend for LlamaCppBackend {
 
             // Decode the next single token.
             batch.clear();
-            batch.add(tok, n_cur, &[0], true).context("batch add (decode)")?;
+            batch
+                .add(tok, n_cur, &[0], true)
+                .context("batch add (decode)")?;
             ctx.decode(&mut batch).context("generate token decode")?;
         }
 

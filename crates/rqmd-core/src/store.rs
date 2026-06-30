@@ -361,7 +361,11 @@ impl Store {
                         if !results.is_empty() {
                             ranked_lists.push(results);
                             list_meta.push(RankedListMeta {
-                                source: if sub.qtype == QueryType::Hyde { "hyde" } else { "vec" },
+                                source: if sub.qtype == QueryType::Hyde {
+                                    "hyde"
+                                } else {
+                                    "vec"
+                                },
                                 query_type: qt,
                             });
                         }
@@ -373,10 +377,7 @@ impl Store {
             }
         } else {
             // ── Expand mode ────────────────────────────────────────────────────
-            let expand_text = parsed
-                .expand_text
-                .as_deref()
-                .unwrap_or(query);
+            let expand_text = parsed.expand_text.as_deref().unwrap_or(query);
 
             // Step 1: BM25 probe on the raw query.
             let initial_fts = self.fts.search_fts(expand_text, 20, collection)?;
@@ -395,8 +396,7 @@ impl Store {
             }
 
             // Step 2: Embed original query for vector search.
-            let query_embedding =
-                self.backend.embed(expand_text).context("embed query")?;
+            let query_embedding = self.backend.embed(expand_text).context("embed query")?;
             let vec_hits = self.hnsw.search(&query_embedding, 20)?;
             let vec_results = self.vec_hits_to_ranked(vec_hits, collection)?;
             if !vec_results.is_empty() {
@@ -410,8 +410,7 @@ impl Store {
             // Step 3: Query expansion via generation model (skipped on strong BM25 signal).
             if !strong_signal {
                 let prompt = build_expansion_prompt(expand_text, effective_intent.as_deref());
-                match self.backend.generate(&prompt)
-                {
+                match self.backend.generate(&prompt) {
                     Ok(expansion) => {
                         let expansion_lists =
                             self.parse_and_run_expansion(&expansion, collection)?;
