@@ -48,12 +48,6 @@ const EMBED_CONTEXT_SIZE: usize = 2048;
 /// BOS/EOS overhead margin, matching qmd (src/llm.ts:1291 `maxTokens - 4`).
 const EMBED_TOKEN_MARGIN: usize = 4;
 
-// GBNF grammar for query expansion — produces lex:/vec:/hyde: lines
-pub const EXPANSION_GRAMMAR: &str = r#"
-root  ::= "lex:" text "\n" "vec:" text "\n" "hyde:" text
-text  ::= [^\n]+
-"#;
-
 // ── InferenceBackend trait ────────────────────────────────────────────────────
 
 /// Core inference operations needed by qmd's search pipeline.
@@ -74,13 +68,9 @@ pub trait InferenceBackend: Send {
     /// Higher = more relevant. Scores are NOT normalized across pairs.
     fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>>;
 
-    /// Generate constrained text via GBNF grammar. Returns the generated string.
-    fn generate_constrained(
-        &mut self,
-        prompt: &str,
-        grammar: &str,
-        grammar_root: &str,
-    ) -> Result<String>;
+    /// Generate free-form text from a prompt. Returns the generated string.
+    /// The caller is responsible for parsing the output (e.g. stripping lex:/vec:/hyde: lines).
+    fn generate(&mut self, prompt: &str) -> Result<String>;
 
     fn embed_model_name(&self) -> &str;
     fn rerank_model_name(&self) -> &str;
@@ -378,14 +368,10 @@ impl InferenceBackend for LlamaCppBackend {
         Ok(scores)
     }
 
-    fn generate_constrained(
-        &mut self,
-        prompt: &str,
-        grammar: &str,
-        grammar_root: &str,
-    ) -> Result<String> {
-        // Maximum tokens to generate before giving up (grammar forces termination
-        // before this in normal operation — the EXPANSION_GRAMMAR is short).
+    fn generate(&mut self, prompt: &str) -> Result<String> {
+        // Maximum tokens to generate. The ChatML prompt asks for three short lines
+        // (lex:/vec:/hyde:); the early-stop below exits as soon as the hyde: line
+        // is complete so we rarely reach this cap.
         const MAX_EXPANSION_TOKENS: usize = 256;
 
         // Guard: prevent the prompt from blowing the context window.
@@ -427,18 +413,17 @@ impl InferenceBackend for LlamaCppBackend {
         }
         ctx.decode(&mut batch).context("generate prompt decode")?;
 
-        let grammar_sampler =
-            LlamaSampler::grammar(&self.generate_model, grammar, grammar_root)
-                .map_err(|e| anyhow::anyhow!("GBNF grammar error: {e:?}"))?;
-        // Grammar MUST be first: it constrains the full vocabulary to valid
-        // continuations before top_k/top_p narrow further.  If top_k/top_p
-        // run first they can eliminate all grammar-valid tokens, causing
-        // llama.cpp to throw a C++ exception that aborts through Rust FFI.
-        // dist() MUST be last: grammar/temp/top_k/top_p are filters only —
-        // none sets cur_p.selected.  Without dist the sampler aborts with
-        // GGML_ASSERT(cur_p.selected >= 0) in llama_sampler_sample.
+        // Free-form sampler chain — no GBNF grammar.
+        // GBNF grammar sampling is not viable on llama-cpp-2 v0.1.150: the
+        // llama.cpp grammar engine aborts with GGML_ASSERT(!stacks.empty()) when
+        // a multi-byte token drives the grammar into a dead state, and that assert
+        // is uncatchable across Rust FFI.  The output parser (parse_and_run_expansion)
+        // is lenient line-based and never needed the grammar's hard constraint.
+        //
+        // Rule: dist() MUST be last — temp/top_k/top_p are filters only (they do
+        // not set cur_p.selected); without dist the sampler aborts with
+        // GGML_ASSERT(cur_p.selected >= 0).
         let mut sampler = LlamaSampler::chain_simple([
-            grammar_sampler,
             LlamaSampler::temp(0.7),
             LlamaSampler::top_k(40),
             LlamaSampler::top_p(0.9, 1),
@@ -470,6 +455,15 @@ impl InferenceBackend for LlamaCppBackend {
                 .token_to_piece(tok, &mut decoder, false, None)
                 .context("token_to_piece")?;
             out.push_str(&piece);
+
+            // Early stop: once the hyde: line is complete (i.e. out contains
+            // "hyde:" followed by a newline) the three-line format is done.
+            // EOG token and MAX_EXPANSION_TOKENS are additional backstops.
+            if let Some(after_hyde) = out.split_once("hyde:").map(|(_, tail)| tail) {
+                if after_hyde.contains('\n') {
+                    break;
+                }
+            }
 
             // Decode the next single token.
             batch.clear();
@@ -505,8 +499,8 @@ impl InferenceBackend for NoBackend {
     fn rerank(&mut self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>> {
         anyhow::bail!("rerank called without inference backend")
     }
-    fn generate_constrained(&mut self, _p: &str, _g: &str, _r: &str) -> Result<String> {
-        anyhow::bail!("generate_constrained called without inference backend")
+    fn generate(&mut self, _p: &str) -> Result<String> {
+        anyhow::bail!("generate called without inference backend")
     }
     fn embed_model_name(&self) -> &str {
         "none"

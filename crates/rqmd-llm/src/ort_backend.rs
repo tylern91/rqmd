@@ -297,8 +297,8 @@ impl InferenceBackend for OrtBackend {
         anyhow::bail!("OrtBackend: reranking not supported — use LlamaCppBackend for hybrid query")
     }
 
-    fn generate_constrained(&mut self, _p: &str, _g: &str, _r: &str) -> Result<String> {
-        anyhow::bail!("OrtBackend: GBNF generation requires LlamaCppBackend")
+    fn generate(&mut self, _p: &str) -> Result<String> {
+        anyhow::bail!("OrtBackend: generation requires LlamaCppBackend")
     }
 
     fn embed_model_name(&self) -> &str {

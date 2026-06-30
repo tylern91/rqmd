@@ -410,9 +410,7 @@ impl Store {
             // Step 3: Query expansion via generation model (skipped on strong BM25 signal).
             if !strong_signal {
                 let prompt = build_expansion_prompt(expand_text, effective_intent.as_deref());
-                match self
-                    .backend
-                    .generate_constrained(&prompt, rqmd_llm::EXPANSION_GRAMMAR, "root")
+                match self.backend.generate(&prompt)
                 {
                     Ok(expansion) => {
                         let expansion_lists =
@@ -659,8 +657,8 @@ impl Store {
 // ── Module-level helpers ──────────────────────────────────────────────────────
 
 /// Build a ChatML-style expansion prompt for Qwen3.
-/// The model is expected to emit `lex:`, `vec:`, and `hyde:` lines matching
-/// `EXPANSION_GRAMMAR`.
+/// The system prompt requests exactly three lines: `lex:`, `vec:`, and `hyde:`.
+/// Output is parsed leniently by `parse_and_run_expansion` (no grammar enforced).
 fn build_expansion_prompt(query: &str, intent: Option<&str>) -> String {
     let intent_block = match intent {
         Some(i) if !i.is_empty() => format!("Context: {i}\n"),
