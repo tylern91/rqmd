@@ -260,6 +260,21 @@ pub fn has_vector(conn: &Connection, hash: &str, seq: i64, fingerprint: &str) ->
     Ok(count > 0)
 }
 
+/// Count distinct content hashes still needing embedding: active documents with
+/// NON-EMPTY content whose hash has no content_vectors row. The `length(c.doc) > 0`
+/// filter mirrors run_embed's `if body.is_empty() { continue; }` skip — without it,
+/// empty files (hash = SHA-256 of "") count as pending forever but never embed.
+pub fn count_docs_needing_embed(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(DISTINCT d.hash) FROM documents d \
+         JOIN content c ON c.hash = d.hash \
+         WHERE d.active = 1 AND length(c.doc) > 0 \
+         AND d.hash NOT IN (SELECT hash FROM content_vectors)",
+        [],
+        |r| r.get(0),
+    )
+}
+
 /// Check whether a content hash has at least one vector row (any seq, any fingerprint).
 /// Used by `rqmd embed` to skip already-embedded documents during an incremental run.
 pub fn hash_has_any_vector(conn: &Connection, hash: &str) -> bool {

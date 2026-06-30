@@ -1,5 +1,19 @@
 # rqmd Changelog
 
+## [0.1.4] - 2026-06-30
+
+### Fixed
+
+- `update`: replace hard-coded 60-column space-pad clear with `\r\x1b[2K` so the
+  progress line is fully erased before each collection's `Indexed:` summary,
+  regardless of terminal width or path length.
+- `status`, `embed`, `update`, `doctor`: fix phantom `Pending: N need embedding`
+  that `rqmd embed` never cleared. Root cause: the "needs embedding" COUNT query
+  was body-blind — it counted empty-body documents (hash = SHA-256 of `""`) as
+  pending, but the embed loop skips empty bodies. Centralized the query into
+  `db::count_docs_needing_embed` with a `JOIN content … AND length(c.doc) > 0`
+  filter so the count matches what embed will actually process.
+
 ## [0.1.3] - 2026-06-29
 
 ### Fixed
