@@ -44,6 +44,9 @@ enum Commands {
         no_rerank: bool,
         #[arg(long)]
         full: bool,
+        /// Optional context/intent to steer query expansion and reranking.
+        #[arg(long)]
+        intent: Option<String>,
     },
     /// Full-text keyword search (BM25 only, no LLM)
     Search {
@@ -242,9 +245,11 @@ fn main() -> Result<()> {
             format,
             no_rerank,
             full,
+            intent,
         } => commands::query::run_query(
             &index_dir,
             &query,
+            intent.as_deref(),
             collection.as_deref(),
             num,
             &format,

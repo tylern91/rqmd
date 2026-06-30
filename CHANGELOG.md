@@ -1,5 +1,35 @@
 # rqmd Changelog
 
+## [Unreleased]
+
+---
+
+## [0.1.6] - 2026-06-30
+### Added
+
+- Phase 4: HyDE / query expansion — generation model (Qwen3-1.7B Q8_0) downloaded
+  eagerly alongside embed/rerank; free-form constrained generation with ChatML prompt;
+  `lex:`/`vec:`/`hyde:` expansion results fused via RRF (expansion weight 1.0,
+  original weight 2.0); non-fatal fallback (warn + original results) on any error.
+- Typed-line query parser (`rqmd-core::query::parse_query`): routes `lex:`/`vec:`/`hyde:`/`intent:`
+  typed-doc mode directly to their respective search methods; plain lines run expansion.
+- `--intent <STRING>` flag on `rqmd query` and `intent` field in MCP `QueryInput`;
+  intent steers the expansion prompt, reranker cross-encoder query, and snippet term
+  selection.
+
+### Fixed
+
+- Generation model was never downloaded or used: `generate_constrained` was a stub that
+  `bail!()`ed on all backends and the expansion step was skipped.
+- Generation model repo name was wrong (`ggml-org/Qwen3-1.7B-Q8_0-GGUF` does not exist;
+  correct: `ggml-org/Qwen3-1.7B-GGUF`) and filename casing was wrong (`qwen3-1.7b-q8_0.gguf`
+  → `Qwen3-1.7B-Q8_0.gguf`).
+- GBNF grammar sampling caused uncatchable process aborts (`GGML_ASSERT(!stacks.empty())`
+  via C FFI when a multi-byte token drove the grammar into a dead state); replaced with
+  free-form generation (temp/top_k/top_p/dist sampler chain) + lenient line parsing.
+
+---
+
 ## [0.1.5] - 2026-06-30
 
 ### Fixed

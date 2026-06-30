@@ -3,9 +3,11 @@ use std::path::Path;
 
 use crate::{format, store};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_query(
     index_dir: &Path,
     query: &str,
+    intent: Option<&str>,
     collection: Option<&str>,
     num: usize,
     fmt: &str,
@@ -13,7 +15,7 @@ pub fn run_query(
     full: bool,
 ) -> Result<()> {
     let mut s = store::open_store_with_backend(index_dir)?;
-    let results = s.hybrid_query(query, num, collection, no_rerank)?;
+    let results = s.hybrid_query(query, intent, num, collection, no_rerank)?;
     format::print_results(&results, fmt, full, query);
     Ok(())
 }

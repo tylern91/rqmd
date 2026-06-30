@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 rqmd-llm = { path = "../rqmd-llm" }
+tracing = "0.1"
 regex = "1"
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

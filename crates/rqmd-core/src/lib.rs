@@ -2,6 +2,7 @@ pub mod chunking;
 pub mod db;
 pub mod fts;
 pub mod hnsw;
+pub mod query;
 pub mod rrf;
 pub mod store;
 pub mod types;

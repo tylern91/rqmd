@@ -33,8 +33,8 @@ pub const DEFAULT_EMBED_REPO: &str = "ggml-org/embeddinggemma-300M-GGUF";
 pub const DEFAULT_EMBED_FILE: &str = "embeddinggemma-300M-Q8_0.gguf";
 pub const DEFAULT_RERANK_REPO: &str = "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF";
 pub const DEFAULT_RERANK_FILE: &str = "qwen3-reranker-0.6b-q8_0.gguf";
-pub const DEFAULT_GENERATE_REPO: &str = "ggml-org/Qwen3-1.7B-Q8_0-GGUF";
-pub const DEFAULT_GENERATE_FILE: &str = "qwen3-1.7b-q8_0.gguf";
+pub const DEFAULT_GENERATE_REPO: &str = "ggml-org/Qwen3-1.7B-GGUF";
+pub const DEFAULT_GENERATE_FILE: &str = "Qwen3-1.7B-Q8_0.gguf";
 
 // Embedding dimension for embeddinggemma-300M (confirmed in spike: dim=768)
 pub const EMBED_DIM: usize = 768;
@@ -47,12 +47,6 @@ pub const EMBED_DIM: usize = 768;
 const EMBED_CONTEXT_SIZE: usize = 2048;
 /// BOS/EOS overhead margin, matching qmd (src/llm.ts:1291 `maxTokens - 4`).
 const EMBED_TOKEN_MARGIN: usize = 4;
-
-// GBNF grammar for query expansion — produces lex:/vec:/hyde: lines
-pub const EXPANSION_GRAMMAR: &str = r#"
-root  ::= "lex:" text "\n" "vec:" text "\n" "hyde:" text
-text  ::= [^\n]+
-"#;
 
 // ── InferenceBackend trait ────────────────────────────────────────────────────
 
@@ -74,16 +68,13 @@ pub trait InferenceBackend: Send {
     /// Higher = more relevant. Scores are NOT normalized across pairs.
     fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>>;
 
-    /// Generate constrained text via GBNF grammar. Returns the generated string.
-    fn generate_constrained(
-        &mut self,
-        prompt: &str,
-        grammar: &str,
-        grammar_root: &str,
-    ) -> Result<String>;
+    /// Generate free-form text from a prompt. Returns the generated string.
+    /// The caller is responsible for parsing the output (e.g. stripping lex:/vec:/hyde: lines).
+    fn generate(&mut self, prompt: &str) -> Result<String>;
 
     fn embed_model_name(&self) -> &str;
     fn rerank_model_name(&self) -> &str;
+    fn generate_model_name(&self) -> &str;
 }
 
 // ── Model cache inspection (sync, no model load) ─────────────────────────────
@@ -101,9 +92,7 @@ pub struct ModelCacheReport {
 }
 
 /// Return the cache status for all three models without loading any weights.
-/// Embed/rerank repos come from `config`; generation uses the module-level
-/// `DEFAULT_GENERATE_*` constants (the generation model is not part of
-/// `LlamaCppConfig` since it is only downloaded on first HyDE query expansion).
+/// All repos come from `config` so they match what the downloader uses exactly.
 pub fn model_cache_report(config: &LlamaCppConfig) -> ModelCacheReport {
     // from_env() honours HF_HOME; falls back to ~/.cache/huggingface/hub.
     let cache = Cache::from_env();
@@ -113,7 +102,7 @@ pub fn model_cache_report(config: &LlamaCppConfig) -> ModelCacheReport {
         cache_root: cache.path().clone(),
         embed_cached: cached(&config.embed_repo, &config.embed_file),
         rerank_cached: cached(&config.rerank_repo, &config.rerank_file),
-        generate_cached: cached(DEFAULT_GENERATE_REPO, DEFAULT_GENERATE_FILE),
+        generate_cached: cached(&config.generate_repo, &config.generate_file),
     }
 }
 
@@ -125,12 +114,18 @@ pub struct LlamaCppConfig {
     pub embed_file: String,
     pub rerank_repo: String,
     pub rerank_file: String,
+    pub generate_repo: String,
+    pub generate_file: String,
     /// GPU layers for embed model. 99 = all layers on Metal/CUDA.
     pub embed_n_gpu_layers: u32,
     /// GPU layers for reranker. Keep ≤14 on Apple Silicon (448 MiB KV budget).
     pub rerank_n_gpu_layers: u32,
     /// KV cache size for reranker context. Must be >= query+doc token count.
     pub rerank_n_ctx: u32,
+    /// GPU layers for generation model. 99 = all layers on Metal/CUDA.
+    pub generate_n_gpu_layers: u32,
+    /// KV context size for generation. Limits prompt + output token count.
+    pub generate_n_ctx: u32,
     pub hf_cache_dir: Option<PathBuf>,
 }
 
@@ -141,9 +136,13 @@ impl Default for LlamaCppConfig {
             embed_file: DEFAULT_EMBED_FILE.to_string(),
             rerank_repo: DEFAULT_RERANK_REPO.to_string(),
             rerank_file: DEFAULT_RERANK_FILE.to_string(),
+            generate_repo: DEFAULT_GENERATE_REPO.to_string(),
+            generate_file: DEFAULT_GENERATE_FILE.to_string(),
             embed_n_gpu_layers: 99,
             rerank_n_gpu_layers: 14,
             rerank_n_ctx: 2048,
+            generate_n_gpu_layers: 99,
+            generate_n_ctx: 2048,
             hf_cache_dir: None,
         }
     }
@@ -153,12 +152,17 @@ pub struct LlamaCppBackend {
     _backend: LlamaBackend,
     embed_model: LlamaModel,
     rerank_model: LlamaModel,
+    generate_model: LlamaModel,
     embed_ctx_params: LlamaContextParams,
     rerank_ctx_params: LlamaContextParams,
+    generate_ctx_params: LlamaContextParams,
     /// KV context size for the reranker — used to guard against token-overflow aborts.
     rerank_n_ctx: usize,
+    /// KV context size for the generation model — used to guard against overflow.
+    generate_n_ctx: usize,
     embed_model_name: String,
     rerank_model_name: String,
+    generate_model_name: String,
 }
 
 impl LlamaCppBackend {
@@ -172,12 +176,13 @@ impl LlamaCppBackend {
         if force_cpu {
             config.embed_n_gpu_layers = 0;
             config.rerank_n_gpu_layers = 0;
+            config.generate_n_gpu_layers = 0;
         }
 
         // Run async HF downloads while keeping this fn sync.
         // Spawning a new Runtime inside an existing tokio context panics; detect and
         // use block_in_place (which yields the thread to the scheduler) instead.
-        let (embed_path, rerank_path) = match tokio::runtime::Handle::try_current() {
+        let (embed_path, rerank_path, generate_path) = match tokio::runtime::Handle::try_current() {
             Ok(handle) => tokio::task::block_in_place(|| {
                 handle.block_on(async {
                     let api = Api::new().context("hf-hub API init")?;
@@ -191,7 +196,12 @@ impl LlamaCppBackend {
                         .get(&config.rerank_file)
                         .await
                         .context("rerank model download")?;
-                    Ok::<_, anyhow::Error>((ep, rp))
+                    let gp = api
+                        .model(config.generate_repo.clone())
+                        .get(&config.generate_file)
+                        .await
+                        .context("generate model download")?;
+                    Ok::<_, anyhow::Error>((ep, rp, gp))
                 })
             })?,
             Err(_) => tokio::runtime::Runtime::new()
@@ -208,7 +218,12 @@ impl LlamaCppBackend {
                         .get(&config.rerank_file)
                         .await
                         .context("rerank model download")?;
-                    Ok::<_, anyhow::Error>((ep, rp))
+                    let gp = api
+                        .model(config.generate_repo.clone())
+                        .get(&config.generate_file)
+                        .await
+                        .context("generate model download")?;
+                    Ok::<_, anyhow::Error>((ep, rp, gp))
                 })?,
         };
 
@@ -234,6 +249,13 @@ impl LlamaCppBackend {
         )
         .context("rerank model load")?;
 
+        let generate_model = LlamaModel::load_from_file(
+            &backend,
+            &generate_path,
+            &LlamaModelParams::default().with_n_gpu_layers(config.generate_n_gpu_layers),
+        )
+        .context("generate model load")?;
+
         let embed_ctx_params = LlamaContextParams::default()
             .with_embeddings(true)
             .with_pooling_type(LlamaPoolingType::Mean)
@@ -248,15 +270,26 @@ impl LlamaCppBackend {
             .with_n_batch(config.rerank_n_ctx)
             .with_n_ubatch(config.rerank_n_ctx);
 
+        // Generation context: causal (no embeddings/pooling), standard n_batch/n_ubatch=1
+        // since we decode one token at a time in the generation loop.
+        let generate_ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(config.generate_n_ctx))
+            .with_n_batch(config.generate_n_ctx)
+            .with_n_ubatch(config.generate_n_ctx);
+
         Ok(Self {
             _backend: backend,
             embed_model,
             rerank_model,
+            generate_model,
             embed_ctx_params,
             rerank_ctx_params,
+            generate_ctx_params,
             rerank_n_ctx: config.rerank_n_ctx as usize,
+            generate_n_ctx: config.generate_n_ctx as usize,
             embed_model_name: format!("{}/{}", config.embed_repo, config.embed_file),
             rerank_model_name: format!("{}/{}", config.rerank_repo, config.rerank_file),
+            generate_model_name: format!("{}/{}", config.generate_repo, config.generate_file),
         })
     }
 }
@@ -334,25 +367,114 @@ impl InferenceBackend for LlamaCppBackend {
         Ok(scores)
     }
 
-    fn generate_constrained(
-        &mut self,
-        prompt: &str,
-        grammar: &str,
-        grammar_root: &str,
-    ) -> Result<String> {
-        let grammar_sampler = LlamaSampler::grammar(&self.rerank_model, grammar, grammar_root)
-            .map_err(|e| anyhow::anyhow!("GBNF grammar error: {e:?}"))?;
-        let _chain = LlamaSampler::chain_simple([
-            grammar_sampler,
+    fn generate(&mut self, prompt: &str) -> Result<String> {
+        // Maximum tokens to generate. The ChatML prompt asks for three short lines
+        // (lex:/vec:/hyde:); the early-stop below exits as soon as the hyde: line
+        // is complete so we rarely reach this cap.
+        const MAX_EXPANSION_TOKENS: usize = 256;
+
+        // Guard: prevent the prompt from blowing the context window.
+        let prompt_token_estimate = prompt.len() / 3; // conservative char-to-token ratio
+        if prompt_token_estimate + MAX_EXPANSION_TOKENS > self.generate_n_ctx {
+            anyhow::bail!(
+                "expansion prompt too long ({} estimated tokens, ctx={})",
+                prompt_token_estimate,
+                self.generate_n_ctx
+            );
+        }
+
+        let mut ctx = self
+            .generate_model
+            .new_context(&self._backend, self.generate_ctx_params.clone())
+            .context("generate context")?;
+
+        // Qwen3 uses ChatML — BOS is embedded in the template, so AddBos::Never avoids
+        // a double BOS token.  If the prompt is a raw ChatML string this is correct;
+        // if a bare question is passed, AddBos::Always is equally fine (one extra token).
+        let tokens = self
+            .generate_model
+            .str_to_token(prompt, AddBos::Always)
+            .context("generate tokenization")?;
+
+        let n_prompt = tokens.len();
+        if n_prompt + MAX_EXPANSION_TOKENS > self.generate_n_ctx {
+            anyhow::bail!(
+                "expansion prompt too long after tokenization ({n_prompt} tokens, ctx={})",
+                self.generate_n_ctx
+            );
+        }
+
+        // Decode the full prompt in one batch (logits only on the last token).
+        let mut batch = LlamaBatch::new(n_prompt.max(1), 1);
+        for (i, &tok) in tokens.iter().enumerate() {
+            let last = i == n_prompt - 1;
+            batch
+                .add(tok, i as i32, &[0], last)
+                .context("batch add (prompt)")?;
+        }
+        ctx.decode(&mut batch).context("generate prompt decode")?;
+
+        // Free-form sampler chain — no GBNF grammar.
+        // GBNF grammar sampling is not viable on llama-cpp-2 v0.1.150: the
+        // llama.cpp grammar engine aborts with GGML_ASSERT(!stacks.empty()) when
+        // a multi-byte token drives the grammar into a dead state, and that assert
+        // is uncatchable across Rust FFI.  The output parser (parse_and_run_expansion)
+        // is lenient line-based and never needed the grammar's hard constraint.
+        //
+        // Rule: dist() MUST be last — temp/top_k/top_p are filters only (they do
+        // not set cur_p.selected); without dist the sampler aborts with
+        // GGML_ASSERT(cur_p.selected >= 0).
+        let mut sampler = LlamaSampler::chain_simple([
             LlamaSampler::temp(0.7),
-            LlamaSampler::top_k(20),
-            LlamaSampler::top_p(0.8, 1),
+            LlamaSampler::top_k(40),
+            LlamaSampler::top_p(0.9, 1),
+            LlamaSampler::dist(1337),
         ]);
-        // Full generation requires an expand model (qwen3-1.7B); for Phase 1
-        // the grammar compile is the key validation — generation is wired but
-        // returns a stub until the generate model is loaded.
-        let _ = prompt;
-        anyhow::bail!("generate_constrained: generate model not loaded (Phase 4)")
+
+        // Accumulate decoded text; a shared Decoder handles multi-byte UTF-8
+        // sequences that span token boundaries correctly.
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        let mut out = String::new();
+
+        // n_cur tracks the absolute KV-cache position for each generated token.
+        // It starts right after the prompt and increments once per generated token.
+        for (step, _) in (0..MAX_EXPANSION_TOKENS).enumerate() {
+            let n_cur = (n_prompt + step) as i32;
+
+            // After the prompt decode the last-token logits are at the last batch slot.
+            // After each single-token decode the batch holds exactly one slot (index 0).
+            let batch_last = batch.n_tokens() - 1;
+            let tok = sampler.sample(&ctx, batch_last);
+            sampler.accept(tok);
+
+            if self.generate_model.is_eog_token(tok) {
+                break;
+            }
+
+            let piece = self
+                .generate_model
+                .token_to_piece(tok, &mut decoder, false, None)
+                .context("token_to_piece")?;
+            out.push_str(&piece);
+
+            // Early stop: once the hyde: line is complete (i.e. out contains
+            // "hyde:" followed by a newline) the three-line format is done.
+            // EOG token and MAX_EXPANSION_TOKENS are additional backstops.
+            if let Some(after_hyde) = out.split_once("hyde:").map(|(_, tail)| tail) {
+                if after_hyde.contains('\n') {
+                    break;
+                }
+            }
+
+            // Decode the next single token.
+            batch.clear();
+            batch
+                .add(tok, n_cur, &[0], true)
+                .context("batch add (decode)")?;
+            ctx.decode(&mut batch).context("generate token decode")?;
+        }
+
+        Ok(out)
     }
 
     fn embed_model_name(&self) -> &str {
@@ -361,6 +483,10 @@ impl InferenceBackend for LlamaCppBackend {
 
     fn rerank_model_name(&self) -> &str {
         &self.rerank_model_name
+    }
+
+    fn generate_model_name(&self) -> &str {
+        &self.generate_model_name
     }
 }
 
@@ -376,13 +502,16 @@ impl InferenceBackend for NoBackend {
     fn rerank(&mut self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>> {
         anyhow::bail!("rerank called without inference backend")
     }
-    fn generate_constrained(&mut self, _p: &str, _g: &str, _r: &str) -> Result<String> {
-        anyhow::bail!("generate_constrained called without inference backend")
+    fn generate(&mut self, _p: &str) -> Result<String> {
+        anyhow::bail!("generate called without inference backend")
     }
     fn embed_model_name(&self) -> &str {
         "none"
     }
     fn rerank_model_name(&self) -> &str {
+        "none"
+    }
+    fn generate_model_name(&self) -> &str {
         "none"
     }
 }

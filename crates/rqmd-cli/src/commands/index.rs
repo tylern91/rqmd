@@ -596,7 +596,7 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         if model_report.generate_cached {
             "cached ✓"
         } else {
-            "not cached (downloads on first HyDE/expand query)"
+            "not cached (downloads on first model load alongside embed/rerank)"
         }
     );
 

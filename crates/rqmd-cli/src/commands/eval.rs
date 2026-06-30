@@ -423,7 +423,7 @@ pub fn run_eval(_index_dir: &Path, mode: &str, verbose: bool) -> Result<()> {
                 println!("\nMode: hybrid BM25 + vector + RRF + rerank");
                 let results = score_all(&mut |q| {
                     store
-                        .hybrid_query(q, 10, Some("eval-docs"), false)
+                        .hybrid_query(q, None, 10, Some("eval-docs"), false)
                         .unwrap_or_default()
                         .into_iter()
                         .map(|r| r.file)
