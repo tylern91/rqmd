@@ -72,9 +72,13 @@ fn make_config(index_dir: &Path) -> StoreConfig {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct QueryInput {
-    /// Plain-text search query. BM25 + vector retrieval fused with Reciprocal
-    /// Rank Fusion and cross-encoder reranked. (Query expansion: future phase.)
+    /// Search query. Supports plain text (auto-expanded via generation model),
+    /// `expand: text`, or a multi-line typed document with `lex:`, `vec:`,
+    /// `hyde:`, and optional `intent:` lines per the QMD query syntax.
     pub query: String,
+    /// Optional context or intent to steer query expansion, reranking, and
+    /// snippet selection. Equivalent to an `intent:` line inside the query.
+    pub intent: Option<String>,
     /// Filter to a specific collection by name. Omit to search all collections.
     pub collection: Option<String>,
     /// Maximum results to return (default: 10).
@@ -129,8 +133,9 @@ impl RqmdServer {
         let no_rerank = !p.rerank.unwrap_or(true);
         let limit = p.limit.unwrap_or(10);
         let col = p.collection.as_deref();
+        let intent = p.intent.as_deref();
         match self.ml() {
-            Ok(mut store) => match store.hybrid_query(&p.query, limit, col, no_rerank) {
+            Ok(mut store) => match store.hybrid_query(&p.query, intent, limit, col, no_rerank) {
                 Ok(results) => format_results(&results, &p.query),
                 Err(e) => format!("Error running query: {e:#}"),
             },

@@ -18,6 +18,7 @@ use crate::{
     },
     fts::FtsIndex,
     hnsw::VectorIndex,
+    query::parse_query,
     rrf::{reciprocal_rank_fusion, rrf_weights},
     types::{QueryType, RankedListMeta, RankedResult, SearchResult},
 };
@@ -301,10 +302,15 @@ impl Store {
         Ok(results)
     }
 
-    /// Full hybrid search: BM25 + vector → RRF → chunk selection → rerank.
+    /// Full hybrid search: BM25 + vector → optional HyDE expansion → RRF → chunk selection → rerank.
+    ///
+    /// `intent` provides optional context for expansion, reranking, and snippet selection.
+    /// Pass `None` when no intent is available; any `intent:` line in a typed query document
+    /// overrides this parameter.
     pub fn hybrid_query(
         &mut self,
         query: &str,
+        intent: Option<&str>,
         limit: usize,
         collection: Option<&str>,
         skip_rerank: bool,
@@ -312,37 +318,116 @@ impl Store {
         let mut ranked_lists: Vec<Vec<RankedResult>> = Vec::new();
         let mut list_meta: Vec<RankedListMeta> = Vec::new();
 
-        // Step 1: BM25 probe on the raw query.
-        let initial_fts = self.fts.search_fts(query, 20, collection)?;
-        let top_score = initial_fts.first().map(|r| r.2).unwrap_or(0.0);
-        let second_score = initial_fts.get(1).map(|r| r.2).unwrap_or(0.0);
-        let strong_signal = !initial_fts.is_empty()
-            && top_score >= STRONG_SIGNAL_MIN_SCORE
-            && (top_score - second_score) >= STRONG_SIGNAL_MIN_GAP;
+        // Parse the raw query per docs/SYNTAX.md.
+        let parsed = parse_query(query);
 
-        if !initial_fts.is_empty() {
-            ranked_lists.push(fts_hits_to_ranked(&initial_fts));
-            list_meta.push(RankedListMeta {
-                source: "fts",
-                query_type: QueryType::Original,
-            });
+        // Inline `intent:` from the query document takes precedence; fall back to the
+        // parameter (from `--intent` CLI flag or MCP `intent` field).
+        let effective_intent: Option<String> = parsed
+            .intent
+            .clone()
+            .or_else(|| intent.map(|s| s.to_string()));
+
+        // Build the rerank query: prepend intent if present.
+        let rerank_query = match &effective_intent {
+            Some(i) => format!("{i}\n{query}"),
+            None => query.to_string(),
+        };
+
+        if !parsed.subqueries.is_empty() {
+            // ── Query document mode ────────────────────────────────────────────
+            // First sub-query gets weight 2.0 (Original); the rest get 1.0.
+            for (idx, sub) in parsed.subqueries.iter().enumerate() {
+                let qt = if idx == 0 {
+                    QueryType::Original
+                } else {
+                    sub.qtype.clone()
+                };
+                match sub.qtype {
+                    QueryType::Lex => {
+                        let hits = self.fts.search_fts(&sub.text, 20, collection)?;
+                        if !hits.is_empty() {
+                            ranked_lists.push(fts_hits_to_ranked(&hits));
+                            list_meta.push(RankedListMeta {
+                                source: "fts",
+                                query_type: qt,
+                            });
+                        }
+                    }
+                    QueryType::Vec | QueryType::Hyde => {
+                        let emb = self.backend.embed(&sub.text).context("embed sub-query")?;
+                        let hits = self.hnsw.search(&emb, 20)?;
+                        let results = self.vec_hits_to_ranked(hits, collection)?;
+                        if !results.is_empty() {
+                            ranked_lists.push(results);
+                            list_meta.push(RankedListMeta {
+                                source: if sub.qtype == QueryType::Hyde { "hyde" } else { "vec" },
+                                query_type: qt,
+                            });
+                        }
+                    }
+                    QueryType::Original => {
+                        // Not produced by the parser; defensive no-op.
+                    }
+                }
+            }
+        } else {
+            // ── Expand mode ────────────────────────────────────────────────────
+            let expand_text = parsed
+                .expand_text
+                .as_deref()
+                .unwrap_or(query);
+
+            // Step 1: BM25 probe on the raw query.
+            let initial_fts = self.fts.search_fts(expand_text, 20, collection)?;
+            let top_score = initial_fts.first().map(|r| r.2).unwrap_or(0.0);
+            let second_score = initial_fts.get(1).map(|r| r.2).unwrap_or(0.0);
+            let strong_signal = !initial_fts.is_empty()
+                && top_score >= STRONG_SIGNAL_MIN_SCORE
+                && (top_score - second_score) >= STRONG_SIGNAL_MIN_GAP;
+
+            if !initial_fts.is_empty() {
+                ranked_lists.push(fts_hits_to_ranked(&initial_fts));
+                list_meta.push(RankedListMeta {
+                    source: "fts",
+                    query_type: QueryType::Original,
+                });
+            }
+
+            // Step 2: Embed original query for vector search.
+            let query_embedding =
+                self.backend.embed(expand_text).context("embed query")?;
+            let vec_hits = self.hnsw.search(&query_embedding, 20)?;
+            let vec_results = self.vec_hits_to_ranked(vec_hits, collection)?;
+            if !vec_results.is_empty() {
+                ranked_lists.push(vec_results);
+                list_meta.push(RankedListMeta {
+                    source: "vec",
+                    query_type: QueryType::Original,
+                });
+            }
+
+            // Step 3: Query expansion via generation model (skipped on strong BM25 signal).
+            if !strong_signal {
+                let prompt = build_expansion_prompt(expand_text, effective_intent.as_deref());
+                match self
+                    .backend
+                    .generate_constrained(&prompt, rqmd_llm::EXPANSION_GRAMMAR, "root")
+                {
+                    Ok(expansion) => {
+                        let expansion_lists =
+                            self.parse_and_run_expansion(&expansion, collection)?;
+                        ranked_lists.extend(expansion_lists.0);
+                        list_meta.extend(expansion_lists.1);
+                    }
+                    Err(e) => {
+                        // Expansion is an enhancement — failures fall back to
+                        // original BM25+vec results rather than surfacing an error.
+                        tracing::warn!("query expansion skipped: {e:#}");
+                    }
+                }
+            }
         }
-
-        // Step 2: Embed original query for vector search.
-        let query_embedding = self.backend.embed(query).context("embed query")?;
-        let vec_hits = self.hnsw.search(&query_embedding, 20)?;
-        let vec_results = self.vec_hits_to_ranked(vec_hits, collection)?;
-        if !vec_results.is_empty() {
-            ranked_lists.push(vec_results);
-            list_meta.push(RankedListMeta {
-                source: "vec",
-                query_type: QueryType::Original,
-            });
-        }
-
-        // Step 3: Query expansion (skipped on strong BM25 signal).
-        // TODO: wire generate model for lex/vec/hyde expansion (future phase).
-        let _ = strong_signal;
 
         // Step 4: RRF fusion.
         if ranked_lists.is_empty() {
@@ -366,7 +451,12 @@ impl Store {
 
         // Step 6: Chunk selection — chunk each candidate once, reuse for both
         // the rerank input list and the final best_chunk / best_chunk_pos.
-        let query_terms: Vec<String> = query
+        // Fold intent terms into query terms for better snippet selection.
+        let term_source = match &effective_intent {
+            Some(i) => format!("{i} {query}"),
+            None => query.to_string(),
+        };
+        let query_terms: Vec<String> = term_source
             .to_lowercase()
             .split_whitespace()
             .filter(|t| t.len() > 2)
@@ -384,7 +474,8 @@ impl Store {
         let rerank_scores: Option<Vec<f32>> = if skip_rerank {
             None
         } else {
-            self.backend.rerank(query, &chunk_refs).ok()
+            // Use the intent-prepended rerank query for better cross-encoder scoring.
+            self.backend.rerank(&rerank_query, &chunk_refs).ok()
         };
 
         let mut final_results = Vec::new();
@@ -503,9 +594,93 @@ impl Store {
         let body = get_content(&self.db, &doc.hash)?.unwrap_or_default();
         Ok(Some((doc, body)))
     }
+
+    /// Parse the `lex:/vec:/hyde:` output of `generate_constrained` and run
+    /// each expansion as a search, returning ranked lists + their metadata.
+    ///
+    /// Malformed or absent lines are silently skipped (expansion is best-effort).
+    fn parse_and_run_expansion(
+        &mut self,
+        expansion: &str,
+        collection: Option<&str>,
+    ) -> Result<(Vec<Vec<RankedResult>>, Vec<RankedListMeta>)> {
+        let mut lists: Vec<Vec<RankedResult>> = Vec::new();
+        let mut metas: Vec<RankedListMeta> = Vec::new();
+
+        for line in expansion.lines() {
+            let line = line.trim();
+            if let Some(text) = line.strip_prefix("lex:") {
+                let text = text.trim();
+                if !text.is_empty() {
+                    let hits = self.fts.search_fts(text, 20, collection)?;
+                    if !hits.is_empty() {
+                        lists.push(fts_hits_to_ranked(&hits));
+                        metas.push(RankedListMeta {
+                            source: "expand-lex",
+                            query_type: QueryType::Lex,
+                        });
+                    }
+                }
+            } else if let Some(text) = line.strip_prefix("vec:") {
+                let text = text.trim();
+                if !text.is_empty() {
+                    let emb = self.backend.embed(text).context("embed vec expansion")?;
+                    let hits = self.hnsw.search(&emb, 20)?;
+                    let results = self.vec_hits_to_ranked(hits, collection)?;
+                    if !results.is_empty() {
+                        lists.push(results);
+                        metas.push(RankedListMeta {
+                            source: "expand-vec",
+                            query_type: QueryType::Vec,
+                        });
+                    }
+                }
+            } else if let Some(text) = line.strip_prefix("hyde:") {
+                let text = text.trim();
+                if !text.is_empty() {
+                    let emb = self.backend.embed(text).context("embed hyde expansion")?;
+                    let hits = self.hnsw.search(&emb, 20)?;
+                    let results = self.vec_hits_to_ranked(hits, collection)?;
+                    if !results.is_empty() {
+                        lists.push(results);
+                        metas.push(RankedListMeta {
+                            source: "expand-hyde",
+                            query_type: QueryType::Hyde,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok((lists, metas))
+    }
 }
 
 // ── Module-level helpers ──────────────────────────────────────────────────────
+
+/// Build a ChatML-style expansion prompt for Qwen3.
+/// The model is expected to emit `lex:`, `vec:`, and `hyde:` lines matching
+/// `EXPANSION_GRAMMAR`.
+fn build_expansion_prompt(query: &str, intent: Option<&str>) -> String {
+    let intent_block = match intent {
+        Some(i) if !i.is_empty() => format!("Context: {i}\n"),
+        _ => String::new(),
+    };
+    format!(
+        "<|im_start|>system\n\
+         You are a search query expansion assistant. \
+         Given a user query, emit exactly three lines:\n\
+         lex: <keyword or phrase for BM25 search>\n\
+         vec: <natural language question for vector search>\n\
+         hyde: <a 50-100 word hypothetical passage that would answer the query>\n\
+         Output only those three lines. No explanation.\
+         <|im_end|>\n\
+         <|im_start|>user\n\
+         {intent_block}Query: {query}\
+         <|im_end|>\n\
+         <|im_start|>assistant\n"
+    )
+}
 
 fn fts_hits_to_ranked(hits: &[(String, i64, f32)]) -> Vec<RankedResult> {
     hits.iter()

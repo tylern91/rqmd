@@ -308,6 +308,10 @@ impl InferenceBackend for OrtBackend {
     fn rerank_model_name(&self) -> &str {
         "none (OrtBackend)"
     }
+
+    fn generate_model_name(&self) -> &str {
+        "none (OrtBackend)"
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
