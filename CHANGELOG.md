@@ -1,5 +1,19 @@
 # rqmd Changelog
 
+## [0.1.5] - 2026-06-30
+
+### Fixed
+
+- `doctor`: fix model-cache check always reporting "not cached" on macOS. Root
+  cause: the check used `dirs::cache_dir()` (→ `~/Library/Caches/huggingface/hub`)
+  while hf-hub stores models in `~/.cache/huggingface/hub`. Replaced the manual
+  path rebuild with a `rqmd_llm::model_cache_report()` helper that delegates to
+  `hf_hub::Cache::from_env()`, so the path matches the actual downloader and
+  `HF_HOME` overrides are honoured.
+- `doctor`: add Generation model (`Qwen3-1.7B`) to the model-cache report (it was
+  missing; it downloads on first HyDE query expansion, so "not cached" is accurate
+  until first use).
+
 ## [0.1.4] - 2026-06-30
 
 ### Fixed
