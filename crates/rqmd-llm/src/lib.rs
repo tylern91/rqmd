@@ -33,8 +33,8 @@ pub const DEFAULT_EMBED_REPO: &str = "ggml-org/embeddinggemma-300M-GGUF";
 pub const DEFAULT_EMBED_FILE: &str = "embeddinggemma-300M-Q8_0.gguf";
 pub const DEFAULT_RERANK_REPO: &str = "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF";
 pub const DEFAULT_RERANK_FILE: &str = "qwen3-reranker-0.6b-q8_0.gguf";
-pub const DEFAULT_GENERATE_REPO: &str = "ggml-org/Qwen3-1.7B-Q8_0-GGUF";
-pub const DEFAULT_GENERATE_FILE: &str = "qwen3-1.7b-q8_0.gguf";
+pub const DEFAULT_GENERATE_REPO: &str = "ggml-org/Qwen3-1.7B-GGUF";
+pub const DEFAULT_GENERATE_FILE: &str = "Qwen3-1.7B-Q8_0.gguf";
 
 // Embedding dimension for embeddinggemma-300M (confirmed in spike: dim=768)
 pub const EMBED_DIM: usize = 768;
