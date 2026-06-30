@@ -571,29 +571,32 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
     );
     println!();
 
-    // Check models cache
-    let model_cache = dirs::cache_dir()
-        .unwrap_or_default()
-        .join("huggingface/hub");
-    println!("  Model cache:   {}", model_cache.display());
-
-    let embed_model = model_cache.join("models--ggml-org--embeddinggemma-300M-GGUF");
+    // Check models cache — delegate to rqmd-llm so the path and repo IDs always
+    // match what the downloader uses, and HF_HOME / HF_HUB_CACHE are honoured.
+    let model_report = rqmd_llm::model_cache_report(&rqmd_llm::LlamaCppConfig::default());
+    println!("  Model cache:   {}", model_report.cache_root.display());
     println!(
         "  Embed model:   {}",
-        if embed_model.exists() {
+        if model_report.embed_cached {
             "cached ✓"
         } else {
             "not cached (downloads on first embed/query)"
         }
     );
-
-    let rerank_model = model_cache.join("models--ggml-org--Qwen3-Reranker-0.6B-Q8_0-GGUF");
     println!(
         "  Rerank model:  {}",
-        if rerank_model.exists() {
+        if model_report.rerank_cached {
             "cached ✓"
         } else {
             "not cached"
+        }
+    );
+    println!(
+        "  Generation:    {}",
+        if model_report.generate_cached {
+            "cached ✓"
+        } else {
+            "not cached (downloads on first HyDE/expand query)"
         }
     );
 

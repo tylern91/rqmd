@@ -16,7 +16,7 @@
 //! - n_ctx=512 and n_gpu_layers=14 for reranker on Apple Silicon (448 MiB KV limit)
 
 use anyhow::{Context, Result};
-use hf_hub::api::tokio::Api;
+use hf_hub::{api::tokio::Api, Cache};
 use llama_cpp_2::{
     context::params::{LlamaContextParams, LlamaPoolingType},
     llama_backend::LlamaBackend,
@@ -84,6 +84,37 @@ pub trait InferenceBackend: Send {
 
     fn embed_model_name(&self) -> &str;
     fn rerank_model_name(&self) -> &str;
+}
+
+// ── Model cache inspection (sync, no model load) ─────────────────────────────
+
+/// On-disk cache status for the three GGUF models, resolved via the same hf-hub
+/// `Cache` that `LlamaCppBackend::new` downloads into. `rqmd doctor` previously
+/// rebuilt the path with `dirs::cache_dir()`, which is wrong on macOS (hf-hub
+/// uses `~/.cache/huggingface`, not `~/Library/Caches`).
+#[derive(Debug, Clone)]
+pub struct ModelCacheReport {
+    pub cache_root: std::path::PathBuf,
+    pub embed_cached: bool,
+    pub rerank_cached: bool,
+    pub generate_cached: bool,
+}
+
+/// Return the cache status for all three models without loading any weights.
+/// Embed/rerank repos come from `config`; generation uses the module-level
+/// `DEFAULT_GENERATE_*` constants (the generation model is not part of
+/// `LlamaCppConfig` since it is only downloaded on first HyDE query expansion).
+pub fn model_cache_report(config: &LlamaCppConfig) -> ModelCacheReport {
+    // from_env() honours HF_HOME; falls back to ~/.cache/huggingface/hub.
+    let cache = Cache::from_env();
+    let cached =
+        |repo: &str, file: &str| -> bool { cache.model(repo.to_string()).get(file).is_some() };
+    ModelCacheReport {
+        cache_root: cache.path().clone(),
+        embed_cached: cached(&config.embed_repo, &config.embed_file),
+        rerank_cached: cached(&config.rerank_repo, &config.rerank_file),
+        generate_cached: cached(DEFAULT_GENERATE_REPO, DEFAULT_GENERATE_FILE),
+    }
 }
 
 // ── LlamaCppBackend ───────────────────────────────────────────────────────────
