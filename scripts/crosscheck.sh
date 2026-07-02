@@ -67,8 +67,8 @@ QMD_INDEX_DIR="${TS_IDX}" "${TS_BIN}" collection add "${CORPUS_DIR}" --name cros
 QMD_INDEX_DIR="${TS_IDX}" "${TS_BIN}" embed >/dev/null
 
 echo "Indexing corpus with Rust rqmd → ${RS_IDX}"
-RQMD_INDEX_DIR="${RS_IDX}" "${RUST_BIN}" collection add "${CORPUS_DIR}" --name crosscheck >/dev/null
-RQMD_INDEX_DIR="${RS_IDX}" "${RUST_BIN}" embed >/dev/null
+RRQMD_INDEX_DIR="${RS_IDX}" "${RUST_BIN}" collection add "${CORPUS_DIR}" --name crosscheck >/dev/null
+RRQMD_INDEX_DIR="${RS_IDX}" "${RUST_BIN}" embed >/dev/null
 
 echo ""
 
@@ -98,7 +98,7 @@ for query in "${QUERIES[@]}"; do
       2>/dev/null | grep -v '^$' | sort
   )
   rs_docids=$(
-    RQMD_INDEX_DIR="${RS_IDX}" "${RUST_BIN}" query "${query}" -n "${TOP_K}" --format json 2>/dev/null \
+    RRQMD_INDEX_DIR="${RS_IDX}" "${RUST_BIN}" query "${query}" -n "${TOP_K}" --format json 2>/dev/null \
       | python3 -c "import sys,json; r=json.load(sys.stdin); print('\n'.join(d.get('docid','') or d.get('id','') for d in r))" \
       2>/dev/null | grep -v '^$' | sort
   )

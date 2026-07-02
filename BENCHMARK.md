@@ -162,10 +162,10 @@ For ongoing throughput and quality numbers, run:
 cargo run -p rqmd-cli -- bench --rounds 5
 
 # CPU-only (disables Metal/GPU layers in LlamaCppBackend)
-RQMD_FORCE_CPU=1 cargo run -p rqmd-cli -- bench --rounds 5
+RRQMD_FORCE_CPU=1 cargo run -p rqmd-cli -- bench --rounds 5
 
 # ORT CoreML (requires --features ort-backend)
-RQMD_INFERENCE_BACKEND=ort RQMD_ORT_EP=coreml \
+RRQMD_INFERENCE_BACKEND=ort RRQMD_ORT_EP=coreml \
   cargo run -p rqmd-cli --features ort-backend -- bench --rounds 5
 
 # Search quality (BM25 — runs in CI)
@@ -177,6 +177,100 @@ cargo run -p rqmd-cli -- eval --mode hybrid --verbose
 ```
 
 ORT smoke test and vec/hybrid quality gate numbers are recorded in `CHANGELOG.md` once run.
+
+---
+
+---
+
+## Full-Corpus Runtime Benchmark
+
+Reproducible benchmark on a large, real-world markdown corpus to complement the
+de-risking spike data above.
+
+### Methodology
+
+**Corpus:** large local markdown corpus (≈62.9k documents, ≈29 MB). Document sizes
+are small on average (≈474 bytes / ≈100 words each), reflecting a personal knowledge
+base with many short atomic notes.
+
+**Hardware:** Apple M-series (Apple Silicon), Metal GPU, cmake 4.3.3.
+
+**Index:** isolated scratch directory (not `~/.cache/rqmd/`). The binary used is the
+`dist` profile build (`--profile dist`, optimised + LTO).
+
+**Procedure:**
+
+```sh
+# 1. Add corpus (BM25 metadata — fast)
+RRQMD_INDEX_DIR=<scratch> rqmd collection add <corpus> --name vault
+
+# 2. Embed (GPU/Metal — slow; captures throughput from progress output)
+RRQMD_INDEX_DIR=<scratch> rqmd embed -c vault
+
+# 3. Status — capture doc/chunk/vector counts and index size
+RRQMD_INDEX_DIR=<scratch> rqmd status
+
+# 4. Embedding throughput benchmark (in-process, warm Metal)
+RRQMD_INDEX_DIR=<scratch> rqmd bench --rounds 5
+
+# 5. CPU-only comparison
+RRQMD_FORCE_CPU=1 RRQMD_INDEX_DIR=<scratch> rqmd bench --rounds 5
+
+# 6. Search quality (eval fixture corpus, mode: bm25 / vec / hybrid)
+rqmd eval --mode bm25 --verbose
+rqmd eval --mode vec --verbose
+rqmd eval --mode hybrid --verbose
+```
+
+### Corpus Indexing
+
+| Metric | Value |
+|--------|-------|
+| Documents added | 62,878 |
+| Chunks embedded | 210,396 |
+| Index size (SQLite + Tantivy + HNSW) | 1.5 GB (720 MB SQLite, 150 MB Tantivy, 656 MB HNSW) |
+| Embed time (Metal GPU, wall-clock) | 6 h 30 min |
+| Real-world throughput | ~9 chunks/sec (includes disk I/O, chunking, SQLite + HNSW writes) |
+
+The real-world indexing rate (~9 chunks/sec) reflects the end-to-end pipeline overhead.
+The in-process embed throughput below is model-inference only.
+
+### Embedding Throughput (in-process, warm — model inference only)
+
+| Backend | Throughput | Latency/text |
+|---------|------------|--------------|
+| llama-cpp-2 Metal (GPU) | 83 texts/sec | 12.0 ms |
+| llama-cpp-2 CPU only | 123 texts/sec | 8.1 ms |
+
+Note: on Apple Silicon (M-series), the 300 M embedding model fits in CPU L3 cache and
+NEON SIMD is highly efficient for this workload, making CPU throughput competitive with
+(or faster than) Metal for small batch sizes.
+
+### Query Latency (in-process, warm index — no cold-load overhead, n=60 per mode)
+
+| Mode | p50 | p99 | Bottleneck |
+|------|----:|----:|-----------|
+| BM25 (FTS only) | 783 µs | 1,515 µs | Tantivy scorer |
+| Vec (HNSW + embed query) | 10.3 ms | 15.7 ms | HNSW ANN (210 k vectors) |
+| Hybrid, no rerank | 2.0 s | 2.0 s | SQLite text fetch for 20 candidates (720 MB DB) |
+| Hybrid + rerank | 16.6 s | 20.5 s | Cross-encoder rerank × 20 (0.6 B model) |
+
+Hybrid latencies are dominated by I/O on the large SQLite database and sequential
+cross-encoder inference. For interactive use the `vsearch` and `search` modes (BM25/Vec)
+are preferred when sub-second latency is required. `query` (with rerank) is suited for
+batch or offline workflows where quality matters more than speed.
+
+### Search Quality (eval fixture corpus — 24+ queries across easy/medium/hard/fusion tiers)
+
+| Mode | Hit@K | All gates |
+|------|------:|-----------|
+| BM25 | 100% | PASS |
+| Vec | 100% | PASS |
+| Hybrid | 100% | PASS |
+
+Quality is measured on the eval fixture corpus (6 reference documents, 24+ queries).
+This corpus is small and purpose-built to test recall precision; real-world retrieval
+quality varies with corpus diversity and query phrasing.
 
 ---
 

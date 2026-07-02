@@ -1,6 +1,43 @@
 # rqmd Changelog
 
 ## [Unreleased]
+### Added
+
+- `rqmd status`: Models section now shows the exact downloaded `.gguf` filename
+  alongside the HuggingFace repo URL (e.g. `└─ embeddinggemma-300M-Q8_0.gguf`
+  under the repo link). Previously only the repo URL was shown, leaving the actual
+  quantization variant opaque to the user.
+
+- `rqmd bench`: new in-process query-latency phase. When `--index-dir` points at a
+  real index (`index.sqlite` present), the bench opens the store once (amortising
+  model load), warms up each mode, then reports **p50/p99 in µs** across all query–
+  round combinations for: BM25, vector, hybrid-no-rerank, and hybrid-with-rerank.
+  Previously `bench` timed only embedding throughput on a hardcoded 10-text array
+  and ignored `index_dir` entirely. Results are now printed per-mode as each
+  completes (no batching at the end).
+
+- `BENCHMARK.md`: new Full-Corpus Runtime Benchmark section. Runs on a large local
+  markdown corpus (≈62.9k documents, 210k vectors, 1.5 GB index) on Apple M-series.
+  Records end-to-end indexing rate, in-process embed throughput (Metal GPU and CPU),
+  query latency p50/p99 per mode (BM25 / Vec / Hybrid), and search quality Hit@K.
+  All numbers are aggregate only — no corpus paths or document content.
+
+### Fixed
+
+- cmake 4.x is now supported for building `llama-cpp-sys-2` on macOS. The previous
+  belief that cmake 4.x would break the llama.cpp CMake build was Python-specific
+  (the Python `cmake` pip package had an incompatibility); the Rust `llama-cpp-2`
+  crate builds cleanly with cmake 4.x. The CI `pip install "cmake<4"` pin has been
+  removed from `rust.yml` (both `build-macos` and `dist-binary` jobs). The README
+  troubleshooting block and `flake.nix` / `nix.yml` comments have been updated
+  accordingly.
+
+- Environment variable names corrected throughout documentation. All `rqmd` env vars
+  use the `RRQMD_` prefix (double-R), matching what the code actually reads. The
+  docs previously showed `RQMD_*` (single-R), which silently had no effect. Affected:
+  `README.md`, `BENCHMARK.md`, `scripts/crosscheck.sh`. Correct names:
+  `RRQMD_INDEX_DIR`, `RRQMD_INFERENCE_BACKEND`, `RRQMD_ORT_EP`, `RRQMD_FORCE_CPU`,
+  `RRQMD_CI`, `RRQMD_VERBOSE`.
 
 ---
 
