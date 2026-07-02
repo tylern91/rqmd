@@ -1,7 +1,12 @@
 [package]
 name = "rqmd-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "rqmd core engine — BM25 + vector hybrid search with RRF fusion"
+repository = "https://github.com/tylern91/rqmd"
+keywords = ["search", "tantivy", "bm25", "vector-search", "rag"]
+categories = ["text-processing", "database"]
+publish = false
 
 [dependencies]
 anyhow = "1"

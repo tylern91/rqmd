@@ -55,6 +55,17 @@ pub struct StoreConfig {
     pub hnsw_path: PathBuf,
 }
 
+/// Outcome of a BM25-only index operation, used to drive honest update summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexOutcome {
+    /// No existing row for this (collection, path).
+    New,
+    /// Row existed but the content hash changed — document was modified.
+    Updated,
+    /// Row existed and the content hash is identical — nothing changed.
+    Unchanged,
+}
+
 /// Per-chunk embedding metadata buffered by `embed_document_chunks`.
 /// Written to `content_vectors` only after the HNSW file has been flushed to disk.
 #[derive(Debug)]
@@ -165,15 +176,38 @@ impl Store {
 
     /// Index a document for BM25 only — skips embedding. Useful for offline eval
     /// and commands that never run vector search (e.g. `rqmd eval --mode bm25`).
+    ///
+    /// Returns [`IndexOutcome`] so callers (e.g. `rqmd update`) can report accurate
+    /// new / updated / unchanged counts rather than claiming everything as "updated".
     pub fn index_document_fts_only(
         &mut self,
         collection: &str,
         rel_path: &str,
         title: &str,
         body: &str,
-    ) -> Result<()> {
+    ) -> Result<IndexOutcome> {
         let now = rfc3339_now();
         let hash = content_hash(body);
+
+        // Classify the change before upserting so we can return an honest outcome.
+        let outcome = match db::get_document_by_filepath(&self.db, collection, rel_path)
+            .context("get document for classification")?
+        {
+            None => IndexOutcome::New,
+            Some(existing) => {
+                if existing.hash == hash {
+                    IndexOutcome::Unchanged
+                } else {
+                    IndexOutcome::Updated
+                }
+            }
+        };
+
+        // Unchanged: content and Tantivy index are already correct — skip all writes.
+        if outcome == IndexOutcome::Unchanged {
+            return Ok(IndexOutcome::Unchanged);
+        }
+
         upsert_content(&self.db, &hash, body, &now).context("upsert content")?;
         let doc_id = upsert_document(&self.db, collection, rel_path, title, &hash, &now)
             .context("upsert document")?;
@@ -181,7 +215,7 @@ impl Store {
         self.fts
             .add_document(&filepath, title, body, doc_id)
             .context("add to tantivy")?;
-        Ok(())
+        Ok(outcome)
     }
 
     /// Chunk and embed a document's body, add vectors to the in-memory HNSW index,

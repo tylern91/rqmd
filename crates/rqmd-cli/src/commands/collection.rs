@@ -8,9 +8,12 @@ use crate::{format as fmt, store, CollectionCommand};
 
 pub fn run(index_dir: &Path, cmd: CollectionCommand) -> Result<()> {
     match cmd {
-        CollectionCommand::Add { path, name, mask } => {
-            add(index_dir, &path, name.as_deref(), mask.as_deref())
-        }
+        CollectionCommand::Add {
+            path,
+            name,
+            mask,
+            ignore,
+        } => add(index_dir, &path, name.as_deref(), mask.as_deref(), ignore),
         CollectionCommand::List => list(index_dir),
         CollectionCommand::Remove { name } => remove(index_dir, &name),
         CollectionCommand::Rename { old, new } => rename(index_dir, &old, &new),
@@ -21,7 +24,13 @@ pub fn run(index_dir: &Path, cmd: CollectionCommand) -> Result<()> {
     }
 }
 
-fn add(index_dir: &Path, dir: &str, name: Option<&str>, mask: Option<&str>) -> Result<()> {
+fn add(
+    index_dir: &Path,
+    dir: &str,
+    name: Option<&str>,
+    mask: Option<&str>,
+    ignore: Vec<String>,
+) -> Result<()> {
     let abs_dir = PathBuf::from(dir)
         .canonicalize()
         .with_context(|| format!("cannot resolve path: {dir}"))?;
@@ -46,12 +55,14 @@ fn add(index_dir: &Path, dir: &str, name: Option<&str>, mask: Option<&str>) -> R
     let mut s = store::open_store_no_backend(index_dir)?;
     let is_tty = fmt::atty_stderr();
 
-    // Register the collection
+    let ignore_set = crate::exclusions::build_ignore_set(&ignore);
+
+    // Register the collection (persists ignore patterns for future updates)
     let col = Collection {
         name: collection_name.clone(),
         path: abs_dir.to_string_lossy().to_string(),
         pattern: pattern.clone(),
-        ignore: vec![],
+        ignore,
         include_by_default: true,
         update_command: None,
     };
@@ -69,6 +80,9 @@ fn add(index_dir: &Path, dir: &str, name: Option<&str>, mask: Option<&str>) -> R
     {
         let path = entry.path();
         if !path.is_file() {
+            continue;
+        }
+        if crate::exclusions::is_excluded(path, &abs_dir, &ignore_set) {
             continue;
         }
         if let Some(ref ext_filter) = ext {
@@ -131,7 +145,7 @@ fn list(index_dir: &Path) -> Result<()> {
     let s = store::open_store_no_backend(index_dir)?;
     let cols = db::list_collections(&s.db)?;
     if cols.is_empty() {
-        println!("No collections. Run `qmd collection add <path> --name <name>` to add one.");
+        println!("No collections. Run `rqmd collection add <path> --name <name>` to add one.");
         return Ok(());
     }
     println!("{:<30}  {:<8}  {:<12}  PATH", "NAME", "DOCS", "INCLUDED");

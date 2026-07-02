@@ -1,22 +1,31 @@
 [package]
 name = "rqmd-cli"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2021"
 description = "rqmd CLI — hybrid local document search"
+repository = "https://github.com/tylern91/rqmd"
+keywords = ["search", "markdown", "rag", "mcp", "cli"]
+categories = ["command-line-utilities", "text-processing"]
+publish = false  # crate name 'rqmd' is taken on crates.io — resolve before publishing
 
 [[bin]]
 name = "rqmd"
 path = "src/main.rs"
 
 [features]
-default = []
-# Enable ONNX Runtime backend (CoreML/CUDA/DirectML) — passes through to rqmd-llm
+default = ["metal"]
+# GPU acceleration (passed through to rqmd-llm / llama-cpp-2)
+metal  = ["rqmd-llm/metal"]    # Apple Silicon (default on)
+cuda   = ["rqmd-llm/cuda"]     # NVIDIA CUDA
+vulkan = ["rqmd-llm/vulkan"]   # Vulkan (cross-vendor)
+# ONNX Runtime backend (CoreML/CUDA/DirectML) — passes through to rqmd-llm
 ort-backend = ["rqmd-llm/ort-backend"]
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
+globset = "0.4"
 indicatif = "0.17"
 rqmd-core = { path = "../rqmd-core" }
 rqmd-llm = { path = "../rqmd-llm" }

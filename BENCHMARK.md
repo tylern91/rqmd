@@ -1,8 +1,8 @@
-# Phase 0 De-risking Benchmarks
+# De-risking Benchmarks
 
-This document records the methodology, raw results, and decisions from the Phase 0
-spikes that validated the Rust port's two highest-risk choices: **inference backend**
-and **search database**. It is the permanent reference for "why llama-cpp-2, why
+This document records the methodology, raw results, and decisions from the technology
+evaluation that validated rqmd's two highest-risk choices: **inference backend** and
+**search database**. It is the permanent reference for "why llama-cpp-2, why
 Tantivy+usearch" — read this before changing either.
 
 ---
@@ -161,11 +161,11 @@ For ongoing throughput and quality numbers, run:
 # Throughput bench (all backends)
 cargo run -p rqmd-cli -- bench --rounds 5
 
-# CPU-only (QMD_FORCE_CPU=1)
-QMD_FORCE_CPU=1 cargo run -p rqmd-cli -- bench --rounds 5
+# CPU-only (disables Metal/GPU layers in LlamaCppBackend)
+RQMD_FORCE_CPU=1 cargo run -p rqmd-cli -- bench --rounds 5
 
 # ORT CoreML (requires --features ort-backend)
-QMD_INFERENCE_BACKEND=ort QMD_ORT_EP=coreml \
+RQMD_INFERENCE_BACKEND=ort RQMD_ORT_EP=coreml \
   cargo run -p rqmd-cli --features ort-backend -- bench --rounds 5
 
 # Search quality (BM25 — runs in CI)
@@ -176,7 +176,7 @@ cargo run -p rqmd-cli -- eval --mode vec --verbose
 cargo run -p rqmd-cli -- eval --mode hybrid --verbose
 ```
 
-Phase 6 Task 1 (ORT smoke test) and Task 3 (vec/hybrid quality gate) numbers are recorded in `CHANGELOG.md` once run.
+ORT smoke test and vec/hybrid quality gate numbers are recorded in `CHANGELOG.md` once run.
 
 ---
 

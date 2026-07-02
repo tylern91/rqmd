@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Instant;
 use walkdir::WalkDir;
 
-use rqmd_core::{db, PendingVectorMeta};
+use rqmd_core::{db, IndexOutcome, PendingVectorMeta};
 
 use crate::{format as fmt, store};
 
@@ -460,7 +460,11 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             .filter(|e| *e != "*")
             .map(|e| e.to_string());
 
-        let mut count = 0usize;
+        let ignore_set = crate::exclusions::build_ignore_set(&col.ignore);
+
+        let mut new_count = 0usize;
+        let mut updated_count = 0usize;
+        let mut unchanged_count = 0usize;
         let mut processed = 0usize;
 
         // Pre-collect matching paths so we know the total before indexing begins,
@@ -471,6 +475,7 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             .filter_map(|e| e.ok())
             .map(|e| e.into_path())
             .filter(|p| p.is_file())
+            .filter(|p| !crate::exclusions::is_excluded(p, dir, &ignore_set))
             .filter(|p| match &ext {
                 Some(ext_filter) => {
                     p.extension().and_then(|e| e.to_str()) == Some(ext_filter.as_str())
@@ -505,10 +510,11 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
                 eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
             }
 
-            if let Err(e) = s.index_document_fts_only(&col.name, &rel, &title, &body) {
-                eprintln!("  WARN: {rel}: {e:#}");
-            } else {
-                count += 1;
+            match s.index_document_fts_only(&col.name, &rel, &title, &body) {
+                Err(e) => eprintln!("  WARN: {rel}: {e:#}"),
+                Ok(IndexOutcome::New) => new_count += 1,
+                Ok(IndexOutcome::Updated) => updated_count += 1,
+                Ok(IndexOutcome::Unchanged) => unchanged_count += 1,
             }
         }
 
@@ -519,17 +525,18 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
         }
 
         // Summary line matching qmd's "Indexed: X new, Y updated..." (qmd.ts:735).
-        // rqmd's FTS upsert doesn't track new/updated/unchanged separately —
-        // report total as "updated" for now.
-        println!("\nIndexed: 0 new, {count} updated, 0 unchanged, 0 removed");
+        println!(
+            "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, 0 removed"
+        );
+    }
 
-        // "needs embeddings" notice (qmd.ts:747–748).
-        let needs_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(0);
-        if needs_embed > 0 {
-            println!(
-                "\nRun 'rqmd embed' to update embeddings ({needs_embed} unique hashes need vectors)"
-            );
-        }
+    // "needs embeddings" notice (qmd.ts:747–748) — printed once after all collections
+    // so it isn't repeated N times with the same global count during a multi-collection update.
+    let needs_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(0);
+    if needs_embed > 0 {
+        println!(
+            "\nRun 'rqmd embed' to update embeddings ({needs_embed} unique hashes need vectors)"
+        );
     }
     Ok(())
 }

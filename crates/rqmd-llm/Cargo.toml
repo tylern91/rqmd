@@ -1,11 +1,21 @@
 [package]
 name = "rqmd-llm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "rqmd inference backend — LlamaCpp and ONNX Runtime backends for embedding and reranking"
+repository = "https://github.com/tylern91/rqmd"
+keywords = ["llama", "onnx", "embedding", "reranking", "inference"]
+categories = ["science", "text-processing"]
+publish = false
 
 [features]
-default = []
-# Enables the OrtBackend: ONNX inference via ort v2 with pluggable EPs
+# Metal (Apple GPU) enabled by default — a no-op on non-Apple platforms.
+default = ["metal"]
+# GPU acceleration: select the layer(s) appropriate for your hardware.
+metal  = ["llama-cpp-2/metal"]    # Apple Silicon / Metal (macOS)
+cuda   = ["llama-cpp-2/cuda"]     # NVIDIA CUDA
+vulkan = ["llama-cpp-2/vulkan"]   # Cross-vendor Vulkan GPU
+# ONNX Runtime backend with pluggable execution providers
 # (CoreML on macOS, CUDA on Linux, DirectML on Windows, CPU fallback).
 ort-backend = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 
@@ -13,7 +23,7 @@ ort-backend = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 anyhow = "1"
 encoding_rs = "0.8"
 hf-hub = { version = "0.5", features = ["tokio"] }
-llama-cpp-2 = { version = "0.1.150", features = ["metal", "sampler"] }
+llama-cpp-2 = { version = "0.1.150", features = ["sampler"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 

@@ -4,6 +4,50 @@
 
 ---
 
+## [0.2.0] - 2026-07-02
+### Added
+
+- `scripts/install.sh`: content-aware install that replaces `cargo install --path`.
+  Uses `cargo build` fingerprinting (content-based, not version-based) then atomically
+  copies the fresh binary to `~/.cargo/bin/rqmd`. Supports `RQMD_PROFILE` env var and
+  passes extra args through (e.g. `./scripts/install.sh --features ort-backend`).
+- File exclusion on `collection add` and `rqmd update`: new `--ignore <PATTERN>` flag
+  accepts gitignore-style glob patterns (powered by `globset`). Built-in exclusions
+  always apply: hidden paths (`.`-prefixed), `node_modules`, `vendor`, `dist`, `build`,
+  `target`, `.cache`. Patterns are stored in the collection record and re-applied on
+  every subsequent `update` run for that collection.
+- `rqmd mcp --daemon`: self-respawns as a background HTTP process (implies `--http`)
+  and exits, leaving the server running detached. Existing `--http`/`--port` flags
+  are unchanged.
+- GPU feature flags in `rqmd-llm` and `rqmd-cli`: `metal` (default on, no behaviour
+  change for existing macOS builds), `cuda`, and `vulkan`. CPU-only builds:
+  `--no-default-features`. Previously `metal` was hardcoded in the `llama-cpp-2` dep.
+
+### Fixed
+
+- `rqmd update`: unchanged documents no longer re-added to the Tantivy FTS index.
+  Previously `index_document_fts_only` always called `fts.add_document` even when the
+  content hash was identical, causing duplicate Tantivy segments that inflated scores
+  and grew the on-disk index on every `update` run.
+- File exclusion: non-UTF-8 path components now correctly exclude the path (fail-closed)
+  instead of silently passing all exclusion checks via `unwrap_or("")`.
+
+### Changed
+
+- `BENCHMARK.md`: removed "Phase 0" internal-phase framing; fixed stale `QMD_*` env
+  vars to `RQMD_*`; removed stale "Phase 6" internal reference. All tables and
+  performance comparison data preserved.
+- `README.md`: six new sections — *Excluding files*, *Models*, *MCP server*, *Where
+  data lives*, *Differences from qmd*, *Migrating from qmd*. QMD inspiration credit
+  added to tagline and Acknowledgements. Install docs now reference `scripts/install.sh`.
+- All four `Cargo.toml` files: added `publish = false`, `repository`, `keywords`,
+  `categories` metadata. `rqmd` package name is taken on crates.io by a separate
+  project (`stn/rqmd`); `publish = false` guards against accidental publish.
+- Stale `qmd-cli` / `target/dist/qmd` / `QMD_INDEX_DIR` references fixed in
+  `.cargo/config.toml`, `flake.nix`, and `scripts/crosscheck.sh`.
+
+---
+
 ## [0.1.6] - 2026-06-30
 ### Added
 

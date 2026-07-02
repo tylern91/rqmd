@@ -8,5 +8,5 @@ pub mod store;
 pub mod types;
 
 pub use chunking::{extract_snippet, SnippetResult};
-pub use store::{PendingVectorMeta, Store, StoreConfig};
+pub use store::{IndexOutcome, PendingVectorMeta, Store, StoreConfig};
 pub use types::{Collection, Document, SearchResult};

@@ -1,8 +1,12 @@
 [package]
 name = "rqmd-mcp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "rqmd MCP server — hybrid local document search via Model Context Protocol"
+repository = "https://github.com/tylern91/rqmd"
+keywords = ["mcp", "search", "rag", "model-context-protocol"]
+categories = ["text-processing", "web-programming"]
+publish = false
 
 [dependencies]
 anyhow = "1"
