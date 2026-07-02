@@ -64,7 +64,7 @@ Until that phase ships, `rqmd query` uses BM25 + vector + RRF + rerank only.
 
 ### From source (recommended while in development)
 
-Requirements: Rust stable (≥1.78), cmake ≥3.14 (pinned to 3.x — see [Troubleshooting](#troubleshooting)), Xcode Command Line Tools (macOS) or `build-essential` (Linux).
+Requirements: Rust stable (≥1.78), cmake ≥3.14 (cmake 4.x supported), Xcode Command Line Tools (macOS) or `build-essential` (Linux).
 
 ```sh
 # Clone the repo
@@ -169,9 +169,9 @@ rqmd mcp --http --port 8181         # Streamable HTTP transport
 Global flags (before the subcommand):
 
 ```
---index-dir <path>       Override index directory ($RQMD_INDEX_DIR)
---backend llama|ort      Inference backend ($RQMD_INFERENCE_BACKEND)
---ort-ep auto|coreml|cuda|directml|cpu   ORT execution provider ($RQMD_ORT_EP)
+--index-dir <path>       Override index directory ($RRQMD_INDEX_DIR)
+--backend llama|ort      Inference backend ($RRQMD_INFERENCE_BACKEND)
+--ort-ep auto|coreml|cuda|directml|cpu   ORT execution provider ($RRQMD_ORT_EP)
 ```
 
 ---
@@ -223,7 +223,7 @@ unless CUDA is available.
 ```sh
 rqmd embed                          # uses LlamaCppBackend by default
 rqmd --backend llama embed          # explicit
-RQMD_INFERENCE_BACKEND=llama rqmd embed
+RRQMD_INFERENCE_BACKEND=llama rqmd embed
 ```
 
 ### OrtBackend (`ort-backend` feature)
@@ -236,7 +236,7 @@ Build with `--features ort-backend`.
 | Embeddings | `BAAI/bge-base-en-v1.5` (ONNX) | ~440MB |
 | Reranking | *(not supported — falls back to LlamaCppBackend)* | — |
 
-Execution providers selected by `--ort-ep` or `RQMD_ORT_EP`:
+Execution providers selected by `--ort-ep` or `RRQMD_ORT_EP`:
 
 | EP | Flag | Platform | Hardware |
 |----|------|----------|----------|
@@ -248,7 +248,7 @@ Execution providers selected by `--ort-ep` or `RQMD_ORT_EP`:
 
 ```sh
 # CoreML (Apple Neural Engine — fastest for embed-sized models on M-series)
-RQMD_INFERENCE_BACKEND=ort RQMD_ORT_EP=coreml rqmd embed
+RRQMD_INFERENCE_BACKEND=ort RRQMD_ORT_EP=coreml rqmd embed
 rqmd --backend ort --ort-ep coreml embed
 ```
 
@@ -307,11 +307,11 @@ For Claude Desktop, add to `claude_desktop_config.json`:
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `RQMD_INDEX_DIR` | path | `~/.cache/rqmd/` | Index storage directory |
-| `RQMD_INFERENCE_BACKEND` | `llama`, `ort` | `llama` | Inference backend |
-| `RQMD_ORT_EP` | `auto`, `coreml`, `cuda`, `directml`, `cpu` | `auto` | ONNX Runtime EP |
-| `RQMD_FORCE_CPU` | `1` | *(unset)* | Disable GPU layers in LlamaCppBackend |
-| `RQMD_CI` | `1` | *(unset)* | Skip model downloads (CI / offline use) |
+| `RRQMD_INDEX_DIR` | path | `~/.cache/rqmd/` | Index storage directory |
+| `RRQMD_INFERENCE_BACKEND` | `llama`, `ort` | `llama` | Inference backend |
+| `RRQMD_ORT_EP` | `auto`, `coreml`, `cuda`, `directml`, `cpu` | `auto` | ONNX Runtime EP |
+| `RRQMD_FORCE_CPU` | `1` | *(unset)* | Disable GPU layers in LlamaCppBackend |
+| `RRQMD_CI` | `1` | *(unset)* | Skip model downloads (CI / offline use) |
 
 ---
 
@@ -325,7 +325,7 @@ For Claude Desktop, add to `claude_desktop_config.json`:
 | Model cache (HuggingFace) | `~/.cache/huggingface/hub/` |
 | Project-local index | `.rqmd/` (created by `rqmd init`) |
 
-Override the root index directory with `--index-dir <path>` or `$RQMD_INDEX_DIR`.
+Override the root index directory with `--index-dir <path>` or `$RRQMD_INDEX_DIR`.
 
 ---
 
@@ -394,7 +394,7 @@ pub trait InferenceBackend: Send {
     fn rerank_model_name(&self) -> &str;
 }
 
-// Factory: reads RQMD_INFERENCE_BACKEND + RQMD_ORT_EP from env
+// Factory: reads RRQMD_INFERENCE_BACKEND + RRQMD_ORT_EP from env
 let backend: Box<dyn InferenceBackend> = create_backend(&BackendKind::from_env())?;
 ```
 
@@ -470,15 +470,15 @@ rqmd collection add ~/path/to/your/docs --name your-collection
 rqmd embed
 ```
 
-All environment variables are prefixed `RQMD_` instead of `QMD_`:
+All environment variables are prefixed `RRQMD_` instead of `QMD_`:
 
 | Old (qmd) | New (rqmd) |
 |-----------|-----------|
-| `QMD_INDEX_DIR` | `RQMD_INDEX_DIR` |
-| `QMD_INFERENCE_BACKEND` | `RQMD_INFERENCE_BACKEND` |
-| `QMD_ORT_EP` | `RQMD_ORT_EP` |
-| `QMD_FORCE_CPU` | `RQMD_FORCE_CPU` |
-| `QMD_CI` | `RQMD_CI` |
+| `QMD_INDEX_DIR` | `RRQMD_INDEX_DIR` |
+| `QMD_INFERENCE_BACKEND` | `RRQMD_INFERENCE_BACKEND` |
+| `QMD_ORT_EP` | `RRQMD_ORT_EP` |
+| `QMD_FORCE_CPU` | `RRQMD_FORCE_CPU` |
+| `QMD_CI` | `RRQMD_CI` |
 
 The MCP server now identifies as `rqmd` — update any `claude_desktop_config.json` entries accordingly.
 
@@ -486,18 +486,11 @@ The MCP server now identifies as `rqmd` — update any `claude_desktop_config.js
 
 ## Troubleshooting
 
-### cmake 4.x breaks the llama.cpp build
+### cmake version requirements
 
-If you have cmake 4.x installed, `llama-cpp-sys-2` fails to compile because
-llama.cpp's `CMakeLists.txt` specifies `cmake_minimum_required(VERSION 3.14...3.28)`.
-
-```sh
-# macOS fix — install cmake 3.x and put it first on PATH
-brew install cmake@3
-export PATH="$(brew --prefix cmake@3)/bin:$PATH"
-```
-
-The CI workflow pins cmake@3 automatically via `pip install "cmake<4"`.
+cmake ≥3.14 is required. cmake 4.x is supported — the `llama-cpp-sys-2` crate
+(which builds llama.cpp from source) builds correctly with cmake 4.x on macOS
+and Linux. You do not need to pin or downgrade cmake.
 
 **Do not** add `target-cpu` flags to `.cargo/config.toml` — they change the
 llama-cpp-sys fingerprint and force a cmake rebuild. Pass them at build time:
@@ -540,7 +533,7 @@ The search quality gate is `rqmd eval`:
 cargo run -p rqmd-cli -- eval --mode bm25 --verbose
 
 # Full hybrid quality (requires models — run before search-path changes)
-RQMD_INFERENCE_BACKEND=llama cargo run -p rqmd-cli -- eval --mode hybrid
+RRQMD_INFERENCE_BACKEND=llama cargo run -p rqmd-cli -- eval --mode hybrid
 
 # Embed throughput (compare backends)
 cargo run -p rqmd-cli -- bench -n 5

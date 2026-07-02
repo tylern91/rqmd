@@ -21,7 +21,7 @@
           pkgs.cargo
           pkgs.rustfmt
           pkgs.clippy
-          # cmake 3.x — llama.cpp CMakeLists.txt requires VERSION 3.14..3.28
+          # cmake ≥3.14 (4.x supported) — required to build llama-cpp-sys-2
           pkgs.cmake
           pkgs.pkg-config
         ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
