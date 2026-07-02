@@ -4,6 +4,8 @@ Rust-based mini CLI search engine for your docs, knowledge bases, meeting notes,
 
 Hybrid local document search in a single static binary. No Node. No Bun. No native-module rebuild per platform. Build once, run anywhere.
 
+Built on the search pipeline and ideas of **[tobi/qmd](https://github.com/tobi/qmd)**. Coming from qmd? See [Migrating from qmd](#migrating-from-qmd).
+
 ## Contents
 
 - [Why Rust](#why-rust)
@@ -11,11 +13,17 @@ Hybrid local document search in a single static binary. No Node. No Bun. No nati
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [CLI reference](#cli-reference)
+- [Excluding files](#excluding-files)
 - [Inference backends](#inference-backends)
+- [Models](#models)
+- [MCP server](#mcp-server)
 - [Environment variables](#environment-variables)
+- [Where data lives](#where-data-lives)
 - [Workspace layout](#workspace-layout)
 - [Crate API](#crate-api)
 - [Design decisions](#design-decisions)
+- [Differences from qmd](#differences-from-qmd)
+- [Migrating from qmd](#migrating-from-qmd)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
 - [Acknowledgements](#acknowledgements)
@@ -70,14 +78,21 @@ cargo build -p rqmd-cli
 cargo build --profile dist -p rqmd-cli
 # → target/dist/rqmd
 
-# Install to ~/.cargo/bin/
-cargo install --path crates/rqmd-cli --profile dist
+# Install to ~/.cargo/bin/ (content-aware: rebuilds only when source changed)
+./scripts/install.sh
 ```
+
+> **Why not `cargo install --path`?** `cargo install` skips reinstalling when the crate version
+> is unchanged, so source changes without a version bump are silently ignored. `scripts/install.sh`
+> uses `cargo build`'s fingerprinting instead — it rebuilds only when something actually changed,
+> then copies the fresh binary into `~/.cargo/bin/`. No `--force`, no manual version bump.
 
 ### With ONNX Runtime backend (CoreML / CUDA / DirectML)
 
 ```sh
 cargo build --profile dist -p rqmd-cli --features ort-backend
+# or install directly:
+./scripts/install.sh --features ort-backend
 ```
 
 This downloads the ONNX Runtime library at build time. The resulting binary
@@ -137,8 +152,8 @@ rqmd mcp --http --port 8181         # Streamable HTTP transport
 | `rqmd doctor` | Diagnose config, index, model, and device issues |
 | `rqmd bench [-n N]` | Embed throughput benchmark (default: 5 rounds) |
 | `rqmd eval [--mode bm25\|vec\|hybrid] [--verbose]` | Search quality eval against synthetic fixtures |
-| `rqmd mcp [--http] [--port N]` | Start MCP server |
-| `rqmd collection add <path>` | Add a directory as a collection |
+| `rqmd mcp [--http] [--port N] [--daemon]` | Start MCP server |
+| `rqmd collection add <path> [--ignore PATTERN]` | Add a directory as a collection |
 | `rqmd collection list` | List all collections |
 | `rqmd collection remove <name>` | Remove a collection |
 | `rqmd collection rename <old> <new>` | Rename a collection |
@@ -158,6 +173,31 @@ Global flags (before the subcommand):
 --backend llama|ort      Inference backend ($RQMD_INFERENCE_BACKEND)
 --ort-ep auto|coreml|cuda|directml|cpu   ORT execution provider ($RQMD_ORT_EP)
 ```
+
+---
+
+## Excluding files
+
+By default rqmd indexes every file matching a collection's pattern (`**/*.md`).
+It reads **no** ignore files — `.gitignore` and `.ignore` are never consulted.
+
+**Built-in exclusions** (always skipped):
+
+- Hidden files and directories (names starting with `.`)
+- `node_modules`, `vendor`, `dist`, `build`, `target`, `.cache`
+
+**Per-collection ignore patterns** (gitignore-style globs):
+
+```sh
+# Exclude patterns when adding a collection
+rqmd collection add ~/notes --ignore '*.log' --ignore 'tmp/'
+
+# Multiple patterns are combined with OR — any match excludes the file
+rqmd collection add ~/docs --ignore 'drafts/**' --ignore '**/node_modules'
+```
+
+Ignore patterns are stored with the collection and apply on every subsequent
+`rqmd update` run — you only need to specify them once.
 
 ---
 
@@ -214,6 +254,55 @@ rqmd --backend ort --ort-ep coreml embed
 
 ---
 
+## Models
+
+| Role | Backend | Model | Size |
+|------|---------|-------|------|
+| Embeddings | LlamaCpp (default) | `ggml-org/embeddinggemma-300M-GGUF` | ~300 MB |
+| Reranking | LlamaCpp | `ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF` | ~600 MB |
+| Embeddings | ORT (`ort-backend` feature) | `BAAI/bge-base-en-v1.5` (ONNX) | ~440 MB |
+| Query expansion | LlamaCpp | `Qwen/Qwen3-1.7B-Q8_0-GGUF` | ~1.7 GB |
+
+Models download automatically from HuggingFace on first use (~900 MB for embed + rerank; ~2.6 GB with query expansion) and are cached at `~/.cache/huggingface/hub/`.
+
+Set `HF_ENDPOINT` to use a mirror, or `HF_HUB_OFFLINE=1` to disable downloads entirely (models must be pre-staged in the cache).
+
+---
+
+## MCP server
+
+rqmd includes a built-in MCP server exposing its search index as tools for Claude, Cursor, and other MCP-aware clients.
+
+| Tool | Description |
+|------|-------------|
+| `query` | Hybrid search: BM25 + vector + rerank (recommended) |
+| `search` | BM25 keyword search — no models required |
+| `get` | Retrieve a document by path or content hash |
+| `multi_get` | Retrieve multiple documents by glob pattern |
+| `status` | Index health and collection summary |
+
+```sh
+rqmd mcp                        # stdio (Claude Desktop, Cursor, etc.)
+rqmd mcp --http                 # Streamable HTTP on port 8181
+rqmd mcp --http --port 9000     # custom port
+rqmd mcp --daemon               # background HTTP (implies --http)
+```
+
+For Claude Desktop, add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "rqmd": {
+      "command": "rqmd",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+---
+
 ## Environment variables
 
 | Variable | Values | Default | Description |
@@ -223,6 +312,20 @@ rqmd --backend ort --ort-ep coreml embed
 | `RQMD_ORT_EP` | `auto`, `coreml`, `cuda`, `directml`, `cpu` | `auto` | ONNX Runtime EP |
 | `RQMD_FORCE_CPU` | `1` | *(unset)* | Disable GPU layers in LlamaCppBackend |
 | `RQMD_CI` | `1` | *(unset)* | Skip model downloads (CI / offline use) |
+
+---
+
+## Where data lives
+
+| What | Path |
+|------|------|
+| Index + collections (SQLite) | `~/.cache/rqmd/index.sqlite` |
+| BM25 index (Tantivy) | `~/.cache/rqmd/tantivy/` |
+| Vector index (usearch) | `~/.cache/rqmd/vectors.usearch` |
+| Model cache (HuggingFace) | `~/.cache/huggingface/hub/` |
+| Project-local index | `.rqmd/` (created by `rqmd init`) |
+
+Override the root index directory with `--index-dir <path>` or `$RQMD_INDEX_DIR`.
 
 ---
 
@@ -337,8 +440,47 @@ The RRF fusion formula, BM25 field weights, chunking parameters (900 tokens /
 15% overlap), and docid scheme (`first 6 hex chars of SHA-256(content)`) match
 the original qmd design so search quality is preserved.
 
-See [BENCHMARK.md](BENCHMARK.md) for the Phase 0 spike results (inference backend
+See [BENCHMARK.md](BENCHMARK.md) for the de-risking spike results (inference backend
 + DB bake-off) that drove the Tantivy+usearch and llama-cpp-2 decisions.
+
+---
+
+## Differences from qmd
+
+| Feature | qmd (TypeScript) | rqmd (Rust) |
+|---------|-----------------|-------------|
+| Runtime | Node.js required | Self-contained static binary |
+| Startup | ~300 ms (JIT) | ~5 ms |
+| Search pipeline | BM25 + vector + RRF + rerank | Same pipeline, same parameters |
+| MCP server identity | `qmd` | `rqmd` |
+| Chunking | tree-sitter AST-aware | Regex heuristic (headings, code fences, lists) |
+| Index location | `~/.cache/qmd/` | `~/.cache/rqmd/` |
+| File exclusion | `.gitignore` aware | Built-in exclusions + per-collection `ignore` list |
+
+Search quality is equivalent — the RRF formula, BM25 field weights, chunk size (900 tokens / 15% overlap), and docid scheme are all ported verbatim from qmd.
+
+---
+
+## Migrating from qmd
+
+rqmd uses its own index at `~/.cache/rqmd/` — existing qmd collections need to be re-added:
+
+```sh
+rqmd collection add ~/path/to/your/docs --name your-collection
+rqmd embed
+```
+
+All environment variables are prefixed `RQMD_` instead of `QMD_`:
+
+| Old (qmd) | New (rqmd) |
+|-----------|-----------|
+| `QMD_INDEX_DIR` | `RQMD_INDEX_DIR` |
+| `QMD_INFERENCE_BACKEND` | `RQMD_INFERENCE_BACKEND` |
+| `QMD_ORT_EP` | `RQMD_ORT_EP` |
+| `QMD_FORCE_CPU` | `RQMD_FORCE_CPU` |
+| `QMD_CI` | `RQMD_CI` |
+
+The MCP server now identifies as `rqmd` — update any `claude_desktop_config.json` entries accordingly.
 
 ---
 
@@ -414,5 +556,18 @@ rqmd is a Rust port of **[tobi/qmd](https://github.com/tobi/qmd)** — the origi
 TypeScript hybrid-search CLI by [@tobi](https://github.com/tobi). The search
 pipeline design, RRF fusion formula, BM25 field weights, chunking parameters, docid
 scheme, and MCP tool surface are all derived from that project. See
-[BENCHMARK.md](BENCHMARK.md) for the de-risking spikes that validated the Rust
-technology choices.
+[BENCHMARK.md](BENCHMARK.md) for the de-risking spike results that validated the
+Rust technology choices.
+
+**Coming from qmd?** The quickest path:
+
+```sh
+git clone https://github.com/tylern91/rqmd && cd rqmd
+./scripts/install.sh          # builds + installs rqmd to ~/.cargo/bin/
+rqmd collection add ~/notes   # same pattern as qmd
+rqmd embed                    # downloads models on first run (~900 MB)
+```
+
+Your existing collections need to be re-added (rqmd uses its own index at
+`~/.cache/rqmd/`), but the search commands and MCP surface work the same way.
+See [Migrating from qmd](#migrating-from-qmd) for the full env-var mapping.

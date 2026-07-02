@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod commands;
+mod exclusions;
 mod format;
 mod store;
 
@@ -146,6 +147,9 @@ enum Commands {
         /// HTTP port (default: 8181)
         #[arg(long, default_value = "8181")]
         port: u16,
+        /// Run as a background daemon (implies --http); daemonize and exit
+        #[arg(long, conflicts_with = "http")]
+        daemon: bool,
     },
 }
 
@@ -158,6 +162,9 @@ pub enum CollectionCommand {
         name: Option<String>,
         #[arg(long)]
         mask: Option<String>,
+        /// Glob patterns to exclude from indexing (repeatable: --ignore '*.log' --ignore 'tmp/')
+        #[arg(long = "ignore", value_name = "PATTERN")]
+        ignore: Vec<String>,
     },
     /// List all collections
     #[command(alias = "ls")]
@@ -317,6 +324,8 @@ fn main() -> Result<()> {
         Commands::Doctor => commands::index::run_doctor(&index_dir),
         Commands::Bench { rounds } => commands::bench::run_bench(&index_dir, rounds),
         Commands::Eval { mode, verbose } => commands::eval::run_eval(&index_dir, &mode, verbose),
-        Commands::Mcp { http, port } => commands::mcp::run_mcp(&index_dir, http, port),
+        Commands::Mcp { http, port, daemon } => {
+            commands::mcp::run_mcp(&index_dir, http || daemon, port, daemon)
+        }
     }
 }

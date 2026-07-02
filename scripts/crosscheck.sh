@@ -7,7 +7,7 @@
 #
 # Prerequisites:
 #   - TypeScript qmd: `qmd` on PATH (run `bun link` in the repo root)
-#   - Rust qmd: `cargo build --profile dist -p qmd-cli` already built
+#   - Rust rqmd: `cargo build --profile dist -p rqmd-cli` already built
 #   - Models downloaded (i.e. `qmd embed` run at least once)
 #
 # Usage:
@@ -23,8 +23,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUST_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CORPUS_DIR="${RUST_ROOT}/qmd-cli/eval-docs"
-RUST_BIN="${RUST_ROOT}/../target/dist/qmd"
+CORPUS_DIR="${RUST_ROOT}/rqmd-cli/eval-docs"
+RUST_BIN="${RUST_ROOT}/../target/dist/rqmd"
 TS_BIN="qmd"
 
 TOP_K="${1:-5}"
@@ -39,7 +39,7 @@ fi
 
 if [[ ! -x "${RUST_BIN}" ]]; then
   echo "ERROR: Rust binary not found at ${RUST_BIN}." >&2
-  echo "       Run: cargo build --profile dist -p qmd-cli" >&2
+  echo "       Run: cargo build --profile dist -p rqmd-cli" >&2
   exit 1
 fi
 
@@ -66,9 +66,9 @@ echo "Indexing corpus with TS qmd → ${TS_IDX}"
 QMD_INDEX_DIR="${TS_IDX}" "${TS_BIN}" collection add "${CORPUS_DIR}" --name crosscheck >/dev/null
 QMD_INDEX_DIR="${TS_IDX}" "${TS_BIN}" embed >/dev/null
 
-echo "Indexing corpus with Rust qmd → ${RS_IDX}"
-QMD_INDEX_DIR="${RS_IDX}" "${RUST_BIN}" collection add "${CORPUS_DIR}" --name crosscheck >/dev/null
-QMD_INDEX_DIR="${RS_IDX}" "${RUST_BIN}" embed >/dev/null
+echo "Indexing corpus with Rust rqmd → ${RS_IDX}"
+RQMD_INDEX_DIR="${RS_IDX}" "${RUST_BIN}" collection add "${CORPUS_DIR}" --name crosscheck >/dev/null
+RQMD_INDEX_DIR="${RS_IDX}" "${RUST_BIN}" embed >/dev/null
 
 echo ""
 
@@ -98,7 +98,7 @@ for query in "${QUERIES[@]}"; do
       2>/dev/null | grep -v '^$' | sort
   )
   rs_docids=$(
-    QMD_INDEX_DIR="${RS_IDX}" "${RUST_BIN}" query "${query}" -n "${TOP_K}" --format json 2>/dev/null \
+    RQMD_INDEX_DIR="${RS_IDX}" "${RUST_BIN}" query "${query}" -n "${TOP_K}" --format json 2>/dev/null \
       | python3 -c "import sys,json; r=json.load(sys.stdin); print('\n'.join(d.get('docid','') or d.get('id','') for d in r))" \
       2>/dev/null | grep -v '^$' | sort
   )
