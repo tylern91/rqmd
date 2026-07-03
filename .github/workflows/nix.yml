@@ -41,5 +41,5 @@ jobs:
         run: nix develop --command cargo --version
 
       # Full `nix build .` is a follow-up: llama-cpp-2 bundles a CMake-based
-      # C++ library (llama.cpp) that requires cmake 3.x and Metal frameworks on
-      # macOS. Sandbox reproducibility needs additional testing. Track in CHANGELOG.
+      # C++ library (llama.cpp) that requires cmake ≥3.14 (4.x supported) and
+      # Metal frameworks on macOS. Sandbox reproducibility needs additional testing. Track in CHANGELOG.

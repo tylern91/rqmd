@@ -57,11 +57,6 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Pin cmake to 3.x (cmake 4.x breaks llama.cpp CMakeLists.txt)
-        run: |
-          pip install "cmake<4" --quiet
-          cmake --version
-
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -145,11 +140,6 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Pin cmake to 3.x (cmake 4.x breaks llama.cpp CMakeLists.txt)
-        run: |
-          pip install "cmake<4" --quiet
-          cmake --version
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2

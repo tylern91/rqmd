@@ -109,19 +109,31 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
         }
     }
 
-    // ── Models (qmd.ts:606-617, hf: repo → https://huggingface.co/<org/repo>) ───
+    // ── Models (qmd.ts:606-617) — show repo (browsable) + exact downloaded file ──
     println!("\n\x1b[1mModels\x1b[0m");
     println!(
         "  Embedding:   https://huggingface.co/{}",
         rqmd_llm::DEFAULT_EMBED_REPO
     );
     println!(
+        "               \x1b[2m└─ {}\x1b[0m",
+        rqmd_llm::DEFAULT_EMBED_FILE
+    );
+    println!(
         "  Reranking:   https://huggingface.co/{}",
         rqmd_llm::DEFAULT_RERANK_REPO
     );
     println!(
+        "               \x1b[2m└─ {}\x1b[0m",
+        rqmd_llm::DEFAULT_RERANK_FILE
+    );
+    println!(
         "  Generation:  https://huggingface.co/{}",
         rqmd_llm::DEFAULT_GENERATE_REPO
+    );
+    println!(
+        "               \x1b[2m└─ {}\x1b[0m",
+        rqmd_llm::DEFAULT_GENERATE_FILE
     );
 
     // ── Tips (qmd.ts:621-654) ────────────────────────────────────────────────────
