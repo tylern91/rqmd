@@ -73,7 +73,9 @@ pub fn run_bench(index_dir: &Path, n_rounds: usize) -> Result<()> {
     println!("  Throughput:     {texts_per_sec:.1} texts/sec");
     println!("  Latency/text:   {ms_per_text:.2} ms");
     println!("─────────────────────────────────────────");
-    println!("Tip: compare backends with RRQMD_INFERENCE_BACKEND=ort RRQMD_ORT_EP=coreml rqmd bench");
+    println!(
+        "Tip: compare backends with RRQMD_INFERENCE_BACKEND=ort RRQMD_ORT_EP=coreml rqmd bench"
+    );
 
     // ── Phase 2: Query latency (requires a real index) ───────────────────────────
     if index_dir.join("index.sqlite").exists() {
