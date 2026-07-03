@@ -1,6 +1,6 @@
 # rqmd Changelog
 
-## [Unreleased]
+## [0.2.0] - 2026-07-03
 ### Added
 
 - `rqmd status`: Models section now shows the exact downloaded `.gguf` filename
@@ -22,28 +22,6 @@
   query latency p50/p99 per mode (BM25 / Vec / Hybrid), and search quality Hit@K.
   All numbers are aggregate only — no corpus paths or document content.
 
-### Fixed
-
-- cmake 4.x is now supported for building `llama-cpp-sys-2` on macOS. The previous
-  belief that cmake 4.x would break the llama.cpp CMake build was Python-specific
-  (the Python `cmake` pip package had an incompatibility); the Rust `llama-cpp-2`
-  crate builds cleanly with cmake 4.x. The CI `pip install "cmake<4"` pin has been
-  removed from `rust.yml` (both `build-macos` and `dist-binary` jobs). The README
-  troubleshooting block and `flake.nix` / `nix.yml` comments have been updated
-  accordingly.
-
-- Environment variable names corrected throughout documentation. All `rqmd` env vars
-  use the `RRQMD_` prefix (double-R), matching what the code actually reads. The
-  docs previously showed `RQMD_*` (single-R), which silently had no effect. Affected:
-  `README.md`, `BENCHMARK.md`, `scripts/crosscheck.sh`. Correct names:
-  `RRQMD_INDEX_DIR`, `RRQMD_INFERENCE_BACKEND`, `RRQMD_ORT_EP`, `RRQMD_FORCE_CPU`,
-  `RRQMD_CI`, `RRQMD_VERBOSE`.
-
----
-
-## [0.2.0] - 2026-07-02
-### Added
-
 - `scripts/install.sh`: content-aware install that replaces `cargo install --path`.
   Uses `cargo build` fingerprinting (content-based, not version-based) then atomically
   copies the fresh binary to `~/.cargo/bin/rqmd`. Supports `RQMD_PROFILE` env var and
@@ -61,6 +39,21 @@
   `--no-default-features`. Previously `metal` was hardcoded in the `llama-cpp-2` dep.
 
 ### Fixed
+
+- cmake 4.x is now supported for building `llama-cpp-sys-2` on macOS. The previous
+  belief that cmake 4.x would break the llama.cpp CMake build was Python-specific
+  (the Python `cmake` pip package had an incompatibility); the Rust `llama-cpp-2`
+  crate builds cleanly with cmake 4.x. The CI `pip install "cmake<4"` pin has been
+  removed from `rust.yml` (both `build-macos` and `dist-binary` jobs). The README
+  troubleshooting block and `flake.nix` / `nix.yml` comments have been updated
+  accordingly.
+
+- Environment variable names corrected throughout documentation. All `rqmd` env vars
+  use the `RRQMD_` prefix (double-R), matching what the code actually reads. The
+  docs previously showed `RQMD_*` (single-R), which silently had no effect. Affected:
+  `README.md`, `BENCHMARK.md`, `scripts/crosscheck.sh`. Correct names:
+  `RRQMD_INDEX_DIR`, `RRQMD_INFERENCE_BACKEND`, `RRQMD_ORT_EP`, `RRQMD_FORCE_CPU`,
+  `RRQMD_CI`, `RRQMD_VERBOSE`.
 
 - `rqmd update`: unchanged documents no longer re-added to the Tantivy FTS index.
   Previously `index_document_fts_only` always called `fts.add_document` even when the
