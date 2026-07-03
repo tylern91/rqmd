@@ -1,0 +1,159 @@
+name: release
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >
+      github.event.pull_request.merged == true &&
+      vars.RELEASE_ENABLED == 'true' &&
+      (contains(github.event.pull_request.labels.*.name, 'major') ||
+       contains(github.event.pull_request.labels.*.name, 'minor') ||
+       contains(github.event.pull_request.labels.*.name, 'patch')) &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-release')
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_BODY: ${{ github.event.pull_request.body }}
+      PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve bump label with breaking-change escalation
+        id: bump
+        run: |
+          set -euo pipefail
+          label="$(jq -nr --argjson l "$PR_LABELS" 'first(["major","minor","patch"][] | select(IN($l[]))) // empty')"
+          breaking=false
+          if printf '%s' "$PR_LABELS" | jq -e 'index("breaking-change") != null' >/dev/null 2>&1 \
+              || printf '%s' "$PR_TITLE" | grep -qE '^[a-z]+(\([^)]+\))?!:' \
+              || printf '%s' "${PR_BODY:-}" | grep -qE '^BREAKING CHANGE:'; then
+            breaking=true
+            label="major"
+          fi
+          printf 'label=%s\n' "$label" >> "$GITHUB_OUTPUT"
+          printf 'breaking=%s\n' "$breaking" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next version
+        id: ver
+        run: |
+          set -euo pipefail
+          latest="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)"
+          next="$(bash scripts/bump-version.sh "$latest" "${{ steps.bump.outputs.label }}")"
+          printf 'latest=%s\n' "$latest" >> "$GITHUB_OUTPUT"
+          printf 'next=%s\n'   "$next"   >> "$GITHUB_OUTPUT"
+
+      - name: Idempotency guard
+        id: guard
+        run: |
+          if git rev-parse "${{ steps.ver.outputs.next }}" >/dev/null 2>&1; then
+            echo "::notice::Tag ${{ steps.ver.outputs.next }} already exists — skipping release"
+            printf 'skip=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'skip=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release notes
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          bash scripts/build-release-notes.sh \
+            "${{ steps.ver.outputs.next }}" \
+            "${{ steps.bump.outputs.label }}" \
+            "${{ steps.bump.outputs.breaking }}" \
+            --from-existing \
+            > /tmp/RELEASE_BODY.md
+
+
+      - name: Guard against empty release notes
+        id: notes_guard
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          size="$(tr -d '[:space:]' < /tmp/RELEASE_BODY.md | wc -c | tr -d ' ')"
+          if [ "$size" -lt 10 ]; then
+            echo "::notice::[Unreleased] section is empty — skipping tag + release"
+            printf 'empty=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'empty=false\n' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Import GPG key
+        id: gpg
+        if: steps.guard.outputs.skip == 'false' && env.GPG_PRIVATE_KEY != ''
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          printf 'default-cache-ttl 7200\n' >> ~/.gnupg/gpg-agent.conf
+          printf 'allow-loopback-pinentry\n' >> ~/.gnupg/gpg-agent.conf
+          printf 'pinentry-mode loopback\n'  >> ~/.gnupg/gpg.conf
+          gpgconf --kill gpg-agent
+          printf '%s' "$GPG_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 --sign -o /dev/null <(printf 'test')
+          git config user.signingkey "$GPG_KEY_ID"
+          git config tag.gpgsign true
+          printf 'signed=true\n' >> "$GITHUB_OUTPUT"
+
+      - name: Configure git committer
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GPG_SIGNED: ${{ steps.gpg.outputs.signed }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "tylern91@users.noreply.github.com"
+          git config commit.gpgsign "${GPG_SIGNED:-false}"
+
+      - name: Create and push tag
+        if: >
+          steps.guard.outputs.skip == 'false' &&
+          steps.notes_guard.outputs.empty == 'false' &&
+          !contains(github.event.pull_request.body, '<!-- release-dry-run -->')
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.next }}"
+          if [ "${{ steps.gpg.outputs.signed }}" = "true" ]; then
+            git tag -s "$tag" -F /tmp/RELEASE_BODY.md
+          else
+            echo "::warning::GPG_PRIVATE_KEY secret not set — creating unsigned annotated tag"
+            git tag -a "$tag" -F /tmp/RELEASE_BODY.md
+          fi
+          git push origin "$tag"
+
+      - name: Create GitHub Release
+        if: >
+          steps.guard.outputs.skip == 'false' &&
+          steps.notes_guard.outputs.empty == 'false' &&
+          !contains(github.event.pull_request.body, '<!-- release-dry-run -->')
+        run: |
+          gh release create "${{ steps.ver.outputs.next }}" \
+            --title "${{ steps.ver.outputs.next }}" \
+            --notes-file /tmp/RELEASE_BODY.md \
+            --latest \
+            --verify-tag
+
+      - name: Dry-run notice
+        if: >
+          steps.guard.outputs.skip == 'false' &&
+          steps.notes_guard.outputs.empty == 'false' &&
+          contains(github.event.pull_request.body, '<!-- release-dry-run -->')
+        run: |
+          echo "::notice::<!-- release-dry-run --> — would create tag ${{ steps.ver.outputs.next }} with the following notes:"
+          cat /tmp/RELEASE_BODY.md
