@@ -13,6 +13,7 @@ Built on the search pipeline and ideas of **[tobi/qmd](https://github.com/tobi/q
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [CLI reference](#cli-reference)
+- [Query syntax and expansion](#query-syntax-and-expansion)
 - [Excluding files](#excluding-files)
 - [Inference backends](#inference-backends)
 - [Models](#models)
@@ -43,7 +44,7 @@ rqmd ships as a ~60MB self-contained binary with no runtime dependencies:
 
 ## Status
 
-rqmd is at **v0.1.0**. All core search functionality is implemented and tested:
+rqmd is at **v0.2.0**. All core search functionality is implemented and tested:
 
 | Feature | Status |
 |---------|--------|
@@ -52,11 +53,14 @@ rqmd is at **v0.1.0**. All core search functionality is implemented and tested:
 | Hybrid BM25 + vector + RRF | ✅ |
 | Cross-encoder reranking | ✅ |
 | MCP server (stdio + HTTP) | ✅ |
-| Query expansion (lex/vec/hyde via LLM) | 🔜 future phase |
+| Query expansion (lex/vec/hyde via LLM) | ✅ |
 
-The query expansion model (Qwen3-1.7B fine-tuned) requires a separate training
-pipeline; the API is wired but the generate model is not yet loaded by default.
-Until that phase ships, `rqmd query` uses BM25 + vector + RRF + rerank only.
+Plain-text queries are auto-expanded by a local Qwen3-1.7B model
+(`ggml-org/Qwen3-1.7B-GGUF`, downloaded on first `rqmd query`) into `lex`/`vec`/`hyde`
+sub-queries fused with the original via RRF (original query keeps 2× weight). Expansion
+is best-effort and skipped when the top BM25 hit is a strong, unambiguous match.
+Typed multi-line queries and the `--intent` flag are also supported — see
+[Query syntax and expansion](#query-syntax-and-expansion) and [docs/SYNTAX.md](docs/SYNTAX.md).
 
 ---
 
@@ -127,7 +131,7 @@ rqmd embed                          # downloads GGUF models on first run (~900MB
 # Search
 rqmd search "project timeline"      # BM25 keyword
 rqmd vsearch "deployment process"   # vector similarity
-rqmd query "quarterly planning"     # hybrid BM25 + vector + rerank (best quality)
+rqmd query "quarterly planning"     # hybrid BM25 + vector + rerank + LLM expansion (best quality)
 
 # MCP server (for Claude, Cursor, etc.)
 rqmd mcp                            # stdio transport
@@ -140,7 +144,7 @@ rqmd mcp --http --port 8181         # Streamable HTTP transport
 
 | Command | Description |
 |---------|-------------|
-| `rqmd query <text>` | Hybrid search: BM25 + vector + rerank |
+| `rqmd query <text>` | Hybrid search: BM25 + vector + rerank + LLM query expansion |
 | `rqmd search <text>` | BM25 keyword search only |
 | `rqmd vsearch <text>` | Vector similarity only |
 | `rqmd get <path\|#docid>` | Retrieve document by path or content hash |
@@ -173,6 +177,51 @@ Global flags (before the subcommand):
 --backend llama|ort      Inference backend ($RRQMD_INFERENCE_BACKEND)
 --ort-ep auto|coreml|cuda|directml|cpu   ORT execution provider ($RRQMD_ORT_EP)
 ```
+
+---
+
+## Query syntax and expansion
+
+`rqmd query` (and the MCP `query` tool) auto-expand plain-text queries using a local
+Qwen3-1.7B model, producing `lex`, `vec`, and `hyde` variants that are fused with the
+original query via RRF. `rqmd search` and `rqmd vsearch` do **not** expand — they run
+their respective single-mode search only.
+
+**`rqmd query` flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--intent <text>` | *(none)* | Background context to steer expansion and reranking |
+| `-n <num>` | `10` | Number of results to return |
+| `-c/--collection <name>` | *(all)* | Scope to a collection (repeatable, OR-matched) |
+| `--no-rerank` | off | Skip cross-encoder reranking (expansion still runs) |
+| `--full` | off | Return full document bodies instead of snippets |
+| `--format cli\|json` | `cli` | Output format |
+
+**Examples:**
+
+```sh
+# Plain text — auto-expanded into lex/vec/hyde by the LLM
+rqmd query "how does authentication work"
+
+# Explicit expand (equivalent to above)
+rqmd query "expand: how does authentication work"
+
+# Typed multi-line query (bypasses LLM; each line is a direct sub-query)
+rqmd query $'lex: auth token -oauth\nvec: how does authentication work\nhyde: The auth system uses JWT tokens with a 15-minute TTL...'
+
+# Intent flag — steers expansion and reranking toward web performance
+rqmd query --intent "web page load times" "performance"
+
+# Intent inline (query document)
+rqmd query $'intent: web page load times\nlex: performance\nvec: how to improve page speed'
+
+# Scope to a specific collection
+rqmd query -c docs "deployment pipeline"
+```
+
+Full grammar (typed lines, lex phrase/negation operators, MCP `searches` array):
+[docs/SYNTAX.md](docs/SYNTAX.md).
 
 ---
 
@@ -261,7 +310,7 @@ rqmd --backend ort --ort-ep coreml embed
 | Embeddings | LlamaCpp (default) | `ggml-org/embeddinggemma-300M-GGUF` | ~300 MB |
 | Reranking | LlamaCpp | `ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF` | ~600 MB |
 | Embeddings | ORT (`ort-backend` feature) | `BAAI/bge-base-en-v1.5` (ONNX) | ~440 MB |
-| Query expansion | LlamaCpp | `Qwen/Qwen3-1.7B-Q8_0-GGUF` | ~1.7 GB |
+| Query expansion | LlamaCpp | `ggml-org/Qwen3-1.7B-GGUF` (`Qwen3-1.7B-Q8_0.gguf`) | ~1.7 GB |
 
 Models download automatically from HuggingFace on first use (~900 MB for embed + rerank; ~2.6 GB with query expansion) and are cached at `~/.cache/huggingface/hub/`.
 
@@ -275,7 +324,7 @@ rqmd includes a built-in MCP server exposing its search index as tools for Claud
 
 | Tool | Description |
 |------|-------------|
-| `query` | Hybrid search: BM25 + vector + rerank (recommended) |
+| `query` | Hybrid search: BM25 + vector + rerank + LLM expansion (recommended) |
 | `search` | BM25 keyword search — no models required |
 | `get` | Retrieve a document by path or content hash |
 | `multi_get` | Retrieve multiple documents by glob pattern |
@@ -389,7 +438,7 @@ pub trait InferenceBackend: Send {
     fn embed(&mut self, text: &str) -> Result<Vec<f32>>;
     fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
     fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>>;
-    fn generate_constrained(&mut self, prompt: &str, grammar: &str, root: &str) -> Result<String>;
+    fn generate(&mut self, prompt: &str) -> Result<String>;
     fn embed_model_name(&self) -> &str;
     fn rerank_model_name(&self) -> &str;
 }
@@ -432,7 +481,7 @@ rqmd mcp --http --port 9000     # custom port
 | Embed model | embeddinggemma-300M (GGUF, Metal/CPU) |
 | Rerank model | Qwen3-Reranker-0.6B (GGUF) |
 | ORT backend | ✓ CoreML / CUDA / DirectML (feature-gated) |
-| Query expansion | Deferred — requires fine-tuned Qwen3-1.7B generate model |
+| Query expansion | ✓ LLM-generated lex/vec/hyde (stock Qwen3-1.7B), fused via RRF |
 | MlxBackend | Deferred — `mlx-rs` `Array: !Send` conflicts with parallel embed pool |
 | Startup time | ~5ms (no JIT) |
 
@@ -504,12 +553,6 @@ RUSTFLAGS="-C target-cpu=native" cargo build --profile dist -p rqmd-cli
 Models are fetched from HuggingFace on first `rqmd embed` and cached at
 `~/.cache/huggingface/hub/`. Set `HF_ENDPOINT` for a mirror, or
 `HF_HUB_OFFLINE=1` with pre-downloaded models.
-
-### `rqmd embed` exits with "generate model not loaded"
-
-This is expected — the query-expansion model is not loaded by default (see
-[Status](#status)). `rqmd embed` only uses the embed model; `rqmd query` falls
-back to raw-query BM25+vec+rerank when the generate model is absent.
 
 ### "OrtBackend: reranking not supported"
 
