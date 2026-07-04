@@ -519,6 +519,15 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Build the `store_config` key under which a collection's context is stored.
+///
+/// This is the canonical format used by `qmd context add rqmd://<collection>/`.
+/// Both `context check` and `get_context_for_collection` must use this function
+/// to guarantee they query the same key that `context add` writes.
+pub fn collection_context_key(collection: &str) -> String {
+    format!("context:rqmd://{collection}/")
+}
+
 /// Look up a collection's context string from the store_config table.
 ///
 /// Context is stored by the `qmd context add` command with the key
@@ -526,7 +535,7 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
 pub fn get_context_for_collection(conn: &Connection, collection: &str) -> Result<Option<String>> {
     // Try the canonical `context:rqmd://<collection>/` key first, then the
     // legacy `context:/` (global context) as a fallback.
-    let key = format!("context:rqmd://{collection}/");
+    let key = collection_context_key(collection);
     if let Some(v) = get_config(conn, &key)? {
         return Ok(Some(v));
     }

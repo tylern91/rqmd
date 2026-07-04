@@ -3,7 +3,10 @@
 
 use rqmd_core::{
     chunking::chunk_document,
-    db::{content_hash, docid_from_hash, open_db, upsert_content, upsert_document},
+    db::{
+        collection_context_key, content_hash, docid_from_hash, get_config, open_db, set_config,
+        upsert_content, upsert_document,
+    },
     rrf::{reciprocal_rank_fusion, rrf_weights},
     types::{QueryType, RankedListMeta, RankedResult},
 };
@@ -152,6 +155,31 @@ fn db_upsert_and_retrieve() {
 
     let content = rqmd_core::db::get_content(&db, &hash).unwrap().unwrap();
     assert_eq!(content, body);
+}
+
+// ── Context key round-trip ────────────────────────────────────────────────────
+
+#[test]
+fn context_check_key_matches_add_key() {
+    // Regression guard: `qmd context add rqmd://vault/ "..."` stores under the
+    // key `context:rqmd://vault/`.  `context check` MUST query the same key or
+    // it reports false MISSING (the rrqmd:// double-r typo, context.rs:71).
+    let tmp = TempDir::new().unwrap();
+    let conn = open_db(&tmp.path().join("store.db")).unwrap();
+
+    // Simulate `context add rqmd://vault/ "..."` (verbatim key, no parsing).
+    set_config(&conn, "context:rqmd://vault/", "Tyler's vault").unwrap();
+
+    // The shared key builder must produce the exact same string.
+    assert_eq!(collection_context_key("vault"), "context:rqmd://vault/");
+
+    // And looking up via collection_context_key must find the stored value.
+    assert!(
+        get_config(&conn, &collection_context_key("vault"))
+            .unwrap()
+            .is_some(),
+        "context_check key did not match the key written by context_add"
+    );
 }
 
 #[test]
