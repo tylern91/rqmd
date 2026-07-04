@@ -68,7 +68,7 @@ fn check(index_dir: &Path) -> Result<()> {
     let cols = db::list_collections(&s.db)?;
     let mut missing = 0usize;
     for col in &cols {
-        let key = context_key(&format!("rrqmd://{}/", col.name));
+        let key = db::collection_context_key(&col.name);
         if db::get_config(&s.db, &key)?.is_none() {
             println!("MISSING context for collection '{}'", col.name);
             println!(

@@ -4,6 +4,19 @@
 
 ---
 
+## [0.2.1] - 2026-07-04
+### Fixed
+
+- `rqmd context check`: falsely reported all collections as MISSING even when
+  contexts were correctly set via `rqmd context add`. Root cause was an
+  `rrqmd://` (double-r) URI-scheme typo in the lookup key inside `check()`,
+  while `context add` stores the canonical single-r `rqmd://` key. Fixed by
+  extracting `collection_context_key()` in `db.rs` as the shared key-builder
+  used by both `check()` and `get_context_for_collection`, eliminating the
+  duplicated literal that allowed the drift. Regression test added.
+
+---
+
 ## [0.2.0] - 2026-07-03
 ### Added
 
