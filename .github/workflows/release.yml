@@ -23,6 +23,9 @@ jobs:
       !contains(github.event.pull_request.labels.*.name, 'skip-release')
     runs-on: ubuntu-slim
     timeout-minutes: 10
+    outputs:
+      version: ${{ steps.ver.outputs.next }}
+      created: ${{ steps.mark.outputs.created }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -157,3 +160,93 @@ jobs:
         run: |
           echo "::notice::<!-- release-dry-run --> — would create tag ${{ steps.ver.outputs.next }} with the following notes:"
           cat /tmp/RELEASE_BODY.md
+
+      - name: Mark release created
+        id: mark
+        if: >
+          steps.guard.outputs.skip == 'false' &&
+          steps.notes_guard.outputs.empty == 'false' &&
+          !contains(github.event.pull_request.body, '<!-- release-dry-run -->')
+        run: printf 'created=true\n' >> "$GITHUB_OUTPUT"
+
+  upload-assets:
+    name: Upload release binaries (${{ matrix.name_suffix }})
+    needs: release
+    if: needs.release.outputs.created == 'true'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            name_suffix: aarch64-apple-darwin
+            llama_metal: "1"
+          - os: ubuntu-latest
+            name_suffix: x86_64-unknown-linux-gnu
+            llama_metal: "0"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.release.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.version }}
+          fetch-depth: 1
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake build-essential
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-dist
+          cache-on-failure: true
+
+      - name: Build dist binary
+        env:
+          LLAMA_METAL: ${{ matrix.llama_metal }}
+        run: cargo build --profile dist -p rqmd-cli
+
+      - name: Package tarball and checksum
+        id: pkg
+        run: |
+          set -euo pipefail
+          TARBALL="rqmd-${VERSION}-${{ matrix.name_suffix }}.tar.gz"
+          tar -czf "$TARBALL" -C target/dist rqmd
+          shasum -a 256 "$TARBALL" > "${TARBALL}.sha256"
+          printf 'tarball=%s\n' "$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to GitHub Release
+        run: |
+          TARBALL="${{ steps.pkg.outputs.tarball }}"
+          gh release upload "$VERSION" "$TARBALL" "${TARBALL}.sha256" --clobber
+
+  sync-homebrew:
+    name: Sync Homebrew tap formula
+    needs: [release, upload-assets]
+    if: needs.release.outputs.created == 'true' && vars.HOMEBREW_SYNC_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      VERSION: ${{ needs.release.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.version }}
+          fetch-depth: 1
+
+      - name: Update and push formula
+        run: bash scripts/update-homebrew-formula.sh "$VERSION"

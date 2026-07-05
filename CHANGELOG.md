@@ -4,6 +4,22 @@
 
 ---
 
+## [0.3.0] - 2026-07-05
+
+### Added
+- Homebrew tap (`brew tap tylern91/rqmd && brew install rqmd`) — downloads a prebuilt binary; no Rust toolchain or cmake required
+- `cargo install --git https://github.com/tylern91/rqmd --locked rqmd-cli` one-liner install documented in README
+- Prebuilt release binaries (macOS arm64, Linux x86_64) attached to every GitHub Release as `rqmd-<version>-<platform>.tar.gz` with `.sha256` sidecar files
+
+### Changed
+- README Installation section now leads with Homebrew and `cargo install --git`, followed by prebuilt binary download, then the existing from-source path
+
+### CI
+- `release.yml`: new `upload-assets` matrix job builds and attaches platform binaries after each release tag; optional `HOMEBREW_TAP_TOKEN` secret triggers automatic formula sync to `tylern91/homebrew-rqmd`
+- `scripts/update-homebrew-formula.sh`: new script fills sha256 values into `packaging/homebrew/rqmd.rb` and optionally pushes to the tap repo
+
+---
+
 ## [0.2.3] - 2026-07-05
 
 ### Added
