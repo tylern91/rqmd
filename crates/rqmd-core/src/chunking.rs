@@ -406,7 +406,8 @@ fn build_snippet_result(
     let mut snippet_text = snippet_lines.join("\n");
 
     if snippet_text.len() > max_len {
-        snippet_text.truncate(max_len.saturating_sub(3));
+        let cut = snap_char_boundary_backward(&snippet_text, max_len.saturating_sub(3));
+        snippet_text.truncate(cut);
         snippet_text.push_str("...");
     }
 
@@ -457,5 +458,18 @@ mod tests {
             // Verify chunk content doesn't start mid-fence
             let _ = chunk.pos; // just ensure it compiles
         }
+    }
+
+    #[test]
+    fn snippet_truncation_respects_utf8_boundary() {
+        // "é" is 2 bytes in UTF-8. 200 repetitions = 400 bytes.
+        // max_len = 100 → naive cut at byte 97 (odd) lands mid-'é' and panicked
+        // before the fix. chunk_pos = 0 passes body straight to build_snippet_result.
+        let body = "é".repeat(200);
+        let result = extract_snippet(&body, "é", 100, 0, 0, None);
+        assert!(
+            result.snippet.ends_with("..."),
+            "snippet should be truncated with ellipsis"
+        );
     }
 }
