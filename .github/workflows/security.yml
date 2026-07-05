@@ -1,0 +1,54 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly on Monday at 06:00 UTC — catches newly-disclosed CVEs in unchanged deps
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  trivy:
+    name: Trivy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # ── Step 1: Record CRITICAL + HIGH to the GitHub Security tab (non-blocking) ──
+      - name: Trivy scan → SARIF
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+        # exit-code defaults to 0 — this step never fails the job
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() # upload even if the blocking step below fails
+        with:
+          sarif_file: trivy-results.sarif
+
+      # ── Step 2: Hard-block the PR on CRITICAL only ────────────────────────────────
+      # HIGH is recorded in the Security tab above but does not block merges.
+      # ignore-unfixed: Rust transitive CVEs often have no upstream fix yet; without
+      # this flag any advisory without a patched version would wedge every PR.
+      - name: Trivy scan → block on CRITICAL
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
