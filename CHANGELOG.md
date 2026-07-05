@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+---
+
+## [0.2.2] - 2026-07-05
+
 ### Fixed
 - `rqmd query` (and `search`/`vsearch`) no longer panics with `assertion failed: self.is_char_boundary` when a result snippet contains multi-byte UTF-8 characters near the truncation boundary (#chunking)
 

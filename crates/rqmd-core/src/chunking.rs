@@ -467,6 +467,9 @@ mod tests {
         // before the fix. chunk_pos = 0 passes body straight to build_snippet_result.
         let body = "é".repeat(200);
         let result = extract_snippet(&body, "é", 100, 0, 0, None);
-        assert!(result.snippet.ends_with("..."), "snippet should be truncated with ellipsis");
+        assert!(
+            result.snippet.ends_with("..."),
+            "snippet should be truncated with ellipsis"
+        );
     }
 }
