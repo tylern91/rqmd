@@ -70,6 +70,7 @@ Typed multi-line queries and the `--intent` flag are also supported — see
 
 ```sh
 brew tap tylern91/rqmd
+brew trust tylern91/rqmd  # required on Homebrew ≥4.5
 brew install rqmd
 ```
 
@@ -646,7 +647,7 @@ Rust technology choices.
 
 ```sh
 # macOS / Linux — prebuilt binary, no compiler needed
-brew tap tylern91/rqmd && brew install rqmd
+brew tap tylern91/rqmd && brew trust tylern91/rqmd && brew install rqmd
 
 # or build from source
 git clone https://github.com/tylern91/rqmd && cd rqmd
