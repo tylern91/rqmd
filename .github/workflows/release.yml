@@ -239,7 +239,6 @@ jobs:
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       VERSION: ${{ needs.release.outputs.version }}
 
     steps:
@@ -248,5 +247,16 @@ jobs:
           ref: ${{ needs.release.outputs.version }}
           fetch-depth: 1
 
+      - name: Mint tap token from GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.HOMEBREW_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
+          owner: tylern91
+          repositories: homebrew-rqmd
+
       - name: Update and push formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: bash scripts/update-homebrew-formula.sh "$VERSION"
