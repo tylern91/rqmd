@@ -66,6 +66,49 @@ Typed multi-line queries and the `--intent` flag are also supported — see
 
 ## Installation
 
+### Homebrew (macOS / Linux — prebuilt, no compile)
+
+```sh
+brew tap tylern91/rqmd
+brew install rqmd
+```
+
+> The formula downloads a prebuilt binary — no Rust toolchain, cmake, or C++ compiler required.
+> macOS arm64 and Linux x86_64 are supported. Other platforms: use the source build below.
+
+### cargo install (source build, cross-platform)
+
+Requires Rust stable ≥1.78, cmake ≥3.14, and a C/C++ toolchain (builds llama.cpp from source).
+
+```sh
+cargo install --git https://github.com/tylern91/rqmd --locked rqmd-cli
+```
+
+On Linux, Metal is not available — prefix with `LLAMA_METAL=0`:
+
+```sh
+LLAMA_METAL=0 cargo install --git https://github.com/tylern91/rqmd --locked rqmd-cli
+```
+
+### Prebuilt binary (manual download)
+
+Download from the [latest GitHub Release](https://github.com/tylern91/rqmd/releases/latest),
+then verify and install:
+
+```sh
+# macOS arm64
+curl -fLO https://github.com/tylern91/rqmd/releases/latest/download/rqmd-aarch64-apple-darwin.tar.gz
+shasum -a 256 -c rqmd-aarch64-apple-darwin.tar.gz.sha256
+tar -xf rqmd-aarch64-apple-darwin.tar.gz
+install -m 0755 rqmd ~/.local/bin/rqmd   # or /usr/local/bin/rqmd
+
+# Linux x86_64
+curl -fLO https://github.com/tylern91/rqmd/releases/latest/download/rqmd-x86_64-unknown-linux-gnu.tar.gz
+shasum -a 256 -c rqmd-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xf rqmd-x86_64-unknown-linux-gnu.tar.gz
+install -m 0755 rqmd ~/.local/bin/rqmd
+```
+
 ### From source (recommended while in development)
 
 Requirements: Rust stable (≥1.78), cmake ≥3.14 (cmake 4.x supported), Xcode Command Line Tools (macOS) or `build-essential` (Linux).
@@ -598,8 +641,13 @@ Rust technology choices.
 **Coming from qmd?** The quickest path:
 
 ```sh
+# macOS / Linux — prebuilt binary, no compiler needed
+brew tap tylern91/rqmd && brew install rqmd
+
+# or build from source
 git clone https://github.com/tylern91/rqmd && cd rqmd
 ./scripts/install.sh          # builds + installs rqmd to ~/.cargo/bin/
+
 rqmd collection add ~/notes   # same pattern as qmd
 rqmd embed                    # downloads models on first run (~900 MB)
 ```
