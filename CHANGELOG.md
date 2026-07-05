@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+---
+
+## [0.3.0] - 2026-07-05
+
 ### Added
 - Homebrew tap (`brew tap tylern91/rqmd && brew install rqmd`) — downloads a prebuilt binary; no Rust toolchain or cmake required
 - `cargo install --git https://github.com/tylern91/rqmd --locked rqmd-cli` one-liner install documented in README
@@ -13,6 +17,31 @@
 ### CI
 - `release.yml`: new `upload-assets` matrix job builds and attaches platform binaries after each release tag; optional `HOMEBREW_TAP_TOKEN` secret triggers automatic formula sync to `tylern91/homebrew-rqmd`
 - `scripts/update-homebrew-formula.sh`: new script fills sha256 values into `packaging/homebrew/rqmd.rb` and optionally pushes to the tap repo
+
+---
+
+## [0.2.3] - 2026-07-05
+
+### Added
+- Security scanning CI: new `.github/workflows/security.yml` runs Trivy `fs` scan on every
+  PR and push to `main`. CRITICAL + HIGH findings are uploaded to the GitHub Security tab
+  (code-scanning alerts, SARIF). A second blocking step hard-fails the PR check on any
+  CRITICAL vulnerability with a known fix (`ignore-unfixed: true`). HIGH findings are
+  recorded but non-blocking.
+
+### Changed
+- Binary assets are now tracked with Git LFS. A `.gitattributes` file declares LFS
+  patterns for images (`*.png`, `*.jpg`, `*.gif`, `*.webp`, `*.pdf`), ML model files
+  (`*.gguf`, `*.onnx`, `*.bin`), and archives (`*.tar.gz`, `*.zip`). The existing
+  `assets/qmd-architecture.png` has been converted to a pointer. New binaries committed
+  to the repo will land in LFS automatically.
+
+---
+
+## [0.2.2] - 2026-07-05
+
+### Fixed
+- `rqmd query` (and `search`/`vsearch`) no longer panics with `assertion failed: self.is_char_boundary` when a result snippet contains multi-byte UTF-8 characters near the truncation boundary (#chunking)
 
 ---
 
