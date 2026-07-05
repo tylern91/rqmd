@@ -4,6 +4,14 @@
 
 ---
 
+## [0.3.1] - 2026-07-05
+
+### Fixed
+- Release binaries and the Homebrew tap now publish correctly; v0.3.0 shipped
+  without assets due to a GitHub immutable-release conflict in the upload pipeline.
+
+---
+
 ## [0.3.0] - 2026-07-05
 
 ### Added
