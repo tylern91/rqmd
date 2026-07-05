@@ -1,0 +1,18 @@
+# Git LFS — binary / large-file tracking.
+# Any file matching these patterns is stored in LFS rather than the main repo object store.
+# -text disables line-ending normalization (binaries must not be touched).
+#
+# New binary files (models, images, archives) will be tracked automatically when added;
+# no manual `git lfs track` step is required.
+
+*.png     filter=lfs diff=lfs merge=lfs -text
+*.jpg     filter=lfs diff=lfs merge=lfs -text
+*.jpeg    filter=lfs diff=lfs merge=lfs -text
+*.gif     filter=lfs diff=lfs merge=lfs -text
+*.webp    filter=lfs diff=lfs merge=lfs -text
+*.pdf     filter=lfs diff=lfs merge=lfs -text
+*.gguf    filter=lfs diff=lfs merge=lfs -text
+*.onnx    filter=lfs diff=lfs merge=lfs -text
+*.bin     filter=lfs diff=lfs merge=lfs -text
+*.tar.gz  filter=lfs diff=lfs merge=lfs -text
+*.zip     filter=lfs diff=lfs merge=lfs -text

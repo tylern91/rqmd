@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+- Security scanning CI: new `.github/workflows/security.yml` runs Trivy `fs` scan on every
+  PR and push to `main`. CRITICAL + HIGH findings are uploaded to the GitHub Security tab
+  (code-scanning alerts, SARIF). A second blocking step hard-fails the PR check on any
+  CRITICAL vulnerability with a known fix (`ignore-unfixed: true`). HIGH findings are
+  recorded but non-blocking.
+
+### Changed
+- Binary assets are now tracked with Git LFS. A `.gitattributes` file declares LFS
+  patterns for images (`*.png`, `*.jpg`, `*.gif`, `*.webp`, `*.pdf`), ML model files
+  (`*.gguf`, `*.onnx`, `*.bin`), and archives (`*.tar.gz`, `*.zip`). The existing
+  `assets/qmd-architecture.png` has been converted to a pointer. New binaries committed
+  to the repo will land in LFS automatically.
+
 ---
 
 ## [0.2.2] - 2026-07-05

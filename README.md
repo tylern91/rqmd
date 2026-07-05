@@ -70,6 +70,10 @@ Typed multi-line queries and the `--intent` flag are also supported — see
 
 Requirements: Rust stable (≥1.78), cmake ≥3.14 (cmake 4.x supported), Xcode Command Line Tools (macOS) or `build-essential` (Linux).
 
+> **Git LFS note:** binary assets (images in `assets/`) are stored in Git LFS.
+> Run `brew install git-lfs && git lfs install` once before cloning if you need those files.
+> A normal `git clone` without LFS still works — the PNG will be an LFS pointer file rather than the full image.
+
 ```sh
 # Clone the repo
 git clone https://github.com/tylern91/rqmd
