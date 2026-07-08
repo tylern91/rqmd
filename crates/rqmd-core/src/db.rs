@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use hex;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -210,45 +210,56 @@ pub fn get_document_by_docid_prefix(conn: &Connection, docid: &str) -> Result<Op
     .context("get document by docid")
 }
 
+/// List active documents, optionally filtered to a single collection.
+/// Thin wrapper over `list_documents_multi` — a one-element slice reproduces
+/// this function's exact prior behavior.
 pub fn list_documents(conn: &Connection, collection: Option<&str>) -> Result<Vec<Document>> {
-    let (sql, collection_val) = match collection {
-        Some(c) => (
-            "SELECT id, collection, path, title, hash, active FROM documents WHERE collection=?1 AND active=1 ORDER BY path",
-            Some(c.to_string()),
-        ),
-        None => (
-            "SELECT id, collection, path, title, hash, active FROM documents WHERE active=1 ORDER BY collection, path",
-            None,
-        ),
+    let owned = collection.map(|c| [c.to_string()]);
+    list_documents_multi(conn, owned.as_ref().map(|a| a.as_slice()))
+}
+
+/// List active documents, optionally filtered to any of several collections.
+/// `None` or an empty slice returns documents from every collection. Backs the
+/// MCP server's `collections` filter (multi-collection parity with qmd 2.6.3).
+pub fn list_documents_multi(
+    conn: &Connection,
+    collections: Option<&[String]>,
+) -> Result<Vec<Document>> {
+    let map_row = |row: &rusqlite::Row| -> rusqlite::Result<Document> {
+        Ok(Document {
+            id: row.get(0)?,
+            collection: row.get(1)?,
+            path: row.get(2)?,
+            title: row.get(3)?,
+            hash: row.get(4)?,
+            active: row.get::<_, i64>(5)? != 0,
+        })
     };
 
-    let mut stmt = conn.prepare(sql)?;
-    let rows: Vec<Document> = if let Some(cname) = collection_val {
-        stmt.query_map(params![cname], |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?
-    } else {
-        stmt.query_map([], |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?
-    };
-    Ok(rows)
+    match collections {
+        Some(cols) if !cols.is_empty() => {
+            let placeholders = vec!["?"; cols.len()].join(",");
+            let sql = format!(
+                "SELECT id, collection, path, title, hash, active FROM documents \
+                 WHERE collection IN ({placeholders}) AND active=1 ORDER BY collection, path"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params_from_iter(cols.iter()), map_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        }
+        _ => {
+            let mut stmt = conn.prepare(
+                "SELECT id, collection, path, title, hash, active FROM documents \
+                 WHERE active=1 ORDER BY collection, path",
+            )?;
+            let rows = stmt
+                .query_map([], map_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        }
+    }
 }
 
 // ── content_vectors CRUD ──────────────────────────────────────────────────────
