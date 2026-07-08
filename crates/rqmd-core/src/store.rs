@@ -286,6 +286,18 @@ impl Store {
         self.hits_to_results(hits, limit)
     }
 
+    /// Same as `search_fts`, but matches any of several collections. `None` or an
+    /// empty slice searches every collection.
+    pub fn search_fts_multi(
+        &self,
+        query: &str,
+        limit: usize,
+        collections: Option<&[String]>,
+    ) -> Result<Vec<SearchResult>> {
+        let hits = self.fts.search_fts_multi(query, limit, collections)?;
+        self.hits_to_results(hits, limit)
+    }
+
     /// Vector similarity search only (no BM25, no rerank).
     pub fn search_vec(
         &mut self,
@@ -341,12 +353,36 @@ impl Store {
     /// `intent` provides optional context for expansion, reranking, and snippet selection.
     /// Pass `None` when no intent is available; any `intent:` line in a typed query document
     /// overrides this parameter.
+    ///
+    /// Thin wrapper over `hybrid_query_multi` — a one-element slice reproduces this
+    /// exact behavior.
     pub fn hybrid_query(
         &mut self,
         query: &str,
         intent: Option<&str>,
         limit: usize,
         collection: Option<&str>,
+        skip_rerank: bool,
+    ) -> Result<Vec<SearchResult>> {
+        let owned = collection.map(|c| [c.to_string()]);
+        self.hybrid_query_multi(
+            query,
+            intent,
+            limit,
+            owned.as_ref().map(|a| a.as_slice()),
+            skip_rerank,
+        )
+    }
+
+    /// Same as `hybrid_query`, but matches any of several collections. `None` or an
+    /// empty slice searches every collection. Backs the MCP server's `collections`
+    /// filter (multi-collection parity with qmd 2.6.3).
+    pub fn hybrid_query_multi(
+        &mut self,
+        query: &str,
+        intent: Option<&str>,
+        limit: usize,
+        collections: Option<&[String]>,
         skip_rerank: bool,
     ) -> Result<Vec<SearchResult>> {
         let mut ranked_lists: Vec<Vec<RankedResult>> = Vec::new();
@@ -379,7 +415,7 @@ impl Store {
                 };
                 match sub.qtype {
                     QueryType::Lex => {
-                        let hits = self.fts.search_fts(&sub.text, 20, collection)?;
+                        let hits = self.fts.search_fts_multi(&sub.text, 20, collections)?;
                         if !hits.is_empty() {
                             ranked_lists.push(fts_hits_to_ranked(&hits));
                             list_meta.push(RankedListMeta {
@@ -391,7 +427,7 @@ impl Store {
                     QueryType::Vec | QueryType::Hyde => {
                         let emb = self.backend.embed(&sub.text).context("embed sub-query")?;
                         let hits = self.hnsw.search(&emb, 20)?;
-                        let results = self.vec_hits_to_ranked(hits, collection)?;
+                        let results = self.vec_hits_to_ranked(hits, collections)?;
                         if !results.is_empty() {
                             ranked_lists.push(results);
                             list_meta.push(RankedListMeta {
@@ -414,7 +450,7 @@ impl Store {
             let expand_text = parsed.expand_text.as_deref().unwrap_or(query);
 
             // Step 1: BM25 probe on the raw query.
-            let initial_fts = self.fts.search_fts(expand_text, 20, collection)?;
+            let initial_fts = self.fts.search_fts_multi(expand_text, 20, collections)?;
             let top_score = initial_fts.first().map(|r| r.2).unwrap_or(0.0);
             let second_score = initial_fts.get(1).map(|r| r.2).unwrap_or(0.0);
             let strong_signal = !initial_fts.is_empty()
@@ -432,7 +468,7 @@ impl Store {
             // Step 2: Embed original query for vector search.
             let query_embedding = self.backend.embed(expand_text).context("embed query")?;
             let vec_hits = self.hnsw.search(&query_embedding, 20)?;
-            let vec_results = self.vec_hits_to_ranked(vec_hits, collection)?;
+            let vec_results = self.vec_hits_to_ranked(vec_hits, collections)?;
             if !vec_results.is_empty() {
                 ranked_lists.push(vec_results);
                 list_meta.push(RankedListMeta {
@@ -447,7 +483,7 @@ impl Store {
                 match self.backend.generate(&prompt) {
                     Ok(expansion) => {
                         let expansion_lists =
-                            self.parse_and_run_expansion(&expansion, collection)?;
+                            self.parse_and_run_expansion(&expansion, collections)?;
                         ranked_lists.extend(expansion_lists.0);
                         list_meta.extend(expansion_lists.1);
                     }
@@ -593,13 +629,13 @@ impl Store {
     fn vec_hits_to_ranked(
         &self,
         hits: Vec<(u64, f32)>,
-        collection: Option<&str>,
+        collections: Option<&[String]>,
     ) -> Result<Vec<RankedResult>> {
         let mut results = Vec::new();
         for (vid, sim) in hits {
             if let Some((doc, _body)) = doc_for_vid(&self.db, vid)? {
-                if let Some(cf) = collection {
-                    if doc.collection != cf {
+                if let Some(cols) = collections {
+                    if !cols.is_empty() && !cols.iter().any(|c| c == &doc.collection) {
                         continue;
                     }
                 }
@@ -633,7 +669,7 @@ impl Store {
     fn parse_and_run_expansion(
         &mut self,
         expansion: &str,
-        collection: Option<&str>,
+        collections: Option<&[String]>,
     ) -> Result<(Vec<Vec<RankedResult>>, Vec<RankedListMeta>)> {
         let mut lists: Vec<Vec<RankedResult>> = Vec::new();
         let mut metas: Vec<RankedListMeta> = Vec::new();
@@ -643,7 +679,7 @@ impl Store {
             if let Some(text) = line.strip_prefix("lex:") {
                 let text = text.trim();
                 if !text.is_empty() {
-                    let hits = self.fts.search_fts(text, 20, collection)?;
+                    let hits = self.fts.search_fts_multi(text, 20, collections)?;
                     if !hits.is_empty() {
                         lists.push(fts_hits_to_ranked(&hits));
                         metas.push(RankedListMeta {
@@ -657,7 +693,7 @@ impl Store {
                 if !text.is_empty() {
                     let emb = self.backend.embed(text).context("embed vec expansion")?;
                     let hits = self.hnsw.search(&emb, 20)?;
-                    let results = self.vec_hits_to_ranked(hits, collection)?;
+                    let results = self.vec_hits_to_ranked(hits, collections)?;
                     if !results.is_empty() {
                         lists.push(results);
                         metas.push(RankedListMeta {
@@ -671,7 +707,7 @@ impl Store {
                 if !text.is_empty() {
                     let emb = self.backend.embed(text).context("embed hyde expansion")?;
                     let hits = self.hnsw.search(&emb, 20)?;
-                    let results = self.vec_hits_to_ranked(hits, collection)?;
+                    let results = self.vec_hits_to_ranked(hits, collections)?;
                     if !results.is_empty() {
                         lists.push(results);
                         metas.push(RankedListMeta {
@@ -796,6 +832,15 @@ fn embed_fingerprint(model: &str) -> String {
     let sig = format!("model:{model}\nchunk_tokens:900\nchunk_overlap_tokens:135");
     let hash = Sha256::digest(sig.as_bytes());
     hex::encode(&hash[..3]) // 6 hex chars
+}
+
+/// Compute the fingerprint a fresh `rqmd embed` run would produce for the given
+/// embed model, without loading any model weights or contacting HuggingFace.
+/// `embed_repo`/`embed_file` should come from the same `LlamaCppConfig` the
+/// backend would use, so the string matches `InferenceBackend::embed_model_name`
+/// exactly. Used by `rqmd doctor` to tell current vectors from stale ones.
+pub fn expected_embed_fingerprint(embed_repo: &str, embed_file: &str) -> String {
+    embed_fingerprint(&format!("{embed_repo}/{embed_file}"))
 }
 
 #[cfg(test)]

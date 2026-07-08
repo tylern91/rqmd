@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use hex;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -18,7 +18,10 @@ use crate::types::{Collection, Document};
 pub fn open_db(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("open sqlite db")?;
     conn.execute_batch(
-        "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
+        // busy_timeout of 30s tolerates a long `rqmd embed` batch holding a write
+        // lock at a commit boundary while a concurrent MCP/CLI reader is waiting,
+        // without wedging indefinitely on a genuine deadlock.
+        "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 30000;",
     )?;
     init_schema(&conn)?;
     Ok(conn)
@@ -207,45 +210,56 @@ pub fn get_document_by_docid_prefix(conn: &Connection, docid: &str) -> Result<Op
     .context("get document by docid")
 }
 
+/// List active documents, optionally filtered to a single collection.
+/// Thin wrapper over `list_documents_multi` — a one-element slice reproduces
+/// this function's exact prior behavior.
 pub fn list_documents(conn: &Connection, collection: Option<&str>) -> Result<Vec<Document>> {
-    let (sql, collection_val) = match collection {
-        Some(c) => (
-            "SELECT id, collection, path, title, hash, active FROM documents WHERE collection=?1 AND active=1 ORDER BY path",
-            Some(c.to_string()),
-        ),
-        None => (
-            "SELECT id, collection, path, title, hash, active FROM documents WHERE active=1 ORDER BY collection, path",
-            None,
-        ),
+    let owned = collection.map(|c| [c.to_string()]);
+    list_documents_multi(conn, owned.as_ref().map(|a| a.as_slice()))
+}
+
+/// List active documents, optionally filtered to any of several collections.
+/// `None` or an empty slice returns documents from every collection. Backs the
+/// MCP server's `collections` filter (multi-collection parity with qmd 2.6.3).
+pub fn list_documents_multi(
+    conn: &Connection,
+    collections: Option<&[String]>,
+) -> Result<Vec<Document>> {
+    let map_row = |row: &rusqlite::Row| -> rusqlite::Result<Document> {
+        Ok(Document {
+            id: row.get(0)?,
+            collection: row.get(1)?,
+            path: row.get(2)?,
+            title: row.get(3)?,
+            hash: row.get(4)?,
+            active: row.get::<_, i64>(5)? != 0,
+        })
     };
 
-    let mut stmt = conn.prepare(sql)?;
-    let rows: Vec<Document> = if let Some(cname) = collection_val {
-        stmt.query_map(params![cname], |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?
-    } else {
-        stmt.query_map([], |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?
-    };
-    Ok(rows)
+    match collections {
+        Some(cols) if !cols.is_empty() => {
+            let placeholders = vec!["?"; cols.len()].join(",");
+            let sql = format!(
+                "SELECT id, collection, path, title, hash, active FROM documents \
+                 WHERE collection IN ({placeholders}) AND active=1 ORDER BY collection, path"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params_from_iter(cols.iter()), map_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        }
+        _ => {
+            let mut stmt = conn.prepare(
+                "SELECT id, collection, path, title, hash, active FROM documents \
+                 WHERE active=1 ORDER BY collection, path",
+            )?;
+            let rows = stmt
+                .query_map([], map_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        }
+    }
 }
 
 // ── content_vectors CRUD ──────────────────────────────────────────────────────
@@ -302,6 +316,24 @@ pub fn max_vector_vid(conn: &Connection) -> Result<Option<u64>> {
 pub fn clear_all_vectors(conn: &Connection) -> Result<usize> {
     let n = conn.execute("DELETE FROM content_vectors", [])?;
     Ok(n)
+}
+
+/// Distinct `embed_fingerprint` values present in `content_vectors`, with per-fingerprint
+/// chunk counts, ordered most-common first. Empty-string fingerprints (rows embedded
+/// before fingerprinting existed) are excluded — `rqmd embed --rebuild` covers those too.
+/// Used by `rqmd doctor` to detect an index that mixes vectors from more than one
+/// embedding model or chunking configuration.
+pub fn fingerprint_breakdown(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT embed_fingerprint, COUNT(*) FROM content_vectors \
+         WHERE embed_fingerprint != '' GROUP BY embed_fingerprint ORDER BY COUNT(*) DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 /// Insert or update a chunk's vector metadata.

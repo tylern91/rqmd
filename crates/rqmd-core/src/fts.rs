@@ -137,12 +137,26 @@ impl FtsIndex {
     }
 
     /// Full-text search. Returns (filepath, doc_id, bm25_score) sorted by score descending.
-    /// `collection_filter` restricts to a given collection prefix.
+    /// `collection_filter` restricts to a single collection. Thin wrapper over
+    /// `search_fts_multi` — a one-element slice reproduces this exact behavior.
     pub fn search_fts(
         &self,
         query_text: &str,
         limit: usize,
         collection_filter: Option<&str>,
+    ) -> Result<Vec<(String, i64, f32)>> {
+        let owned = collection_filter.map(|c| [c.to_string()]);
+        self.search_fts_multi(query_text, limit, owned.as_ref().map(|a| a.as_slice()))
+    }
+
+    /// Same as `search_fts`, but matches any of several collections. `None` or an
+    /// empty slice searches every collection. Backs the MCP server's `collections`
+    /// filter (multi-collection parity with qmd 2.6.3).
+    pub fn search_fts_multi(
+        &self,
+        query_text: &str,
+        limit: usize,
+        collections: Option<&[String]>,
     ) -> Result<Vec<(String, i64, f32)>> {
         let searcher = self.reader.searcher();
 
@@ -167,10 +181,15 @@ impl FtsIndex {
                 .unwrap_or("")
                 .to_string();
 
-            // Apply collection filter at result level (filepath = "collection/path")
-            if let Some(cf) = collection_filter {
-                let prefix = format!("{cf}/");
-                if !filepath.starts_with(&prefix) && filepath != cf {
+            // Apply collection filter at result level (filepath = "collection/path").
+            // No filter, or an empty list, means "search all collections".
+            if let Some(cols) = collections {
+                if !cols.is_empty()
+                    && !cols.iter().any(|cf| {
+                        let prefix = format!("{cf}/");
+                        filepath.starts_with(&prefix) || filepath == cf.as_str()
+                    })
+                {
                     continue;
                 }
             }

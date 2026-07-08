@@ -20,6 +20,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
 
       # ── Step 1: Record CRITICAL + HIGH to the GitHub Security tab (non-blocking) ──
       - name: Trivy scan → SARIF

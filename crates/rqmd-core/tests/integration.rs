@@ -4,11 +4,13 @@
 use rqmd_core::{
     chunking::chunk_document,
     db::{
-        collection_context_key, content_hash, docid_from_hash, get_config, open_db, set_config,
+        collection_context_key, content_hash, docid_from_hash, get_config,
+        get_document_by_docid_prefix, get_document_by_filepath, open_db, set_config,
         upsert_content, upsert_document,
     },
     rrf::{reciprocal_rank_fusion, rrf_weights},
     types::{QueryType, RankedListMeta, RankedResult},
+    Store, StoreConfig,
 };
 use tempfile::TempDir;
 
@@ -196,4 +198,144 @@ fn db_upsert_is_idempotent() {
         .unwrap()
         .unwrap();
     assert_eq!(doc.title, "Title v2");
+}
+
+// ── Path / tokenization round-trip (qmd 2.6.3 parity check) ─────────────────────
+//
+// rqmd uses Tantivy (not SQLite FTS5, unlike qmd) and already normalizes paths
+// through a single "collection/path" filepath string, so these bug classes are
+// unlikely to reproduce here — these tests lock that in rather than fix a
+// known defect.
+
+fn test_store(dir: &TempDir) -> Store {
+    let config = StoreConfig {
+        db_path: dir.path().join("test.sqlite"),
+        tantivy_dir: dir.path().join("tantivy"),
+        hnsw_path: dir.path().join("hnsw.usearch"),
+    };
+    Store::open(config, rqmd_llm::no_backend()).unwrap()
+}
+
+#[test]
+fn special_char_paths_round_trip() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    let collection = "coll";
+
+    // Paths containing characters that are meaningful in URLs, globs, or shells.
+    let cases = [
+        ("notes/a#b.md", "Hash Path"),
+        ("notes/a&b.md", "Ampersand Path"),
+        ("notes/a b.md", "Space Path"),
+        ("notes/a[b].md", "Bracket Path"),
+        ("notes/a(b).md", "Paren Path"),
+    ];
+
+    for (path, title) in cases {
+        let body = format!("Body for {title}");
+        store
+            .index_document_fts_only(collection, path, title, &body)
+            .unwrap();
+        store.flush().unwrap();
+
+        // Round-trip by "collection/path" — same lookup `get` uses for non-docid input.
+        let doc = get_document_by_filepath(&store.db, collection, path)
+            .unwrap()
+            .unwrap_or_else(|| panic!("document not found by path: {collection}/{path}"));
+        assert_eq!(doc.path, path);
+        assert_eq!(doc.title, title);
+
+        // Round-trip by docid — same lookup `get` uses for "#abc123" input.
+        let docid = docid_from_hash(&doc.hash);
+        let by_id = get_document_by_docid_prefix(&store.db, docid)
+            .unwrap()
+            .unwrap_or_else(|| panic!("document not found by docid: {docid}"));
+        assert_eq!(by_id.path, path);
+
+        // Round-trip via BM25 search on the title term.
+        let hits = store.search_fts(title, 5, None).unwrap();
+        assert!(
+            hits.iter().any(|h| h.path == path),
+            "search for {title:?} did not return {path:?}: {hits:?}"
+        );
+    }
+}
+
+#[test]
+fn dotted_version_tokenizes_and_matches_bm25() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+
+    store
+        .index_document_fts_only(
+            "coll",
+            "releases/notes.md",
+            "Release Notes",
+            "Released version 2026.4.10 with bug fixes.",
+        )
+        .unwrap();
+    store.flush().unwrap();
+
+    let hits = store.search_fts("2026.4.10", 5, None).unwrap();
+    assert!(
+        hits.iter().any(|h| h.path == "releases/notes.md"),
+        "BM25 search for dotted version '2026.4.10' returned no match: {hits:?}"
+    );
+}
+
+// ── MCP multi-collection filter (qmd 2.6.3 parity: `collection` → `collections`) ──
+
+#[test]
+fn search_fts_multi_filters_to_requested_collections() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+
+    for collection in ["alpha", "beta", "gamma"] {
+        store
+            .index_document_fts_only(
+                collection,
+                "doc.md",
+                "Shared Term",
+                "Every document mentions widget somewhere in its body.",
+            )
+            .unwrap();
+    }
+    store.flush().unwrap();
+
+    // Omitted / None → searches every collection.
+    let all = store.search_fts_multi("widget", 10, None).unwrap();
+    assert_eq!(all.len(), 3, "expected all 3 collections, got {all:?}");
+
+    // Multiple named collections → only those match.
+    let two = ["alpha".to_string(), "beta".to_string()];
+    let subset = store.search_fts_multi("widget", 10, Some(&two)).unwrap();
+    assert_eq!(subset.len(), 2, "expected 2 collections, got {subset:?}");
+    assert!(subset
+        .iter()
+        .all(|h| h.collection == "alpha" || h.collection == "beta"));
+    assert!(!subset.iter().any(|h| h.collection == "gamma"));
+}
+
+#[test]
+fn list_documents_multi_filters_to_requested_collections() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+
+    for collection in ["alpha", "beta", "gamma"] {
+        store
+            .index_document_fts_only(collection, "doc.md", "Title", "body")
+            .unwrap();
+    }
+
+    // Omitted / None → every collection.
+    let all = rqmd_core::db::list_documents_multi(&store.db, None).unwrap();
+    assert_eq!(all.len(), 3);
+
+    // Named subset → only those collections.
+    let two = ["alpha".to_string(), "gamma".to_string()];
+    let subset = rqmd_core::db::list_documents_multi(&store.db, Some(&two)).unwrap();
+    assert_eq!(subset.len(), 2);
+    assert!(subset
+        .iter()
+        .all(|d| d.collection == "alpha" || d.collection == "gamma"));
 }

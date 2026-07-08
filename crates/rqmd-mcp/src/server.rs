@@ -79,8 +79,8 @@ pub struct QueryInput {
     /// Optional context or intent to steer query expansion, reranking, and
     /// snippet selection. Equivalent to an `intent:` line inside the query.
     pub intent: Option<String>,
-    /// Filter to a specific collection by name. Omit to search all collections.
-    pub collection: Option<String>,
+    /// Filter to one or more collections by name. Omit to search all collections.
+    pub collections: Option<Vec<String>>,
     /// Maximum results to return (default: 10).
     pub limit: Option<usize>,
     /// Set to false to skip LLM reranking (faster, lower quality). Default: true.
@@ -91,8 +91,8 @@ pub struct QueryInput {
 pub struct SearchInput {
     /// BM25 keyword query. Supports "quoted phrases" and -negation.
     pub query: String,
-    /// Filter to a specific collection by name.
-    pub collection: Option<String>,
+    /// Filter to one or more collections by name. Omit to search all collections.
+    pub collections: Option<Vec<String>>,
     /// Maximum results to return (default: 10).
     pub limit: Option<usize>,
 }
@@ -114,8 +114,8 @@ pub struct MultiGetInput {
     /// Glob pattern (e.g. "collection/2025-05*.md") or comma-separated list of
     /// paths/docids to retrieve.
     pub pattern: String,
-    /// Filter to a specific collection.
-    pub collection: Option<String>,
+    /// Filter to one or more collections by name.
+    pub collections: Option<Vec<String>>,
     /// Maximum lines per document.
     pub max_lines: Option<usize>,
 }
@@ -132,13 +132,15 @@ impl RqmdServer {
     fn query(&self, Parameters(p): Parameters<QueryInput>) -> String {
         let no_rerank = !p.rerank.unwrap_or(true);
         let limit = p.limit.unwrap_or(10);
-        let col = p.collection.as_deref();
+        let cols = p.collections.as_deref();
         let intent = p.intent.as_deref();
         match self.ml() {
-            Ok(mut store) => match store.hybrid_query(&p.query, intent, limit, col, no_rerank) {
-                Ok(results) => format_results(&results, &p.query),
-                Err(e) => format!("Error running query: {e:#}"),
-            },
+            Ok(mut store) => {
+                match store.hybrid_query_multi(&p.query, intent, limit, cols, no_rerank) {
+                    Ok(results) => format_results(&results, &p.query),
+                    Err(e) => format!("Error running query: {e:#}"),
+                }
+            }
             Err(e) => format!("Error loading inference backend: {e:#}"),
         }
     }
@@ -149,9 +151,9 @@ impl RqmdServer {
     )]
     fn search(&self, Parameters(p): Parameters<SearchInput>) -> String {
         let limit = p.limit.unwrap_or(10);
-        let col = p.collection.as_deref();
+        let cols = p.collections.as_deref();
         match self.fts() {
-            Ok(store) => match store.search_fts(&p.query, limit, col) {
+            Ok(store) => match store.search_fts_multi(&p.query, limit, cols) {
                 Ok(results) => format_results(&results, &p.query),
                 Err(e) => format!("Error running search: {e:#}"),
             },
@@ -178,7 +180,7 @@ impl RqmdServer {
     fn multi_get(&self, Parameters(p): Parameters<MultiGetInput>) -> String {
         match self.fts() {
             Ok(store) => {
-                multi_get_documents(&store, &p.pattern, p.collection.as_deref(), p.max_lines)
+                multi_get_documents(&store, &p.pattern, p.collections.as_deref(), p.max_lines)
             }
             Err(e) => format!("Error opening store: {e:#}"),
         }
@@ -326,10 +328,10 @@ fn get_document(
 fn multi_get_documents(
     store: &Store,
     pattern: &str,
-    collection: Option<&str>,
+    collections: Option<&[String]>,
     max_lines: Option<usize>,
 ) -> String {
-    let docs = match db::list_documents(&store.db, collection) {
+    let docs = match db::list_documents_multi(&store.db, collections) {
         Ok(d) => d,
         Err(e) => return format!("DB error: {e:#}"),
     };

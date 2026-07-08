@@ -4,6 +4,28 @@
 
 ---
 
+## [0.4.0] - 2026-07-08
+### Added
+- `rqmd doctor` now warns when the index contains chunks embedded under more than
+  one embedding fingerprint (stale vectors left behind by a model or chunking
+  change), listing per-fingerprint chunk counts and recommending `rqmd embed --rebuild`.
+- Test coverage for special-character paths (`#`, `&`, spaces, `[]`, `()`) round-tripping
+  through index → search → get, and dotted-version (e.g. `2026.4.10`) BM25 tokenization.
+
+### Changed
+- **Breaking (MCP):** the `query`, `search`, and `multi_get` MCP tools now take
+  `collections: [...]` (an array) instead of `collection` (a single string) — matches
+  qmd 2.6.3's multi-collection filter. Existing MCP client configs passing a bare
+  string must switch to an array; omitting the field still searches all collections.
+- SQLite `busy_timeout` raised from 5s to 30s so a long embed batch no longer wedges
+  a concurrent MCP/CLI reader.
+
+### CI
+- `security.yml`'s Trivy checkout now pins `fetch-depth: 1` and
+  `persist-credentials: false`, matching the other workflow jobs' explicit settings.
+
+---
+
 ## [0.3.1] - 2026-07-05
 
 ### Fixed
