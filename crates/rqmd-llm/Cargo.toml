@@ -1,6 +1,6 @@
 [package]
 name = "rqmd-llm"
-version = "0.2.0"
+version.workspace = true
 edition = "2021"
 description = "rqmd inference backend — LlamaCpp and ONNX Runtime backends for embedding and reranking"
 repository = "https://github.com/tylern91/rqmd"

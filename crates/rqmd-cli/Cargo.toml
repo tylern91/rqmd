@@ -1,6 +1,6 @@
 [package]
 name = "rqmd-cli"
-version = "0.2.0"
+version.workspace = true
 edition = "2021"
 description = "rqmd CLI — hybrid local document search"
 repository = "https://github.com/tylern91/rqmd"
