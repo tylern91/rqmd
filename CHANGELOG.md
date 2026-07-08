@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+---
+
+## [0.4.0] - 2026-07-08
 ### Added
 - `rqmd doctor` now warns when the index contains chunks embedded under more than
   one embedding fingerprint (stale vectors left behind by a model or chunking
