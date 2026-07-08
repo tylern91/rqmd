@@ -18,7 +18,10 @@ use crate::types::{Collection, Document};
 pub fn open_db(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("open sqlite db")?;
     conn.execute_batch(
-        "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
+        // busy_timeout of 30s tolerates a long `rqmd embed` batch holding a write
+        // lock at a commit boundary while a concurrent MCP/CLI reader is waiting,
+        // without wedging indefinitely on a genuine deadlock.
+        "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 30000;",
     )?;
     init_schema(&conn)?;
     Ok(conn)
