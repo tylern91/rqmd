@@ -9,7 +9,7 @@ Built on the search pipeline and ideas of **[tobi/qmd](https://github.com/tobi/q
 ## Contents
 
 - [Why Rust](#why-rust)
-- [Status](#status)
+- [Features](#features)
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [CLI reference](#cli-reference)
@@ -42,9 +42,7 @@ rqmd ships as a ~60MB self-contained binary with no runtime dependencies:
 
 ---
 
-## Status
-
-rqmd is at **v0.2.0**. All core search functionality is implemented and tested:
+## Features
 
 | Feature | Status |
 |---------|--------|
