@@ -8,6 +8,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
+      - "CHANGELOG.md"
+      - "scripts/check-version-sync.sh"
       - ".github/workflows/rust.yml"
   pull_request:
     branches: [main]
@@ -16,6 +18,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
+      - "CHANGELOG.md"
+      - "scripts/check-version-sync.sh"
       - ".github/workflows/rust.yml"
 
 permissions:
@@ -32,6 +36,20 @@ env:
   RQMD_CI: "1"
 
 jobs:
+  version-sync:
+    name: Version sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check Cargo.toml version matches CHANGELOG
+        run: bash scripts/check-version-sync.sh
+
   build-macos:
     name: Build ${{ matrix.feature-set }} (macOS arm64)
     runs-on: macos-15
