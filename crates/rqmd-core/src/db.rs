@@ -307,6 +307,24 @@ pub fn clear_all_vectors(conn: &Connection) -> Result<usize> {
     Ok(n)
 }
 
+/// Distinct `embed_fingerprint` values present in `content_vectors`, with per-fingerprint
+/// chunk counts, ordered most-common first. Empty-string fingerprints (rows embedded
+/// before fingerprinting existed) are excluded — `rqmd embed --rebuild` covers those too.
+/// Used by `rqmd doctor` to detect an index that mixes vectors from more than one
+/// embedding model or chunking configuration.
+pub fn fingerprint_breakdown(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT embed_fingerprint, COUNT(*) FROM content_vectors \
+         WHERE embed_fingerprint != '' GROUP BY embed_fingerprint ORDER BY COUNT(*) DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// Insert or update a chunk's vector metadata.
 /// `vid` is the usearch key (caller assigns it from the HNSW index).
 #[allow(clippy::too_many_arguments)]
