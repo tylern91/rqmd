@@ -1,6 +1,6 @@
 [package]
 name = "rqmd-mcp"
-version = "0.2.0"
+version.workspace = true
 edition = "2021"
 description = "rqmd MCP server — hybrid local document search via Model Context Protocol"
 repository = "https://github.com/tylern91/rqmd"

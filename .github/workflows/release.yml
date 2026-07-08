@@ -217,6 +217,20 @@ jobs:
           LLAMA_METAL: ${{ matrix.llama_metal }}
         run: cargo build --profile dist -p rqmd-cli
 
+      - name: Assert binary version matches tag
+        # Guards against the class of bug where Cargo.toml's version drifts
+        # from the release tag — the binary would silently ship mis-stamped
+        # (see the v0.4.1 fix this step was introduced alongside).
+        run: |
+          set -euo pipefail
+          want="${VERSION#v}"
+          got="$(./target/dist/rqmd --version | awk '{print $NF}')"
+          if [ "$got" != "$want" ]; then
+            echo "::error::binary reports version '$got' but release tag is '$want'"
+            exit 1
+          fi
+          echo "Binary version '$got' matches release tag '$want'"
+
       - name: Package tarball and checksum
         id: pkg
         run: |

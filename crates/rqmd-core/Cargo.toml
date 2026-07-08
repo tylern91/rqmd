@@ -1,6 +1,6 @@
 [package]
 name = "rqmd-core"
-version = "0.2.0"
+version.workspace = true
 edition = "2021"
 description = "rqmd core engine — BM25 + vector hybrid search with RRF fusion"
 repository = "https://github.com/tylern91/rqmd"

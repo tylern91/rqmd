@@ -4,6 +4,21 @@
 
 ---
 
+## [0.4.1] - 2026-07-08
+### Fixed
+- `rqmd --version` and the MCP server's `server_info` were pinned at `0.2.0` since
+  the v0.3.0 release — every crate `Cargo.toml` still hardcoded the old literal, and
+  the release pipeline built binaries from the tagged tree without ever touching it.
+  Version is now a single `[workspace.package]` value inherited by every crate
+  (`version.workspace = true`), so one line bumps all of them.
+- Added `scripts/check-version-sync.sh`, wired into CI, which fails the build if the
+  workspace version and the CHANGELOG's top release heading disagree — the exact
+  drift that caused this bug.
+- Added a release-time assertion (`upload-assets` job) that the built binary's
+  `--version` output matches the tag being released, as a final safety net.
+
+---
+
 ## [0.4.0] - 2026-07-08
 ### Added
 - `rqmd doctor` now warns when the index contains chunks embedded under more than
