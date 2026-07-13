@@ -10,7 +10,7 @@ use rmcp::{
     schemars, serde, tool, tool_handler, tool_router, ServerHandler,
 };
 
-use rqmd_core::{db, Store, StoreConfig};
+use rqmd_core::{db, resolve, Store, StoreConfig};
 use rqmd_llm::{no_backend, LlamaCppBackend, LlamaCppConfig};
 
 // ── Server struct ─────────────────────────────────────────────────────────────
@@ -85,6 +85,9 @@ pub struct QueryInput {
     pub limit: Option<usize>,
     /// Set to false to skip LLM reranking (faster, lower quality). Default: true.
     pub rerank: Option<bool>,
+    /// Set to false to skip the LLM query-expansion / HyDE round-trip (faster;
+    /// pure hybrid retrieval). Default: true.
+    pub expand: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -127,16 +130,18 @@ impl RqmdServer {
     /// Hybrid semantic search: BM25 + vector retrieval fused with RRF and
     /// reranked by a cross-encoder. Best for most queries.
     #[tool(
-        description = "Hybrid search (BM25 + vector + rerank). Best for most queries. Provide a natural-language question or keyword phrase."
+        description = "Hybrid search (BM25 + vector + rerank). Best for most queries. Provide a natural-language question or keyword phrase. Set expand:false to skip LLM query-expansion for lower latency."
     )]
     fn query(&self, Parameters(p): Parameters<QueryInput>) -> String {
         let no_rerank = !p.rerank.unwrap_or(true);
+        let no_expand = !p.expand.unwrap_or(true);
         let limit = p.limit.unwrap_or(10);
         let cols = p.collections.as_deref();
         let intent = p.intent.as_deref();
         match self.ml() {
             Ok(mut store) => {
-                match store.hybrid_query_multi(&p.query, intent, limit, cols, no_rerank) {
+                match store.hybrid_query_multi(&p.query, intent, limit, cols, no_rerank, no_expand)
+                {
                     Ok(results) => format_results(&results, &p.query),
                     Err(e) => format!("Error running query: {e:#}"),
                 }
@@ -331,27 +336,15 @@ fn multi_get_documents(
     collections: Option<&[String]>,
     max_lines: Option<usize>,
 ) -> String {
-    let docs = match db::list_documents_multi(&store.db, collections) {
+    let docs = match resolve::resolve_multi_get(&store.db, collections, pattern) {
         Ok(d) => d,
         Err(e) => return format!("DB error: {e:#}"),
     };
-    let patterns: Vec<&str> = pattern.split(',').map(str::trim).collect();
     let mut out = String::new();
     let mut count = 0usize;
 
     for doc in &docs {
         let filepath = format!("{}/{}", doc.collection, doc.path);
-        let matched = patterns.iter().any(|p| {
-            if p.contains('*') {
-                glob_match(p, &filepath)
-            } else {
-                filepath.contains(p) || doc.path.contains(p)
-            }
-        });
-        if !matched {
-            continue;
-        }
-
         let body = db::get_content(&store.db, &doc.hash)
             .unwrap_or_default()
             .unwrap_or_default();
@@ -409,27 +402,4 @@ fn build_status(store: &Store, index_dir: &Path) -> String {
         }
     }
     out
-}
-
-fn glob_match(pattern: &str, target: &str) -> bool {
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() == 1 {
-        return target == pattern;
-    }
-    let mut rest = target;
-    for (i, part) in parts.iter().enumerate() {
-        if i == 0 {
-            if !rest.starts_with(part) {
-                return false;
-            }
-            rest = &rest[part.len()..];
-        } else if i == parts.len() - 1 {
-            return rest.ends_with(part);
-        } else if let Some(pos) = rest.find(part) {
-            rest = &rest[pos + part.len()..];
-        } else {
-            return false;
-        }
-    }
-    true
 }

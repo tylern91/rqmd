@@ -3,6 +3,7 @@ pub mod db;
 pub mod fts;
 pub mod hnsw;
 pub mod query;
+pub mod resolve;
 pub mod rrf;
 pub mod store;
 pub mod types;

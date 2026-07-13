@@ -124,7 +124,7 @@ fn main() -> Result<()> {
 
     for (i, case) in cases.iter().enumerate() {
         // Full hybrid
-        let results = store.hybrid_query(&case.query, None, 5, None, false)?;
+        let results = store.hybrid_query(&case.query, None, 5, None, false, false)?;
         let top1 = results.first().map(|r| r.path.as_str()).unwrap_or("");
         let matched = result_matches(top1, &case.expected_doc);
 

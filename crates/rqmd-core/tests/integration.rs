@@ -4,10 +4,11 @@
 use rqmd_core::{
     chunking::chunk_document,
     db::{
-        collection_context_key, content_hash, docid_from_hash, get_config,
-        get_document_by_docid_prefix, get_document_by_filepath, open_db, set_config,
+        collection_context_key, content_hash, docid_from_hash, find_documents_by_needles,
+        get_config, get_document_by_docid_prefix, get_document_by_filepath, open_db, set_config,
         upsert_content, upsert_document,
     },
+    resolve::resolve_multi_get,
     rrf::{reciprocal_rank_fusion, rrf_weights},
     types::{QueryType, RankedListMeta, RankedResult},
     Store, StoreConfig,
@@ -338,4 +339,111 @@ fn list_documents_multi_filters_to_requested_collections() {
     assert!(subset
         .iter()
         .all(|d| d.collection == "alpha" || d.collection == "gamma"));
+}
+
+// ── multi-get resolution hardening ────────────────────────────────────────────
+//
+// Regression guard for the previous unanchored `contains()` matcher: a bare
+// fragment like "SYNTAX.md" used to also match "OLD-SYNTAX.md" and return the
+// wrong document with no error. `find_documents_by_needles` / `resolve_multi_get`
+// anchor at a `/` path-segment boundary instead.
+
+#[test]
+fn find_documents_by_needles_is_anchored_at_path_boundary() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir.path().join("test.sqlite")).unwrap();
+
+    for (collection, path, title) in [
+        ("docs", "SYNTAX.md", "Syntax"),
+        ("docs", "OLD-SYNTAX.md", "Old Syntax"),
+        ("docs", "guide/SYNTAX.md", "Nested Syntax"),
+    ] {
+        let hash = content_hash(path);
+        upsert_content(&db, &hash, "body", "t").unwrap();
+        upsert_document(&db, collection, path, title, &hash, "t").unwrap();
+    }
+
+    // "SYNTAX.md" must match the two paths ending in "/SYNTAX.md" or exactly
+    // "SYNTAX.md" — but never "OLD-SYNTAX.md" (that's a substring, not a
+    // segment-boundary suffix).
+    let hits = find_documents_by_needles(&db, None, &["SYNTAX.md"]).unwrap();
+    let paths: Vec<&str> = hits.iter().map(|d| d.path.as_str()).collect();
+    assert!(paths.contains(&"SYNTAX.md"));
+    assert!(paths.contains(&"guide/SYNTAX.md"));
+    assert!(
+        !paths.contains(&"OLD-SYNTAX.md"),
+        "unanchored match regression: {paths:?}"
+    );
+}
+
+#[test]
+fn find_documents_by_needles_respects_collection_filter() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir.path().join("test.sqlite")).unwrap();
+
+    for collection in ["alpha", "beta"] {
+        let hash = content_hash(collection);
+        upsert_content(&db, &hash, "body", "t").unwrap();
+        upsert_document(&db, collection, "README.md", "Readme", &hash, "t").unwrap();
+    }
+
+    let only_alpha = ["alpha".to_string()];
+    let hits = find_documents_by_needles(&db, Some(&only_alpha), &["README.md"]).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].collection, "alpha");
+}
+
+#[test]
+fn get_document_by_docid_prefix_is_deterministic_on_collision() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir.path().join("test.sqlite")).unwrap();
+
+    // Two documents deliberately share a 6-hex-char hash prefix.
+    let hash_a = "abcdef1111111111111111111111111111111111111111111111111111";
+    let hash_z = "abcdef2222222222222222222222222222222222222222222222222222";
+    upsert_content(&db, hash_a, "body a", "t").unwrap();
+    upsert_content(&db, hash_z, "body z", "t").unwrap();
+    upsert_document(&db, "zeta", "z.md", "Z", hash_z, "t").unwrap();
+    upsert_document(&db, "alpha", "a.md", "A", hash_a, "t").unwrap();
+
+    let first = get_document_by_docid_prefix(&db, "abcdef")
+        .unwrap()
+        .unwrap();
+    let second = get_document_by_docid_prefix(&db, "abcdef")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.collection, second.collection);
+    assert_eq!(first.path, second.path);
+    // Deterministic choice: lowest (collection, path) — "alpha/a.md" sorts first.
+    assert_eq!(first.collection, "alpha");
+    assert_eq!(first.path, "a.md");
+}
+
+#[test]
+fn resolve_multi_get_combines_docid_glob_and_plain_patterns() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir.path().join("test.sqlite")).unwrap();
+
+    let hash_a = content_hash("doc a");
+    let hash_b = content_hash("doc b");
+    let hash_c = content_hash("doc c");
+    upsert_content(&db, &hash_a, "doc a", "t").unwrap();
+    upsert_content(&db, &hash_b, "doc b", "t").unwrap();
+    upsert_content(&db, &hash_c, "doc c", "t").unwrap();
+    upsert_document(&db, "notes", "SYNTAX.md", "Syntax", &hash_a, "t").unwrap();
+    upsert_document(&db, "notes", "OLD-SYNTAX.md", "Old Syntax", &hash_b, "t").unwrap();
+    upsert_document(&db, "journal", "2025-05-01.md", "Journal", &hash_c, "t").unwrap();
+
+    let docid_a = docid_from_hash(&hash_a);
+    let pattern = format!("#{docid_a}, journal/2025-05*.md");
+    let docs = resolve_multi_get(&db, None, &pattern).unwrap();
+    let paths: Vec<&str> = docs.iter().map(|d| d.path.as_str()).collect();
+
+    assert!(paths.contains(&"SYNTAX.md"));
+    assert!(paths.contains(&"2025-05-01.md"));
+    assert!(
+        !paths.contains(&"OLD-SYNTAX.md"),
+        "docid pattern must not pull in unrelated docs: {paths:?}"
+    );
+    assert_eq!(docs.len(), 2, "expected no duplicates: {docs:?}");
 }
