@@ -1,6 +1,10 @@
 # rqmd Changelog
 
 ## [Unreleased]
+
+---
+
+## [0.5.0] - 2026-07-13
 ### Fixed
 - `multi-get` (CLI and MCP) matched plain path fragments with an unanchored substring
   check, so a pattern like `README.md` could silently also return `OLD-README.md` —
