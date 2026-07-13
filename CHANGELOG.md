@@ -4,6 +4,17 @@
 
 ---
 
+## [0.4.2] - 2026-07-13
+### Fixed
+- The per-collection pre-update hook (`rqmd collection update-cmd`, shown as
+  `Hook:` in `collection show`) was persisted, loaded, and displayed but never
+  executed — `rqmd update` walked and reindexed the collection directory
+  without ever running it. `run_update` now spawns the stored command via
+  `sh -c` with the collection's directory as CWD before walking it, warning
+  (not failing) on a non-zero exit or spawn error.
+
+---
+
 ## [0.4.1] - 2026-07-08
 ### Fixed
 - `rqmd --version` and the MCP server's `server_info` were pinned at `0.2.0` since

@@ -464,6 +464,28 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             continue;
         }
 
+        // Run the collection's pre-update hook (e.g. `git fetch && git pull ...`)
+        // before walking the directory, so indexing sees freshly synced content.
+        if let Some(cmd) = col.update_command.as_deref() {
+            if !cmd.trim().is_empty() {
+                println!("  \x1b[2m$ {cmd}\x1b[0m");
+                match std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .current_dir(dir)
+                    .status()
+                {
+                    Ok(status) if !status.success() => {
+                        eprintln!("  WARN: update hook exited with {status}");
+                    }
+                    Err(e) => {
+                        eprintln!("  WARN: update hook failed to run: {e}");
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         let ext = col
             .pattern
             .rsplit('/')
