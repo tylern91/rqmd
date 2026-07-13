@@ -48,6 +48,9 @@ enum Commands {
         /// Optional context/intent to steer query expansion and reranking.
         #[arg(long)]
         intent: Option<String>,
+        /// Skip the LLM query-expansion / HyDE round-trip (faster; pure hybrid retrieval).
+        #[arg(long, env = "RRQMD_NO_EXPAND")]
+        no_expand: bool,
     },
     /// Full-text keyword search (BM25 only, no LLM)
     Search {
@@ -253,6 +256,7 @@ fn main() -> Result<()> {
             no_rerank,
             full,
             intent,
+            no_expand,
         } => commands::query::run_query(
             &index_dir,
             &query,
@@ -262,6 +266,7 @@ fn main() -> Result<()> {
             &format,
             no_rerank,
             full,
+            no_expand,
         ),
         Commands::Search {
             query,

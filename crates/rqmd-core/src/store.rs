@@ -363,6 +363,7 @@ impl Store {
         limit: usize,
         collection: Option<&str>,
         skip_rerank: bool,
+        no_expand: bool,
     ) -> Result<Vec<SearchResult>> {
         let owned = collection.map(|c| [c.to_string()]);
         self.hybrid_query_multi(
@@ -371,12 +372,17 @@ impl Store {
             limit,
             owned.as_ref().map(|a| a.as_slice()),
             skip_rerank,
+            no_expand,
         )
     }
 
     /// Same as `hybrid_query`, but matches any of several collections. `None` or an
     /// empty slice searches every collection. Backs the MCP server's `collections`
     /// filter (multi-collection parity with qmd 2.6.3).
+    ///
+    /// `no_expand` skips the LLM query-expansion/HyDE round-trip (step 3 below),
+    /// leaving BM25 + vector retrieval and RRF fusion intact — a faster, pure
+    /// hybrid-retrieval mode for callers who don't need the extra recall.
     pub fn hybrid_query_multi(
         &mut self,
         query: &str,
@@ -384,6 +390,7 @@ impl Store {
         limit: usize,
         collections: Option<&[String]>,
         skip_rerank: bool,
+        no_expand: bool,
     ) -> Result<Vec<SearchResult>> {
         let mut ranked_lists: Vec<Vec<RankedResult>> = Vec::new();
         let mut list_meta: Vec<RankedListMeta> = Vec::new();
@@ -477,8 +484,9 @@ impl Store {
                 });
             }
 
-            // Step 3: Query expansion via generation model (skipped on strong BM25 signal).
-            if !strong_signal {
+            // Step 3: Query expansion via generation model (skipped on strong BM25 signal,
+            // or unconditionally when the caller passed `no_expand`).
+            if !no_expand && !strong_signal {
                 let prompt = build_expansion_prompt(expand_text, effective_intent.as_deref());
                 match self.backend.generate(&prompt) {
                     Ok(expansion) => {

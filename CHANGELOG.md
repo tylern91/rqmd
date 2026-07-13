@@ -4,6 +4,38 @@
 
 ---
 
+## [0.5.0] - 2026-07-13
+### Fixed
+- `multi-get` (CLI and MCP) matched plain path fragments with an unanchored substring
+  check, so a pattern like `README.md` could silently also return `OLD-README.md` —
+  worst case for a caller that expects one document and gets the wrong one with no
+  error. Matching is now anchored at a `/` path-segment boundary; an explicit glob
+  (e.g. `docs/*.md`) is required for fragment/prefix matching, matching the MCP
+  tool's documented behavior.
+- `#docid` prefix lookups (`get_document_by_docid_prefix`) had no deterministic
+  tie-break on a hash-prefix collision (`LIMIT 1` with no `ORDER BY`), so the
+  resolved document could vary run to run. Now ordered by `(collection, path)`
+  before `LIMIT 1`.
+
+### Added
+- `--no-expand` flag (`RRQMD_NO_EXPAND` env) on `rqmd query`, and an `expand: false`
+  input on the MCP `query` tool, to skip the LLM query-expansion/HyDE round-trip.
+  BM25 + vector retrieval and RRF fusion still run — this is pure hybrid retrieval
+  without the extra generation call, for corpora or callers that don't need it.
+
+### Changed
+- `multi-get`'s plain-pattern resolution now pushes down to SQL
+  (`find_documents_by_needles`) instead of loading every document in the index and
+  filtering in Rust — avoids a full-table scan for the common explicit-path case.
+- CLI and MCP `multi-get` now share one resolution implementation
+  (`rqmd_core::resolve`), removing a duplicated `glob_match`/matching function that
+  had drifted between the two crates.
+
+### CI
+- `rust.yml`'s `upload-artifact` step bumped from `@v4` to `@v7`.
+
+---
+
 ## [0.4.2] - 2026-07-13
 ### Fixed
 - The per-collection pre-update hook (`rqmd collection update-cmd`, shown as

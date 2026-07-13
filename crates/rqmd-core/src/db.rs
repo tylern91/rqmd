@@ -190,10 +190,15 @@ pub fn get_document_by_id(conn: &Connection, id: i64) -> Result<Option<Document>
 }
 
 /// Look up a document by the first 6 hex chars of its content hash (the docid).
+///
+/// Ordered by `(collection, path)` before `LIMIT 1` so a hash-prefix collision
+/// resolves to the same document every time, rather than an arbitrary one
+/// depending on SQLite's row order.
 pub fn get_document_by_docid_prefix(conn: &Connection, docid: &str) -> Result<Option<Document>> {
     let pattern = format!("{docid}%");
     conn.query_row(
-        "SELECT id, collection, path, title, hash, active FROM documents WHERE hash LIKE ?1 AND active=1 LIMIT 1",
+        "SELECT id, collection, path, title, hash, active FROM documents \
+         WHERE hash LIKE ?1 AND active=1 ORDER BY collection, path LIMIT 1",
         params![pattern],
         |row| {
             Ok(Document {
@@ -260,6 +265,59 @@ pub fn list_documents_multi(
             Ok(rows)
         }
     }
+}
+
+/// Resolve plain (non-glob, non-docid) `multi-get` patterns directly in SQL,
+/// avoiding a full-table scan of `list_documents_multi` for the common case.
+///
+/// Each needle matches a document if it equals — or is a `/`-anchored suffix
+/// of — either the collection-relative `path` or the full `collection/path`.
+/// The anchoring is what prevents a fragment like "SYNTAX.md" from matching
+/// "OLD-SYNTAX.md": the suffix check requires a `/` immediately before the
+/// needle, not just a raw substring match.
+pub fn find_documents_by_needles(
+    conn: &Connection,
+    collections: Option<&[String]>,
+    needles: &[&str],
+) -> Result<Vec<Document>> {
+    if needles.is_empty() {
+        return Ok(vec![]);
+    }
+
+    const NEEDLE_CLAUSE: &str =
+        "(path = ? OR (collection || '/' || path) = ? OR path LIKE '%/' || ? OR (collection || '/' || path) LIKE '%/' || ?)";
+    let clauses = vec![NEEDLE_CLAUSE; needles.len()].join(" OR ");
+
+    let mut params: Vec<String> = Vec::with_capacity(needles.len() * 4);
+    for needle in needles {
+        params.extend(std::iter::repeat_n(needle.to_string(), 4));
+    }
+
+    let mut sql = format!(
+        "SELECT id, collection, path, title, hash, active FROM documents \
+         WHERE active=1 AND ({clauses})"
+    );
+    if let Some(cols) = collections.filter(|c| !c.is_empty()) {
+        let placeholders = vec!["?"; cols.len()].join(",");
+        sql.push_str(&format!(" AND collection IN ({placeholders})"));
+        params.extend(cols.iter().cloned());
+    }
+    sql.push_str(" ORDER BY collection, path");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params_from_iter(params.iter()), |row| {
+            Ok(Document {
+                id: row.get(0)?,
+                collection: row.get(1)?,
+                path: row.get(2)?,
+                title: row.get(3)?,
+                hash: row.get(4)?,
+                active: row.get::<_, i64>(5)? != 0,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
 }
 
 // ── content_vectors CRUD ──────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use rqmd_core::db;
+use rqmd_core::{db, resolve};
 
 use crate::{format, store};
 
@@ -78,26 +78,14 @@ pub fn run_multi_get(
 ) -> Result<()> {
     let s = store::open_store_no_backend(index_dir)?;
 
-    // Support comma-separated list or glob-style "*" pattern
-    let patterns: Vec<&str> = pattern.split(',').map(str::trim).collect();
-
-    let docs = db::list_documents(&s.db, collection)?;
+    // Support comma-separated list, "#docid" entries, and glob-style "*" patterns.
+    let owned = collection.map(|c| [c.to_string()]);
+    let docs = resolve::resolve_multi_get(&s.db, owned.as_ref().map(|a| a.as_slice()), pattern)?;
     let mut printed = 0usize;
 
     for doc in &docs {
-        let filepath = format!("{}/{}", doc.collection, doc.path);
-        let matched = patterns.iter().any(|p| {
-            if p.contains('*') {
-                glob_match(p, &filepath)
-            } else {
-                filepath.contains(p) || doc.path.contains(p)
-            }
-        });
-        if !matched {
-            continue;
-        }
         let body = db::get_content(&s.db, &doc.hash)?.unwrap_or_default();
-        let file = format!("rqmd://{filepath}");
+        let file = format!("rqmd://{}/{}", doc.collection, doc.path);
         if printed > 0 && fmt == "cli" {
             println!("\n{}", "─".repeat(60));
         }
@@ -162,30 +150,4 @@ pub fn run_ls(index_dir: &Path, path: Option<&str>) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn glob_match(pattern: &str, target: &str) -> bool {
-    // Simple glob: only supports * as wildcard (any chars, including /)
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() == 1 {
-        return target == pattern;
-    }
-    let mut rest = target;
-    for (i, part) in parts.iter().enumerate() {
-        if i == 0 {
-            if !rest.starts_with(part) {
-                return false;
-            }
-            rest = &rest[part.len()..];
-        } else if i == parts.len() - 1 {
-            return rest.ends_with(part);
-        } else {
-            if let Some(pos) = rest.find(part) {
-                rest = &rest[pos + part.len()..];
-            } else {
-                return false;
-            }
-        }
-    }
-    true
 }

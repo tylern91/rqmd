@@ -164,7 +164,7 @@ fn run_query_latency_bench(
     for _ in 0..n_rounds {
         for q in BENCH_QUERIES {
             let t = Instant::now();
-            store.hybrid_query(q, None, 10, None, true)?;
+            store.hybrid_query(q, None, 10, None, true, false)?;
             hybrid_nr_timings.push(t.elapsed().as_micros());
         }
     }
@@ -182,7 +182,7 @@ fn run_query_latency_bench(
     for _ in 0..n_rounds {
         for q in BENCH_QUERIES {
             let t = Instant::now();
-            store.hybrid_query(q, None, 10, None, false)?;
+            store.hybrid_query(q, None, 10, None, false, false)?;
             hybrid_rr_timings.push(t.elapsed().as_micros());
         }
     }

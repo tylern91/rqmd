@@ -13,9 +13,10 @@ pub fn run_query(
     fmt: &str,
     no_rerank: bool,
     full: bool,
+    no_expand: bool,
 ) -> Result<()> {
     let mut s = store::open_store_with_backend(index_dir)?;
-    let results = s.hybrid_query(query, intent, num, collection, no_rerank)?;
+    let results = s.hybrid_query(query, intent, num, collection, no_rerank, no_expand)?;
     format::print_results(&results, fmt, full, query);
     Ok(())
 }
