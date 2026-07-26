@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     chunking::chunk_document,
     db::{
-        self, content_hash, doc_for_vid, docid_from_hash, get_content, get_context_for_collection,
+        self, content_hash, doc_for_vid, docid_from_hash, get_content, get_context_for_path,
         open_db, upsert_content, upsert_document, upsert_vector_meta,
     },
     fts::FtsIndex,
@@ -325,7 +325,7 @@ impl Store {
                     .map(|c| c.text)
                     .unwrap_or_default();
                 let docid = docid_from_hash(&doc.hash).to_string();
-                let ctx = get_context_for_collection(&self.db, &doc.collection)
+                let ctx = get_context_for_path(&self.db, &doc.collection, &doc.path)
                     .ok()
                     .flatten();
                 results.push(SearchResult {
@@ -567,7 +567,7 @@ impl Store {
 
             let (collection_name, rel_path) = split_filepath(&cand.filepath);
             let docid = docid_from_hash(&hash).to_string();
-            let ctx = get_context_for_collection(&self.db, collection_name)
+            let ctx = get_context_for_path(&self.db, collection_name, rel_path)
                 .ok()
                 .flatten();
 
@@ -617,7 +617,7 @@ impl Store {
                 .map(|c| c.text)
                 .unwrap_or_default();
             let (coll, path) = split_filepath(&filepath);
-            let ctx = get_context_for_collection(&self.db, coll).ok().flatten();
+            let ctx = get_context_for_path(&self.db, coll, path).ok().flatten();
             results.push(SearchResult {
                 file: format!("rqmd://{filepath}"),
                 title: doc.title.clone(),

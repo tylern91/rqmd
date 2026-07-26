@@ -5,8 +5,8 @@ use rqmd_core::{
     chunking::chunk_document,
     db::{
         collection_context_key, content_hash, docid_from_hash, find_documents_by_needles,
-        get_config, get_document_by_docid_prefix, get_document_by_filepath, open_db, set_config,
-        upsert_content, upsert_document,
+        get_config, get_context_for_path, get_document_by_docid_prefix, get_document_by_filepath,
+        open_db, set_config, upsert_content, upsert_document,
     },
     resolve::resolve_multi_get,
     rrf::{reciprocal_rank_fusion, rrf_weights},
@@ -186,6 +186,86 @@ fn context_check_key_matches_add_key() {
 }
 
 #[test]
+fn context_for_path_prefers_deepest_ancestor() {
+    let tmp = TempDir::new().unwrap();
+    let conn = open_db(&tmp.path().join("store.db")).unwrap();
+
+    set_config(&conn, "context:rqmd://vault/", "root context").unwrap();
+    set_config(
+        &conn,
+        "context:rqmd://vault/Cloud Engineering/",
+        "cloud eng context",
+    )
+    .unwrap();
+    set_config(
+        &conn,
+        "context:rqmd://vault/Cloud Engineering/Kubernetes/",
+        "kubernetes context",
+    )
+    .unwrap();
+
+    let ctx = get_context_for_path(&conn, "vault", "Cloud Engineering/Kubernetes/foo.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ctx, "kubernetes context");
+}
+
+#[test]
+fn context_for_path_falls_back_to_shallower_ancestor() {
+    let tmp = TempDir::new().unwrap();
+    let conn = open_db(&tmp.path().join("store.db")).unwrap();
+
+    set_config(
+        &conn,
+        "context:rqmd://vault/Cloud Engineering/",
+        "cloud eng context",
+    )
+    .unwrap();
+
+    // No context set for the exact "Kubernetes" ancestor — should fall back
+    // to the shallower "Cloud Engineering" ancestor, not skip straight to root.
+    let ctx = get_context_for_path(&conn, "vault", "Cloud Engineering/Kubernetes/foo.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ctx, "cloud eng context");
+}
+
+#[test]
+fn context_for_path_falls_back_to_collection_root() {
+    let tmp = TempDir::new().unwrap();
+    let conn = open_db(&tmp.path().join("store.db")).unwrap();
+
+    set_config(&conn, "context:rqmd://vault/", "root context").unwrap();
+
+    let ctx = get_context_for_path(&conn, "vault", "Unmapped Area/foo.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ctx, "root context");
+}
+
+#[test]
+fn context_for_path_falls_back_to_legacy_global() {
+    let tmp = TempDir::new().unwrap();
+    let conn = open_db(&tmp.path().join("store.db")).unwrap();
+
+    set_config(&conn, "context:/", "legacy global context").unwrap();
+
+    let ctx = get_context_for_path(&conn, "vault", "Unmapped Area/foo.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ctx, "legacy global context");
+}
+
+#[test]
+fn context_for_path_none_when_nothing_configured() {
+    let tmp = TempDir::new().unwrap();
+    let conn = open_db(&tmp.path().join("store.db")).unwrap();
+
+    let ctx = get_context_for_path(&conn, "vault", "Unmapped Area/foo.md").unwrap();
+    assert!(ctx.is_none());
+}
+
+#[test]
 fn db_upsert_is_idempotent() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir.path().join("test.sqlite")).unwrap();
@@ -260,6 +340,58 @@ fn special_char_paths_round_trip() {
             "search for {title:?} did not return {path:?}: {hits:?}"
         );
     }
+}
+
+#[test]
+fn search_fts_result_carries_nearest_ancestor_context() {
+    // End-to-end regression guard for the root-only-context defect: a query
+    // hit under a sub-directory must carry that sub-directory's context, not
+    // just the collection-root context, once one is configured.
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    let collection = "vault";
+
+    set_config(&store.db, "context:rqmd://vault/", "root context").unwrap();
+    set_config(
+        &store.db,
+        "context:rqmd://vault/Cloud Engineering/Kubernetes/",
+        "kubernetes context",
+    )
+    .unwrap();
+
+    store
+        .index_document_fts_only(
+            collection,
+            "Cloud Engineering/Kubernetes/pods.md",
+            "Kubernetes Pods",
+            "Pods are the smallest deployable units in Kubernetes.",
+        )
+        .unwrap();
+    store
+        .index_document_fts_only(
+            collection,
+            "Databases/postgres.md",
+            "Postgres Notes",
+            "Postgres is a relational database.",
+        )
+        .unwrap();
+    store.flush().unwrap();
+
+    let kube_hits = store.search_fts("Kubernetes", 5, None).unwrap();
+    let kube_hit = kube_hits
+        .iter()
+        .find(|h| h.path == "Cloud Engineering/Kubernetes/pods.md")
+        .expect("kubernetes doc should be found");
+    assert_eq!(kube_hit.context.as_deref(), Some("kubernetes context"));
+
+    // A hit in an area with no configured sub-dir context still falls back
+    // to the collection root, matching pre-patch behavior for unmapped areas.
+    let db_hits = store.search_fts("Postgres", 5, None).unwrap();
+    let db_hit = db_hits
+        .iter()
+        .find(|h| h.path == "Databases/postgres.md")
+        .expect("postgres doc should be found");
+    assert_eq!(db_hit.context.as_deref(), Some("root context"));
 }
 
 #[test]

@@ -4,6 +4,26 @@
 
 ---
 
+## [0.5.1] - 2026-07-26
+### Fixed
+- Query-time context resolution only ever considered the collection-root
+  context (`context:rqmd://<collection>/`) and the legacy global context
+  (`context:/`) — `get_context_for_collection` never received a document's
+  path, so any per-subdirectory context added via `rqmd context add
+  "rqmd://<collection>/<subpath>/" ...` was stored and listed but structurally
+  unreachable at query time. Added `get_context_for_path(conn, collection,
+  rel_path)`, which walks a matched document's path from its deepest ancestor
+  directory up to the collection root, returning the first configured context
+  found (falling back to the root/legacy behavior if no ancestor matches).
+  Wired into all three query-result-building call sites (vector search,
+  hybrid+rerank, and BM25) so results now carry the nearest curated context
+  for their area instead of only ever the collection-wide one. Ancestor
+  lookups match a document's stored path verbatim (no case-folding or
+  slugification), so context keys must be added using the same casing as
+  `rqmd ls`/`documents.path`.
+
+---
+
 ## [0.5.0] - 2026-07-13
 ### Fixed
 - `multi-get` (CLI and MCP) matched plain path fragments with an unanchored substring
