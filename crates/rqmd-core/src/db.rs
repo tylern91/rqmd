@@ -631,3 +631,33 @@ pub fn get_context_for_collection(conn: &Connection, collection: &str) -> Result
     }
     get_config(conn, "context:/")
 }
+
+/// Look up the nearest-ancestor context for a specific document path.
+///
+/// Walks `rel_path`'s parent directories from deepest to shallowest, checking
+/// `context:rqmd://<collection>/<ancestor>/` at each level, and returns the
+/// first one found. Falls back to the collection-root context and then the
+/// legacy global context via `get_context_for_collection` if no ancestor
+/// directory has a context configured.
+///
+/// `rel_path` is the collection-relative path as stored in `documents.path`
+/// (e.g. `"Cloud Engineering/Kubernetes/foo.md"`) — ancestor keys must be
+/// written with this same raw casing, since `context add` does not slugify.
+pub fn get_context_for_path(
+    conn: &Connection,
+    collection: &str,
+    rel_path: &str,
+) -> Result<Option<String>> {
+    let mut components: Vec<&str> = rel_path.split('/').collect();
+    components.pop(); // drop the filename itself
+
+    while !components.is_empty() {
+        let key = format!("context:rqmd://{collection}/{}/", components.join("/"));
+        if let Some(v) = get_config(conn, &key)? {
+            return Ok(Some(v));
+        }
+        components.pop();
+    }
+
+    get_context_for_collection(conn, collection)
+}
