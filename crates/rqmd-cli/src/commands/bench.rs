@@ -114,7 +114,7 @@ fn run_query_latency_bench(
     // Open ONE store with the already-initialised backend.  All three modes
     // (BM25, vec, hybrid) run on this single instance — no second HNSW load.
     // search_fts takes &self so it works fine on a mut store.
-    let mut store = Store::open(store_config(index_dir), backend)?;
+    let mut store = Store::open(store_config(index_dir, true), backend)?;
 
     // ── BM25 ─────────────────────────────────────────────────────────────────
     eprintln!("Mode: BM25...");

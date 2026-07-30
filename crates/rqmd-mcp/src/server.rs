@@ -65,6 +65,9 @@ fn make_config(index_dir: &Path) -> StoreConfig {
         db_path: index_dir.join("index.sqlite"),
         tantivy_dir: index_dir.join("tantivy"),
         hnsw_path: index_dir.join("hnsw.usearch"),
+        // The MCP server only ever queries (search/get/status) or runs hybrid
+        // query — it never indexes, so the HNSW index can be mmap'd read-only.
+        read_only: true,
     }
 }
 

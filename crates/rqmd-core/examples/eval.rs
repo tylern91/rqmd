@@ -78,6 +78,7 @@ fn main() -> Result<()> {
         db_path: store_dir.join("index.sqlite"),
         tantivy_dir: store_dir.join("tantivy"),
         hnsw_path: store_dir.join("hnsw.usearch"),
+        read_only: false,
     };
 
     // ── Initialize backend (downloads models on first run) ───────────────────

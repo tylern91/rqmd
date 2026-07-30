@@ -52,7 +52,7 @@ fn add(
         abs_dir.display()
     );
 
-    let mut s = store::open_store_no_backend(index_dir)?;
+    let mut s = store::open_store_no_backend(index_dir, false)?;
     let is_tty = fmt::atty_stderr();
 
     let ignore_set = crate::exclusions::build_ignore_set(&ignore);
@@ -142,7 +142,7 @@ fn add(
 }
 
 fn list(index_dir: &Path) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
     let cols = db::list_collections(&s.db)?;
     if cols.is_empty() {
         println!("No collections. Run `rqmd collection add <path> --name <name>` to add one.");
@@ -162,7 +162,7 @@ fn list(index_dir: &Path) -> Result<()> {
 }
 
 fn remove(index_dir: &Path, name: &str) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
     // Verify it exists first
     let cols = db::list_collections(&s.db)?;
     if !cols.iter().any(|c| c.name == name) {
@@ -174,7 +174,7 @@ fn remove(index_dir: &Path, name: &str) -> Result<()> {
 }
 
 fn rename(index_dir: &Path, old: &str, new: &str) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
     let cols = db::list_collections(&s.db)?;
     if !cols.iter().any(|c| c.name == old) {
         bail!("collection '{old}' not found");
@@ -188,7 +188,7 @@ fn rename(index_dir: &Path, old: &str, new: &str) -> Result<()> {
 }
 
 fn show(index_dir: &Path, name: &str) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
     let cols = db::list_collections(&s.db)?;
     let col = cols
         .iter()
@@ -208,7 +208,7 @@ fn show(index_dir: &Path, name: &str) -> Result<()> {
 }
 
 fn update_cmd(index_dir: &Path, name: &str, cmd: Option<&str>) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
     db::set_collection_update_cmd(&s.db, name, cmd)?;
     match cmd {
         Some(c) => println!("Set update command for '{name}': {c}"),
@@ -218,7 +218,7 @@ fn update_cmd(index_dir: &Path, name: &str, cmd: Option<&str>) -> Result<()> {
 }
 
 fn set_include(index_dir: &Path, name: &str, include: bool) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
     db::set_collection_include(&s.db, name, include)?;
     let verb = if include {
         "included in"

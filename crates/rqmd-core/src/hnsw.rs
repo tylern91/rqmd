@@ -4,7 +4,7 @@
 //! The reverse mapping vid→document is in rusqlite; this module only handles
 //! the vector similarity search itself.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use std::path::Path;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
@@ -13,6 +13,7 @@ use rqmd_llm::EMBED_DIM;
 pub struct VectorIndex {
     inner: Index,
     next_vid: u64,
+    read_only: bool,
 }
 
 impl VectorIndex {
@@ -32,10 +33,15 @@ impl VectorIndex {
         inner
             .reserve(4096)
             .map_err(|e| anyhow!("usearch reserve: {e}"))?;
-        Ok(Self { inner, next_vid: 0 })
+        Ok(Self {
+            inner,
+            next_vid: 0,
+            read_only: false,
+        })
     }
 
-    /// Load from a previously saved file.
+    /// Load from a previously saved file, reading it fully into memory.
+    /// Required for indexing (`add`/`add_with_vid`/`save`).
     pub fn load(path: &Path) -> Result<Self> {
         let opts = Self::make_opts();
         let inner = Index::new(&opts).map_err(|e| anyhow!("usearch new: {e}"))?;
@@ -46,11 +52,33 @@ impl VectorIndex {
         Ok(Self {
             inner,
             next_vid: size as u64,
+            read_only: false,
+        })
+    }
+
+    /// Open a previously saved file as a memory-mapped, read-only view.
+    /// Mutation (`add`/`add_with_vid`/`save`) is undocumented behavior in the
+    /// usearch binding once a file is viewed, so it's rejected in Rust before
+    /// ever reaching the C++ layer.
+    pub fn view(path: &Path) -> Result<Self> {
+        let opts = Self::make_opts();
+        let inner = Index::new(&opts).map_err(|e| anyhow!("usearch new: {e}"))?;
+        inner
+            .view(path.to_str().ok_or_else(|| anyhow!("invalid path"))?)
+            .map_err(|e| anyhow!("usearch view: {e}"))?;
+        let size = inner.size();
+        Ok(Self {
+            inner,
+            next_vid: size as u64,
+            read_only: true,
         })
     }
 
     /// Save the index to disk for persistence across restarts.
     pub fn save(&self, path: &Path) -> Result<()> {
+        if self.read_only {
+            bail!("cannot save a read-only (mmap'd) VectorIndex");
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -62,6 +90,9 @@ impl VectorIndex {
 
     /// Add a vector. Returns the assigned vid.
     pub fn add(&mut self, embedding: &[f32]) -> Result<u64> {
+        if self.read_only {
+            bail!("cannot add to a read-only (mmap'd) VectorIndex");
+        }
         let vid = self.next_vid;
         if self.inner.capacity() <= self.inner.size() {
             self.inner
@@ -89,6 +120,9 @@ impl VectorIndex {
 
     /// Add with a specific vid (used when rebuilding from rusqlite).
     pub fn add_with_vid(&mut self, vid: u64, embedding: &[f32]) -> Result<()> {
+        if self.read_only {
+            bail!("cannot add to a read-only (mmap'd) VectorIndex");
+        }
         if self.inner.capacity() <= self.inner.size() {
             self.inner
                 .reserve(self.inner.capacity() * 2 + 1)
@@ -120,5 +154,33 @@ impl VectorIndex {
 
     pub fn size(&self) -> usize {
         self.inner.size()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_rejects_mutation_with_clean_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hnsw.usearch");
+
+        let mut writable = VectorIndex::new().unwrap();
+        let embedding = vec![0.1_f32; EMBED_DIM];
+        writable.add(&embedding).unwrap();
+        writable.save(&path).unwrap();
+
+        let mut viewed = VectorIndex::view(&path).unwrap();
+        assert!(viewed.read_only);
+        assert_eq!(viewed.size(), 1);
+
+        // Reads still work on a view.
+        assert_eq!(viewed.search(&embedding, 1).unwrap().len(), 1);
+
+        // Mutation must fail cleanly (Err), never panic.
+        assert!(viewed.add(&embedding).is_err());
+        assert!(viewed.add_with_vid(99, &embedding).is_err());
+        assert!(viewed.save(&path).is_err());
     }
 }

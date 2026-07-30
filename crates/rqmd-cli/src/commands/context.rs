@@ -21,7 +21,7 @@ fn context_key(path: &str) -> String {
 }
 
 fn add(index_dir: &Path, path: Option<&str>, text: &str) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
     let key_path = path.unwrap_or("/");
     let key = context_key(key_path);
     db::set_config(&s.db, &key, text)?;
@@ -30,7 +30,7 @@ fn add(index_dir: &Path, path: Option<&str>, text: &str) -> Result<()> {
 }
 
 fn list(index_dir: &Path) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
     // Read all config keys that start with context:
     let mut stmt =
         s.db.prepare("SELECT key, value FROM store_config WHERE key LIKE ?1 ORDER BY key")?;
@@ -56,7 +56,7 @@ fn list(index_dir: &Path) -> Result<()> {
 }
 
 fn rm(index_dir: &Path, path: &str) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
     let key = context_key(path);
     s.db.execute("DELETE FROM store_config WHERE key=?1", [&key])?;
     println!("Removed context for '{path}'.");
@@ -64,7 +64,7 @@ fn rm(index_dir: &Path, path: &str) -> Result<()> {
 }
 
 fn check(index_dir: &Path) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
     let cols = db::list_collections(&s.db)?;
     let mut missing = 0usize;
     for col in &cols {

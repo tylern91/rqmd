@@ -260,6 +260,7 @@ fn make_temp_store(backend: Box<dyn rqmd_llm::InferenceBackend>) -> Result<(Temp
         db_path: tmp.path().join("eval.sqlite"),
         tantivy_dir: tmp.path().join("tantivy"),
         hnsw_path: tmp.path().join("hnsw.usearch"),
+        read_only: false,
     };
     let store = Store::open(config, backend)?;
     Ok((tmp, store))
