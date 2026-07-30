@@ -53,6 +53,11 @@ pub struct StoreConfig {
     pub db_path: PathBuf,
     pub tantivy_dir: PathBuf,
     pub hnsw_path: PathBuf,
+    /// Open the HNSW index as a memory-mapped, read-only view instead of
+    /// loading it fully into RAM. Set this for query-only callers (search,
+    /// get, status); indexing callers (embed, update, collection add) need
+    /// `false` since a read-only index rejects `add`/`add_with_vid`/`save`.
+    pub read_only: bool,
 }
 
 /// Outcome of a BM25-only index operation, used to drive honest update summaries.
@@ -87,10 +92,18 @@ impl Store {
         let fts = FtsIndex::open_or_create(&config.tantivy_dir)?;
 
         // Load HNSW index from disk if it exists, otherwise start fresh.
-        // A failed load (corrupt file) emits a warning and starts empty — callers
-        // must run `rqmd embed` to rebuild before vector search returns results.
+        // A failed load/view (corrupt file) emits a warning and starts empty —
+        // callers must run `rqmd embed` to rebuild before vector search returns
+        // results. read_only callers mmap the file instead of reading it fully
+        // into RAM; indexing callers need the full load since they call
+        // add/add_with_vid/save.
         let mut hnsw = if config.hnsw_path.exists() {
-            match VectorIndex::load(&config.hnsw_path) {
+            let opened = if config.read_only {
+                VectorIndex::view(&config.hnsw_path)
+            } else {
+                VectorIndex::load(&config.hnsw_path)
+            };
+            match opened {
                 Ok(idx) => idx,
                 Err(e) => {
                     eprintln!(

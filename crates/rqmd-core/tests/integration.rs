@@ -293,6 +293,7 @@ fn test_store(dir: &TempDir) -> Store {
         db_path: dir.path().join("test.sqlite"),
         tantivy_dir: dir.path().join("tantivy"),
         hnsw_path: dir.path().join("hnsw.usearch"),
+        read_only: false,
     };
     Store::open(config, rqmd_llm::no_backend()).unwrap()
 }

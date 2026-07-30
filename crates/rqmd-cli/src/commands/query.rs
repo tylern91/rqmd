@@ -15,7 +15,7 @@ pub fn run_query(
     full: bool,
     no_expand: bool,
 ) -> Result<()> {
-    let mut s = store::open_store_with_backend(index_dir)?;
+    let mut s = store::open_store_with_backend(index_dir, true)?;
     let results = s.hybrid_query(query, intent, num, collection, no_rerank, no_expand)?;
     format::print_results(&results, fmt, full, query);
     Ok(())
@@ -29,7 +29,7 @@ pub fn run_search(
     fmt: &str,
     full: bool,
 ) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
     let results = s.search_fts(query, num, collection)?;
     format::print_results(&results, fmt, full, query);
     Ok(())
@@ -43,7 +43,7 @@ pub fn run_vsearch(
     fmt: &str,
     full: bool,
 ) -> Result<()> {
-    let mut s = store::open_store_with_backend(index_dir)?;
+    let mut s = store::open_store_with_backend(index_dir, true)?;
     let results = s.search_vec(query, num, collection)?;
     format::print_results(&results, fmt, full, query);
     Ok(())

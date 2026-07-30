@@ -9,7 +9,7 @@ use rqmd_core::{db, store as core_store, IndexOutcome, PendingVectorMeta};
 use crate::{format as fmt, store};
 
 pub fn run_status(index_dir: &Path) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
 
     // ── Index size (single combined line, mirroring qmd's `Size:`) ──────────────
     let db_size = std::fs::metadata(index_dir.join("index.sqlite"))
@@ -239,7 +239,7 @@ const CHECKPOINT_INTERVAL: usize = 50;
 
 pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> Result<()> {
     let cols = {
-        let s = store::open_store_no_backend(index_dir)?;
+        let s = store::open_store_no_backend(index_dir, true)?;
         match collection {
             Some(c) => vec![db::list_collections(&s.db)?
                 .into_iter()
@@ -258,12 +258,12 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     // Delete the HNSW file and all content_vectors rows *before* opening the backend
     // so that Store::open starts with a clean slate (next_vid=0, no DB vids).
     if rebuild {
-        let hnsw_path = store::store_config(index_dir).hnsw_path;
+        let hnsw_path = store::store_config(index_dir, true).hnsw_path;
         if hnsw_path.exists() {
             std::fs::remove_file(&hnsw_path)
                 .with_context(|| format!("remove hnsw file: {}", hnsw_path.display()))?;
         }
-        let s = store::open_store_no_backend(index_dir)?;
+        let s = store::open_store_no_backend(index_dir, true)?;
         match collection {
             Some(c) => {
                 db::clear_vectors_for_collection(&s.db, c)
@@ -283,7 +283,7 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
         );
     } else {
         // Fast path: nothing to do.
-        let s = store::open_store_no_backend(index_dir)?;
+        let s = store::open_store_no_backend(index_dir, true)?;
         let needs_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(1);
         if needs_embed == 0 {
             println!("\x1b[32m✓ All content hashes already have embeddings.\x1b[0m");
@@ -291,7 +291,7 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
         }
     }
 
-    let mut s = store::open_store_with_backend(index_dir)?;
+    let mut s = store::open_store_with_backend(index_dir, false)?;
 
     // Advisory: detect when the HNSW index is smaller than what the DB references.
     // next_vid reconciliation (Store::open) prevents the UNIQUE crash; this warning
@@ -424,7 +424,7 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
 pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
     // Re-walk each collection's directory and re-index changed files.
     let cols = {
-        let s = store::open_store_no_backend(index_dir)?;
+        let s = store::open_store_no_backend(index_dir, true)?;
         match collection {
             Some(c) => vec![db::list_collections(&s.db)?
                 .into_iter()
@@ -442,7 +442,8 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
     // Update refreshes BM25 metadata only — no vectors. Run `rqmd embed` afterward
     // to regenerate embeddings. Using the FTS-only store avoids loading the inference
     // backend and prevents content_vectors.vid UNIQUE conflicts on re-indexing.
-    let mut s = store::open_store_no_backend(index_dir)?;
+    // Still needs write access: flush() unconditionally calls hnsw.save().
+    let mut s = store::open_store_no_backend(index_dir, false)?;
     let is_tty = fmt::atty_stderr();
 
     // Mirror qmd's "Updating N collection(s)..." header (qmd.ts:675).
@@ -586,7 +587,7 @@ pub fn run_init() -> Result<()> {
 
     std::fs::create_dir_all(&qmd_dir)?;
     // Touch the SQLite db to create it
-    let _ = store::open_store_no_backend(&qmd_dir)?;
+    let _ = store::open_store_no_backend(&qmd_dir, false)?;
     println!("Initialized local index at {}", qmd_dir.display());
     println!("Run `qmd collection add <path> --name <name>` to add a collection.");
     Ok(())
@@ -648,7 +649,7 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
     println!("  GPU backend:   check llama.cpp build flags");
 
     if db_path.exists() {
-        let s = store::open_store_no_backend(index_dir)?;
+        let s = store::open_store_no_backend(index_dir, true)?;
         let cols = db::list_collections(&s.db)?;
         println!("\n  Collections:   {}", cols.len());
         for col in &cols {

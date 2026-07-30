@@ -4,6 +4,20 @@
 
 ---
 
+## [0.5.2] - 2026-07-30
+### Changed
+- The HNSW vector index is now memory-mapped (`VectorIndex::view`) instead of
+  fully read into RAM (`VectorIndex::load`) for every read-only code path —
+  `rqmd-mcp`, `query`, `search`, `get`, `multi_get`, `status`, `ls`, `context`,
+  and the query-latency benchmark. This moves the on-disk index's private RSS
+  cost (~685 MB uncompressed F32) into shared, evictable page cache. Indexing
+  paths (`embed`, `update`, `collection add`, `init`) still open the store
+  read-write and load the index fully, since usearch has no documented
+  mutate-after-view behavior. A `Store` opened read-only now returns a clean
+  error instead of attempting a write if a mutating code path is reached.
+
+---
+
 ## [0.5.1] - 2026-07-26
 ### Fixed
 - Query-time context resolution only ever considered the collection-root

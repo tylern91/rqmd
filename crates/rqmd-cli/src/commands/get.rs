@@ -44,7 +44,7 @@ pub fn run_get(
     no_line_numbers: bool,
     fmt: &str,
 ) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
 
     let spec =
         PathSpec::parse(path_arg).with_context(|| format!("cannot parse path: {path_arg}"))?;
@@ -76,7 +76,7 @@ pub fn run_multi_get(
     max_lines: Option<usize>,
     fmt: &str,
 ) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
 
     // Support comma-separated list, "#docid" entries, and glob-style "*" patterns.
     let owned = collection.map(|c| [c.to_string()]);
@@ -100,7 +100,7 @@ pub fn run_multi_get(
 }
 
 pub fn run_ls(index_dir: &Path, path: Option<&str>) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir)?;
+    let s = store::open_store_no_backend(index_dir, true)?;
 
     let (filter_collection, filter_prefix) = match path {
         None => (None, None),
