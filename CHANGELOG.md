@@ -1,6 +1,24 @@
 # rqmd Changelog
 
 ## [Unreleased]
+### Fixed
+- The MCP daemon's `LlamaCppBackend` loaded its embed, rerank, and generate
+  GGUF models unconditionally on first `query`, and the `OnceCell`-backed
+  store kept all three resident for the process's lifetime. Because HyDE
+  query-expansion defaults to on (`expand: true` unless explicitly
+  disabled) and is only skipped on a strong BM25 signal, a long-lived
+  daemon would fault the 2.0 GB generate model into RSS the first time a
+  query needed expansion and never release it — a permanent ~1.3 GB
+  ratchet on top of the ~750 MB embed+rerank+HNSW baseline. Each model now
+  loads lazily on first use (`ensure_embed`/`ensure_rerank`/
+  `ensure_generate`), and a background sweep in `rqmd mcp --http`/`--daemon`
+  releases any model idle for at least `RRQMD_MODEL_IDLE_TTL` seconds
+  (default `300`; `0` disables the sweep). `rqmd status`/`rqmd doctor`
+  remain load-free. `search`/`get`/`multi_get` were never affected.
+- `BENCHMARK.md` and the `rqmd-llm` module doc wrongly stated `n_ctx=512`
+  as the reranker's shipped default; the code has always shipped
+  `n_ctx=2048`. Docs corrected to state 2048 as default, with 512 noted as
+  a tuning option to stay within the 448 MiB KV budget on Apple Silicon.
 
 ---
 

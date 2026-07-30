@@ -83,7 +83,7 @@ Result: ✅ **PASS** — clear discrimination; gap sufficient for reliable top-k
 
 - Use `ctx.encode()` NOT `ctx.decode()` for the reranker (despite the reranker being a causal model). `LlamaPoolingType::Rank` requires the encode path to extract pooled logits.
 - Allocate a **fresh context per (query, doc) pair** — KV cache accumulates positions for seq_id=0; a second batch starting at position 0 fails with "positions not consecutive".
-- Set `n_ctx=512` for the reranker on Apple Silicon (matches the 448 MiB KV memory budget at the 14-layer split point).
+- Shipped default is `n_ctx=2048` for the reranker; drop to `n_ctx=512` on Apple Silicon if you need to stay within the 448 MiB KV memory budget at the 14-layer split point.
 - `n_gpu_layers=14` for the reranker — beyond 14 layers the KV cache exceeds the 448 MiB Metal buffer limit on M-series chips with 16 GB RAM.
 
 ### A3: GBNF query expansion

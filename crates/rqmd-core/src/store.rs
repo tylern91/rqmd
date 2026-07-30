@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use rqmd_llm::InferenceBackend;
 use sha2::{Digest, Sha256};
@@ -121,6 +121,14 @@ impl Store {
             backend,
             hnsw_path: config.hnsw_path,
         })
+    }
+
+    /// Release any inference-backend model weights idle for at least `ttl`.
+    /// Returns the number of models released. `backend` is private to this
+    /// module, so this is the only way an external driver (e.g. the MCP
+    /// daemon's periodic sweep) can trigger eviction.
+    pub fn release_idle_models(&mut self, ttl: Duration) -> usize {
+        self.backend.release_idle(ttl)
     }
 
     // ── Indexing ──────────────────────────────────────────────────────────────

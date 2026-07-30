@@ -13,7 +13,8 @@
 //! - Qwen3-Reranker is a causal decoder model → ctx.decode(), NOT ctx.encode()
 //! - Reranker needs a fresh LlamaContext per (query, doc) pair (KV cache positions)
 //! - LlamaContextParams is Clone but not Copy; clone before passing to new_context()
-//! - n_ctx=512 and n_gpu_layers=14 for reranker on Apple Silicon (448 MiB KV limit)
+//! - Reranker ships with n_ctx=2048 and n_gpu_layers=14 on Apple Silicon; drop
+//!   n_ctx to 512 if you need to stay within the 448 MiB KV budget instead.
 
 use anyhow::{Context, Result};
 use hf_hub::{api::tokio::Api, Cache};
@@ -25,7 +26,11 @@ use llama_cpp_2::{
     sampling::LlamaSampler,
     send_logs_to_tracing, LogOptions,
 };
-use std::{num::NonZeroU32, path::PathBuf};
+use std::{
+    num::NonZeroU32,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 // ── Default model repos (mirrors qmd's llm.ts defaults) ──────────────────────
 
@@ -75,6 +80,14 @@ pub trait InferenceBackend: Send {
     fn embed_model_name(&self) -> &str;
     fn rerank_model_name(&self) -> &str;
     fn generate_model_name(&self) -> &str;
+
+    /// Release any loaded model weights that have been idle for at least `ttl`.
+    /// Returns the number of models released. Default: no-op — only meaningful
+    /// for backends with lazy-loaded, evictable models (see
+    /// `LlamaCppBackend::release_idle`).
+    fn release_idle(&mut self, _ttl: Duration) -> usize {
+        0
+    }
 }
 
 // ── Model cache inspection (sync, no model load) ─────────────────────────────
@@ -150,9 +163,18 @@ impl Default for LlamaCppConfig {
 
 pub struct LlamaCppBackend {
     _backend: LlamaBackend,
-    embed_model: LlamaModel,
-    rerank_model: LlamaModel,
-    generate_model: LlamaModel,
+    /// Lazily loaded on first `embed`/`rerank`/`generate` call and evicted by
+    /// `release_idle` after `ttl` of disuse — see `ensure_embed`/`ensure_rerank`/
+    /// `ensure_generate`.
+    embed_model: Option<LlamaModel>,
+    rerank_model: Option<LlamaModel>,
+    generate_model: Option<LlamaModel>,
+    embed_path: PathBuf,
+    rerank_path: PathBuf,
+    generate_path: PathBuf,
+    /// Retained so `ensure_*` can rebuild `LlamaModelParams` (n_gpu_layers) on
+    /// each (re)load without re-resolving paths.
+    config: LlamaCppConfig,
     embed_ctx_params: LlamaContextParams,
     rerank_ctx_params: LlamaContextParams,
     generate_ctx_params: LlamaContextParams,
@@ -163,6 +185,11 @@ pub struct LlamaCppBackend {
     embed_model_name: String,
     rerank_model_name: String,
     generate_model_name: String,
+    /// Timestamp of last use per model; `None` means never loaded (or already
+    /// evicted). Drives the idle-eviction staleness check (`is_idle`).
+    embed_last_used: Option<Instant>,
+    rerank_last_used: Option<Instant>,
+    generate_last_used: Option<Instant>,
 }
 
 impl LlamaCppBackend {
@@ -235,27 +262,11 @@ impl LlamaCppBackend {
 
         let backend = LlamaBackend::init().context("LlamaBackend init")?;
 
-        let embed_model = LlamaModel::load_from_file(
-            &backend,
-            &embed_path,
-            &LlamaModelParams::default().with_n_gpu_layers(config.embed_n_gpu_layers),
-        )
-        .context("embed model load")?;
-
-        let rerank_model = LlamaModel::load_from_file(
-            &backend,
-            &rerank_path,
-            &LlamaModelParams::default().with_n_gpu_layers(config.rerank_n_gpu_layers),
-        )
-        .context("rerank model load")?;
-
-        let generate_model = LlamaModel::load_from_file(
-            &backend,
-            &generate_path,
-            &LlamaModelParams::default().with_n_gpu_layers(config.generate_n_gpu_layers),
-        )
-        .context("generate model load")?;
-
+        // Model weights are NOT loaded here — only resolved paths are kept.
+        // Each model loads lazily on first use via ensure_embed/ensure_rerank/
+        // ensure_generate, and can be evicted again by release_idle. This is
+        // what keeps an idle daemon from paying for the 2.0 GB generate model
+        // (which most queries never touch — see store.rs's strong_signal gate).
         let embed_ctx_params = LlamaContextParams::default()
             .with_embeddings(true)
             .with_pooling_type(LlamaPoolingType::Mean)
@@ -277,27 +288,101 @@ impl LlamaCppBackend {
             .with_n_batch(config.generate_n_ctx)
             .with_n_ubatch(config.generate_n_ctx);
 
+        // Compute these before `config` moves into the returned struct.
+        let embed_model_name = format!("{}/{}", config.embed_repo, config.embed_file);
+        let rerank_model_name = format!("{}/{}", config.rerank_repo, config.rerank_file);
+        let generate_model_name = format!("{}/{}", config.generate_repo, config.generate_file);
+        let rerank_n_ctx = config.rerank_n_ctx as usize;
+        let generate_n_ctx = config.generate_n_ctx as usize;
+
         Ok(Self {
             _backend: backend,
-            embed_model,
-            rerank_model,
-            generate_model,
+            embed_model: None,
+            rerank_model: None,
+            generate_model: None,
+            embed_path,
+            rerank_path,
+            generate_path,
+            config,
             embed_ctx_params,
             rerank_ctx_params,
             generate_ctx_params,
-            rerank_n_ctx: config.rerank_n_ctx as usize,
-            generate_n_ctx: config.generate_n_ctx as usize,
-            embed_model_name: format!("{}/{}", config.embed_repo, config.embed_file),
-            rerank_model_name: format!("{}/{}", config.rerank_repo, config.rerank_file),
-            generate_model_name: format!("{}/{}", config.generate_repo, config.generate_file),
+            rerank_n_ctx,
+            generate_n_ctx,
+            embed_model_name,
+            rerank_model_name,
+            generate_model_name,
+            embed_last_used: None,
+            rerank_last_used: None,
+            generate_last_used: None,
         })
+    }
+
+    /// Load the embed model if not already resident, and stamp its last-use time.
+    /// Returns `Result<()>` rather than `&LlamaModel` — a returned reference would
+    /// tie the borrow to this `&mut self` call and collide with the separate
+    /// `&self._backend` borrow `new_context` needs. Callers re-borrow immutably
+    /// via `self.embed_model.as_ref()` after this returns.
+    fn ensure_embed(&mut self) -> Result<()> {
+        if self.embed_model.is_none() {
+            let model = LlamaModel::load_from_file(
+                &self._backend,
+                &self.embed_path,
+                &LlamaModelParams::default().with_n_gpu_layers(self.config.embed_n_gpu_layers),
+            )
+            .context("embed model load")?;
+            self.embed_model = Some(model);
+        }
+        self.embed_last_used = Some(Instant::now());
+        Ok(())
+    }
+
+    /// See `ensure_embed` for the return-type rationale.
+    fn ensure_rerank(&mut self) -> Result<()> {
+        if self.rerank_model.is_none() {
+            let model = LlamaModel::load_from_file(
+                &self._backend,
+                &self.rerank_path,
+                &LlamaModelParams::default().with_n_gpu_layers(self.config.rerank_n_gpu_layers),
+            )
+            .context("rerank model load")?;
+            self.rerank_model = Some(model);
+        }
+        self.rerank_last_used = Some(Instant::now());
+        Ok(())
+    }
+
+    /// See `ensure_embed` for the return-type rationale.
+    fn ensure_generate(&mut self) -> Result<()> {
+        if self.generate_model.is_none() {
+            let model = LlamaModel::load_from_file(
+                &self._backend,
+                &self.generate_path,
+                &LlamaModelParams::default().with_n_gpu_layers(self.config.generate_n_gpu_layers),
+            )
+            .context("generate model load")?;
+            self.generate_model = Some(model);
+        }
+        self.generate_last_used = Some(Instant::now());
+        Ok(())
+    }
+}
+
+/// Pure staleness check for idle-eviction, extracted so it is unit-testable
+/// without any GGUF model present. `None` (never loaded, or already evicted)
+/// is never idle — there is nothing to release.
+fn is_idle(last_used: Option<Instant>, now: Instant, ttl: Duration) -> bool {
+    match last_used {
+        Some(t) => now.duration_since(t) >= ttl,
+        None => false,
     }
 }
 
 impl InferenceBackend for LlamaCppBackend {
     fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
-        let mut tokens = self
-            .embed_model
+        self.ensure_embed()?;
+        let embed_model = self.embed_model.as_ref().expect("ensured above");
+        let mut tokens = embed_model
             .str_to_token(text, AddBos::Always)
             .context("embed tokenization")?;
         // Guard: encoder (llama_encode) requires n_ubatch >= n_tokens.  Without this
@@ -312,8 +397,7 @@ impl InferenceBackend for LlamaCppBackend {
             );
             tokens.truncate(safe_limit);
         }
-        let mut ctx = self
-            .embed_model
+        let mut ctx = embed_model
             .new_context(&self._backend, self.embed_ctx_params.clone())
             .context("embed context")?;
         let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
@@ -328,17 +412,17 @@ impl InferenceBackend for LlamaCppBackend {
     }
 
     fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>> {
+        self.ensure_rerank()?;
+        let rerank_model = self.rerank_model.as_ref().expect("ensured above");
         let mut scores = Vec::with_capacity(docs.len());
         for doc in docs {
             // Fresh context per pair — KV cache holds positions 0..n for seq_id=0;
             // next batch at position 0 fails with "positions not consecutive".
-            let mut ctx = self
-                .rerank_model
+            let mut ctx = rerank_model
                 .new_context(&self._backend, self.rerank_ctx_params.clone())
                 .context("rerank context")?;
             let input = format!("Query: {query}\nDocument: {doc}");
-            let mut tokens = self
-                .rerank_model
+            let mut tokens = rerank_model
                 .str_to_token(&input, AddBos::Always)
                 .context("rerank tokenization")?;
             // Guard: ctx.decode() also aborts on n_ubatch < n_tokens.
@@ -383,16 +467,19 @@ impl InferenceBackend for LlamaCppBackend {
             );
         }
 
-        let mut ctx = self
-            .generate_model
+        // Load lazily — after the cheap length guard above, so a too-long
+        // prompt fails fast without paying for the 2.0 GB generate model.
+        self.ensure_generate()?;
+        let generate_model = self.generate_model.as_ref().expect("ensured above");
+
+        let mut ctx = generate_model
             .new_context(&self._backend, self.generate_ctx_params.clone())
             .context("generate context")?;
 
         // Qwen3 uses ChatML — BOS is embedded in the template, so AddBos::Never avoids
         // a double BOS token.  If the prompt is a raw ChatML string this is correct;
         // if a bare question is passed, AddBos::Always is equally fine (one extra token).
-        let tokens = self
-            .generate_model
+        let tokens = generate_model
             .str_to_token(prompt, AddBos::Always)
             .context("generate tokenization")?;
 
@@ -447,12 +534,11 @@ impl InferenceBackend for LlamaCppBackend {
             let tok = sampler.sample(&ctx, batch_last);
             sampler.accept(tok);
 
-            if self.generate_model.is_eog_token(tok) {
+            if generate_model.is_eog_token(tok) {
                 break;
             }
 
-            let piece = self
-                .generate_model
+            let piece = generate_model
                 .token_to_piece(tok, &mut decoder, false, None)
                 .context("token_to_piece")?;
             out.push_str(&piece);
@@ -487,6 +573,21 @@ impl InferenceBackend for LlamaCppBackend {
 
     fn generate_model_name(&self) -> &str {
         &self.generate_model_name
+    }
+
+    fn release_idle(&mut self, ttl: Duration) -> usize {
+        let now = Instant::now();
+        let mut released = 0usize;
+        if is_idle(self.embed_last_used, now, ttl) && self.embed_model.take().is_some() {
+            released += 1;
+        }
+        if is_idle(self.rerank_last_used, now, ttl) && self.rerank_model.take().is_some() {
+            released += 1;
+        }
+        if is_idle(self.generate_last_used, now, ttl) && self.generate_model.take().is_some() {
+            released += 1;
+        }
+        released
     }
 }
 
@@ -585,5 +686,34 @@ pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
             tracing::info!("ORT backend ready ({name})");
             Ok(Box::new(b))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_idle_never_loaded_is_not_idle() {
+        // A model that was never loaded (or already evicted) has nothing to
+        // release — it must never register as idle.
+        assert!(!is_idle(None, Instant::now(), Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn is_idle_false_before_ttl_elapses() {
+        let now = Instant::now();
+        let last_used = now - Duration::from_secs(60);
+        assert!(!is_idle(Some(last_used), now, Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn is_idle_true_at_or_past_ttl() {
+        let now = Instant::now();
+        let last_used = now - Duration::from_secs(300);
+        assert!(is_idle(Some(last_used), now, Duration::from_secs(300)));
+
+        let long_idle = now - Duration::from_secs(9999);
+        assert!(is_idle(Some(long_idle), now, Duration::from_secs(300)));
     }
 }
