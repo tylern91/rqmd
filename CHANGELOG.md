@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+---
+
+## [0.5.2] - 2026-07-30
 ### Changed
 - The HNSW vector index is now memory-mapped (`VectorIndex::view`) instead of
   fully read into RAM (`VectorIndex::load`) for every read-only code path —
