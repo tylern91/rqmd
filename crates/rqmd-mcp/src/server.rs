@@ -2,6 +2,7 @@ use anyhow::Context as _;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use rmcp::{
@@ -57,6 +58,20 @@ impl RqmdServer {
         self.fts_store
             .lock()
             .map_err(|e| anyhow::anyhow!("fts store lock poisoned: {e}"))
+    }
+
+    /// Release any GGUF model idle for at least `ttl`. Returns how many were
+    /// released, or `0` if the ML store was never initialised or is currently
+    /// busy. Uses `try_lock` (never `lock`) so a periodic sweep can never block
+    /// an in-flight query.
+    pub fn release_idle_models(&self, ttl: Duration) -> usize {
+        let Some(store) = self.ml_store.get() else {
+            return 0;
+        };
+        let Ok(mut guard) = store.try_lock() else {
+            return 0;
+        };
+        guard.release_idle_models(ttl)
     }
 }
 

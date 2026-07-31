@@ -4,6 +4,26 @@
 
 ---
 
+## [0.6.0] - 2026-07-31
+### Added
+- Each GGUF model (embed, rerank, generate) now loads lazily on first use
+  instead of all three loading unconditionally in `LlamaCppBackend::new`.
+  `status` and `doctor` remain load-free.
+- Idle model eviction: `RRQMD_MODEL_IDLE_TTL` (default 300s, `0` disables)
+  controls how long a loaded model may sit unused before a periodic sweep
+  releases it. Without this, query expansion being on by default meant the
+  ~2 GB generate model would load within a few queries and never be freed,
+  ratcheting a long-lived daemon's RSS upward (measured at 2.97 GB on a
+  6-day-old daemon that should idle around 750 MB).
+
+### Fixed
+- Corrected two places that claimed `rerank_n_ctx` defaults to 512 (module
+  doc in `rqmd-llm`, `BENCHMARK.md`) — the shipped default is 2048; 512 is a
+  documented tuning option for the 448 MiB KV budget on Apple Silicon, not
+  the default.
+
+---
+
 ## [0.5.2] - 2026-07-30
 ### Changed
 - The HNSW vector index is now memory-mapped (`VectorIndex::view`) instead of
