@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use rqmd_llm::InferenceBackend;
 use sha2::{Digest, Sha256};
@@ -277,6 +278,13 @@ impl Store {
     /// Used by `rqmd embed` to detect HNSW/DB divergence.
     pub fn hnsw_size(&self) -> usize {
         self.hnsw.size()
+    }
+
+    /// Drop any GGUF model idle for at least `ttl`. Returns how many were released.
+    /// `backend` is private, so this is the only way callers (e.g. `rqmd-mcp`'s
+    /// idle-eviction sweep) can trigger it.
+    pub fn release_idle_models(&mut self, ttl: Duration) -> usize {
+        self.backend.release_idle(ttl)
     }
 
     /// Commit FTS writes and persist the HNSW index to disk.
