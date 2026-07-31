@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod commands;
+mod document;
 mod exclusions;
 mod format;
 mod store;
@@ -168,6 +169,10 @@ pub enum CollectionCommand {
         /// Glob patterns to exclude from indexing (repeatable: --ignore '*.log' --ignore 'tmp/')
         #[arg(long = "ignore", value_name = "PATTERN")]
         ignore: Vec<String>,
+        /// Also index dot-directories/files found INSIDE the tree (the collection
+        /// root itself is never excluded just for starting with a dot).
+        #[arg(long)]
+        hidden: bool,
     },
     /// List all collections
     #[command(alias = "ls")]

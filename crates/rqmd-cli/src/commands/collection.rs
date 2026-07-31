@@ -1,10 +1,9 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 use rqmd_core::{db, Collection};
 
-use crate::{format as fmt, store, CollectionCommand};
+use crate::{document, exclusions, format as fmt, store, CollectionCommand};
 
 pub fn run(index_dir: &Path, cmd: CollectionCommand) -> Result<()> {
     match cmd {
@@ -13,7 +12,15 @@ pub fn run(index_dir: &Path, cmd: CollectionCommand) -> Result<()> {
             name,
             mask,
             ignore,
-        } => add(index_dir, &path, name.as_deref(), mask.as_deref(), ignore),
+            hidden,
+        } => add(
+            index_dir,
+            &path,
+            name.as_deref(),
+            mask.as_deref(),
+            ignore,
+            hidden,
+        ),
         CollectionCommand::List => list(index_dir),
         CollectionCommand::Remove { name } => remove(index_dir, &name),
         CollectionCommand::Rename { old, new } => rename(index_dir, &old, &new),
@@ -24,16 +31,33 @@ pub fn run(index_dir: &Path, cmd: CollectionCommand) -> Result<()> {
     }
 }
 
+/// Guard against `collection add <file>` silently producing a broken document.
+/// Walking a single file with `WalkDir` yields that file with an empty
+/// relative path (`strip_prefix` of itself is empty), which upstream code
+/// would happily persist as a document with a malformed synthetic URI.
+/// Rejecting a non-directory here up front gives a clear error instead.
+fn ensure_is_dir(path: &Path) -> Result<()> {
+    if !path.is_dir() {
+        bail!(
+            "'{}' is not a directory — `collection add` indexes a directory tree, not a single file",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn add(
     index_dir: &Path,
     dir: &str,
     name: Option<&str>,
     mask: Option<&str>,
     ignore: Vec<String>,
+    hidden: bool,
 ) -> Result<()> {
     let abs_dir = PathBuf::from(dir)
         .canonicalize()
         .with_context(|| format!("cannot resolve path: {dir}"))?;
+    ensure_is_dir(&abs_dir)?;
 
     let collection_name = name
         .unwrap_or_else(|| {
@@ -55,9 +79,11 @@ fn add(
     let mut s = store::open_store_no_backend(index_dir, false)?;
     let is_tty = fmt::atty_stderr();
 
-    let ignore_set = crate::exclusions::build_ignore_set(&ignore);
+    let ignore_set = exclusions::build_ignore_set(&ignore);
+    let include_set = exclusions::build_include_set(&pattern)
+        .with_context(|| format!("collection '{collection_name}': invalid mask"))?;
 
-    // Register the collection (persists ignore patterns for future updates)
+    // Register the collection (persists pattern/ignore/hidden for future `rqmd update` runs)
     let col = Collection {
         name: collection_name.clone(),
         path: abs_dir.to_string_lossy().to_string(),
@@ -65,60 +91,45 @@ fn add(
         ignore,
         include_by_default: true,
         update_command: None,
+        allow_hidden: hidden,
     };
     db::upsert_collection(&s.db, &col)?;
 
-    // Walk directory and index matching files
-    let ext = mask_to_extension(&pattern);
+    let candidates = document::collect_candidates(&abs_dir, &include_set, &ignore_set, hidden);
     let mut count = 0usize;
     let mut errors = 0usize;
+    let mut skips = document::SkipCounts::default();
 
-    for entry in WalkDir::new(&abs_dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if crate::exclusions::is_excluded(path, &abs_dir, &ignore_set) {
-            continue;
-        }
-        if let Some(ref ext_filter) = ext {
-            if path.extension().and_then(|e| e.to_str()) != Some(ext_filter.as_str()) {
-                continue;
-            }
-        }
-
-        let rel_path = path
-            .strip_prefix(&abs_dir)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
-
-        let body = match std::fs::read_to_string(path) {
-            Ok(b) => b,
-            Err(_) => continue, // skip non-UTF8 files silently
-        };
-
-        let title = body
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or(&rel_path)
-            .trim_start_matches('#')
-            .trim()
-            .to_string();
-
+    for (i, path) in candidates.iter().enumerate() {
         if is_tty {
-            let line = format!("  Indexing {} ({})", rel_path, count + 1);
+            let rel_preview = path
+                .strip_prefix(&abs_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+            let line = format!("  Indexing {} ({})", rel_preview, i + 1);
             let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
             eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
         }
-        match s.index_document_fts_only(&collection_name, &rel_path, &title, &body) {
+
+        let doc = match document::prepare(path, &abs_dir) {
+            Ok(doc) => doc,
+            Err(reason) => {
+                skips.record(reason);
+                continue;
+            }
+        };
+
+        match s.index_document_fts_only_with_raw(
+            &collection_name,
+            &doc.rel_path,
+            &doc.title,
+            &doc.indexed_text,
+            &doc.raw,
+        ) {
             Ok(_) => count += 1,
             Err(e) => {
-                eprintln!("\n  WARN: skipping {rel_path}: {e:#}");
+                eprintln!("\n  WARN: skipping {}: {e:#}", doc.rel_path);
                 errors += 1;
             }
         }
@@ -129,14 +140,29 @@ fn add(
     if is_tty {
         eprint!("\r{}\r", " ".repeat(fmt::term_width().unwrap_or(80)));
     }
-    println!(
-        "  Indexed {count} document(s){}.",
-        if errors > 0 {
-            format!(", {errors} error(s)")
-        } else {
-            String::new()
-        }
-    );
+
+    let mut summary = format!("  Indexed {count} document(s)");
+    if skips.total() > 0 {
+        summary.push_str(&format!(
+            " · skipped {} ({})",
+            skips.total(),
+            skips.describe()
+        ));
+    }
+    if errors > 0 {
+        summary.push_str(&format!(" · {errors} error(s)"));
+    }
+    summary.push('.');
+    println!("{summary}");
+
+    if count == 0 {
+        eprintln!(
+            "  WARN: 0 documents indexed into new collection '{collection_name}'. Likely causes: \
+             the mask '{pattern}' matched nothing, every matched file was unreadable, or files live \
+             under a dot-directory that was excluded (try --hidden)."
+        );
+    }
+
     eprintln!("Collection '{}' ready.", collection_name);
     Ok(())
 }
@@ -201,6 +227,7 @@ fn show(index_dir: &Path, name: &str) -> Result<()> {
     println!("  Pattern:  {}", col.pattern);
     println!("  Docs:     {count}");
     println!("  Included: {}", col.include_by_default);
+    println!("  Hidden:   {}", col.allow_hidden);
     if let Some(ref cmd) = col.update_command {
         println!("  Hook:     {cmd}");
     }
@@ -229,13 +256,21 @@ fn set_include(index_dir: &Path, name: &str, include: bool) -> Result<()> {
     Ok(())
 }
 
-/// Extract extension from mask pattern like "**/*.md" → Some("md")
-fn mask_to_extension(mask: &str) -> Option<String> {
-    let base = mask.rsplit('/').next().unwrap_or(mask);
-    if let Some(ext) = base.rsplit('.').next() {
-        if ext != base && !ext.is_empty() {
-            return Some(ext.to_string());
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_is_dir_rejects_a_plain_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("note.md");
+        std::fs::write(&file, "body").unwrap();
+        assert!(ensure_is_dir(&file).is_err());
     }
-    None
+
+    #[test]
+    fn ensure_is_dir_accepts_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(ensure_is_dir(dir.path()).is_ok());
+    }
 }
