@@ -172,7 +172,10 @@ impl Store {
         let embed_model = self.backend.embed_model_name().to_string();
         let fingerprint = embed_fingerprint(&embed_model);
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
-        let embeddings = self.backend.embed_batch(&texts).context("embed batch")?;
+        let embeddings = self
+            .backend
+            .embed_batch_passage(&texts)
+            .context("embed batch")?;
 
         for (seq, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
             let vid = self.hnsw.add(embedding).context("hnsw add")?;
@@ -287,7 +290,10 @@ impl Store {
         let chunks = chunk_document(body);
         let total = chunks.len();
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
-        let embeddings = self.backend.embed_batch(&texts).context("embed batch")?;
+        let embeddings = self
+            .backend
+            .embed_batch_passage(&texts)
+            .context("embed batch")?;
         let now = rfc3339_now();
 
         let mut pending = Vec::with_capacity(total);
@@ -387,7 +393,7 @@ impl Store {
             return Ok(vec![]);
         }
 
-        let embedding = self.backend.embed(query).context("embed query")?;
+        let embedding = self.backend.embed_query(query).context("embed query")?;
         let total_vectors = self.hnsw.size();
 
         // Widen the ANN candidate pool instead of relying on a fixed multiplier:
@@ -570,18 +576,37 @@ impl Store {
                             });
                         }
                     }
-                    QueryType::Vec | QueryType::Hyde => {
-                        let emb = self.backend.embed(&sub.text).context("embed sub-query")?;
+                    QueryType::Vec => {
+                        let emb = self
+                            .backend
+                            .embed_query(&sub.text)
+                            .context("embed sub-query")?;
                         let hits = self.hnsw.search(&emb, fetch_size)?;
                         let results = self.vec_hits_to_ranked(hits, collections)?;
                         if !results.is_empty() {
                             ranked_lists.push(results);
                             list_meta.push(RankedListMeta {
-                                source: if sub.qtype == QueryType::Hyde {
-                                    "hyde"
-                                } else {
-                                    "vec"
-                                },
+                                source: "vec",
+                                query_type: qt,
+                            });
+                        }
+                    }
+                    QueryType::Hyde => {
+                        // HyDE embeds a hypothetical *document* the generation model wrote,
+                        // not a query — it must go through the passage-side prompt so it
+                        // lands in the same embedding subspace as the real document chunks
+                        // it's meant to match, or the whole technique degrades to a
+                        // worse-phrased query embedding.
+                        let emb = self
+                            .backend
+                            .embed_passage(&sub.text)
+                            .context("embed sub-query")?;
+                        let hits = self.hnsw.search(&emb, fetch_size)?;
+                        let results = self.vec_hits_to_ranked(hits, collections)?;
+                        if !results.is_empty() {
+                            ranked_lists.push(results);
+                            list_meta.push(RankedListMeta {
+                                source: "hyde",
                                 query_type: qt,
                             });
                         }
@@ -614,7 +639,10 @@ impl Store {
             }
 
             // Step 2: Embed original query for vector search.
-            let query_embedding = self.backend.embed(expand_text).context("embed query")?;
+            let query_embedding = self
+                .backend
+                .embed_query(expand_text)
+                .context("embed query")?;
             let vec_hits = self.hnsw.search(&query_embedding, fetch_size)?;
             let vec_results = self.vec_hits_to_ranked(vec_hits, collections)?;
             if !vec_results.is_empty() {
@@ -846,7 +874,10 @@ impl Store {
             } else if let Some(text) = line.strip_prefix("vec:") {
                 let text = text.trim();
                 if !text.is_empty() {
-                    let emb = self.backend.embed(text).context("embed vec expansion")?;
+                    let emb = self
+                        .backend
+                        .embed_query(text)
+                        .context("embed vec expansion")?;
                     let hits = self.hnsw.search(&emb, fetch_size)?;
                     let results = self.vec_hits_to_ranked(hits, collections)?;
                     if !results.is_empty() {
@@ -860,7 +891,11 @@ impl Store {
             } else if let Some(text) = line.strip_prefix("hyde:") {
                 let text = text.trim();
                 if !text.is_empty() {
-                    let emb = self.backend.embed(text).context("embed hyde expansion")?;
+                    // Passage-side prompt — see the QueryType::Hyde comment above for why.
+                    let emb = self
+                        .backend
+                        .embed_passage(text)
+                        .context("embed hyde expansion")?;
                     let hits = self.hnsw.search(&emb, fetch_size)?;
                     let results = self.vec_hits_to_ranked(hits, collections)?;
                     if !results.is_empty() {
@@ -1018,8 +1053,16 @@ fn format_rfc3339(secs: u64) -> String {
 
 /// Embedding fingerprint: 6-hex-char hash of model name + chunk constants.
 /// Used to detect stale embeddings after a model or chunking-strategy change.
+///
+/// Derives from the real `chunking::CHUNK_SIZE_CHARS`/`CHUNK_OVERLAP_CHARS` constants
+/// rather than hardcoded literals, so a future change to those constants actually
+/// invalidates the fingerprint instead of going undetected.
 fn embed_fingerprint(model: &str) -> String {
-    let sig = format!("model:{model}\nchunk_tokens:900\nchunk_overlap_tokens:135");
+    let sig = format!(
+        "model:{model}\nchunk_size_chars:{}\nchunk_overlap_chars:{}",
+        crate::chunking::CHUNK_SIZE_CHARS,
+        crate::chunking::CHUNK_OVERLAP_CHARS,
+    );
     let hash = Sha256::digest(sig.as_bytes());
     hex::encode(&hash[..3]) // 6 hex chars
 }
