@@ -14,3 +14,9 @@
 
 # Local project index
 .rqmd/
+
+# Local Claude Code tooling gate config (not part of the Rust workspace)
+node_modules/
+package.json
+package-lock.json
+probity.config.ts
