@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -14,8 +15,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     chunking::chunk_document,
     db::{
-        self, content_hash, doc_for_vid, docid_from_hash, get_content, get_context_for_path,
-        open_db, upsert_content, upsert_document, upsert_vector_meta,
+        self, content_hash, doc_for_vid, doc_for_vid_meta, docid_from_hash, get_content,
+        get_context_for_path, open_db, upsert_content, upsert_document, upsert_vector_meta,
     },
     fts::FtsIndex,
     hnsw::VectorIndex,
@@ -26,7 +27,11 @@ use crate::{
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Candidate pool size for reranking.
+/// Floor for the internal candidate-fetch/rerank pool size. The pool scales
+/// with the caller's requested `limit` (`hybrid_query_multi` computes
+/// `fetch_size` as roughly `limit * 2`) but never drops below this floor, and
+/// is capped at 100 — rerank builds one fresh `LlamaContext` per candidate,
+/// so its cost is linear in pool size.
 const RERANK_CANDIDATE_LIMIT: usize = 20;
 
 /// BM25 strong-signal threshold — if the top normalized BM25 score exceeds this
@@ -325,25 +330,37 @@ impl Store {
     // ── Search ────────────────────────────────────────────────────────────────
 
     /// BM25 full-text search only (no vector, no rerank).
+    ///
+    /// Thin wrapper over `search_fts_multi` — a one-element slice reproduces this
+    /// exact behavior.
     pub fn search_fts(
         &self,
         query: &str,
         limit: usize,
         collection: Option<&str>,
     ) -> Result<Vec<SearchResult>> {
-        let hits = self.fts.search_fts(query, limit, collection)?;
-        self.hits_to_results(hits, limit)
+        let owned = collection.map(|c| [c.to_string()]);
+        self.search_fts_multi(query, limit, owned.as_ref().map(|a| a.as_slice()))
     }
 
-    /// Same as `search_fts`, but matches any of several collections. `None` or an
-    /// empty slice searches every collection.
+    /// Same as `search_fts`, but matches any of several collections. An absent or
+    /// empty filter resolves to the collections with `include_by_default = 1`
+    /// (see `effective_collections`) rather than literally "every collection" —
+    /// pass an explicit list to search collections regardless of that flag.
     pub fn search_fts_multi(
         &self,
         query: &str,
         limit: usize,
         collections: Option<&[String]>,
     ) -> Result<Vec<SearchResult>> {
-        let hits = self.fts.search_fts_multi(query, limit, collections)?;
+        let effective = self.effective_collections(collections)?;
+        if matches!(effective, Some(ref cols) if cols.is_empty()) {
+            // No collection is default-included and none was requested explicitly.
+            return Ok(vec![]);
+        }
+        let hits = self
+            .fts
+            .search_fts_multi(query, limit, effective.as_deref())?;
         self.hits_to_results(hits, limit)
     }
 
@@ -354,45 +371,84 @@ impl Store {
         limit: usize,
         collection: Option<&str>,
     ) -> Result<Vec<SearchResult>> {
-        let embedding = self.backend.embed(query).context("embed query")?;
-        let raw = self.hnsw.search(&embedding, limit * 4)?; // over-fetch, then filter
+        let owned = collection.map(|c| [c.to_string()]);
+        let effective = self.effective_collections(owned.as_ref().map(|a| a.as_slice()))?;
+        if matches!(effective, Some(ref cols) if cols.is_empty()) {
+            return Ok(vec![]);
+        }
 
-        let mut results = Vec::new();
-        for (vid, sim) in raw {
-            if let Some((doc, body)) = doc_for_vid(&self.db, vid)? {
-                if let Some(cf) = collection {
-                    if doc.collection != cf {
+        let embedding = self.backend.embed(query).context("embed query")?;
+        let total_vectors = self.hnsw.size();
+
+        // Widen the ANN candidate pool instead of relying on a fixed multiplier:
+        // a fixed `limit * 4` over-fetch can still come back with too few
+        // in-scope documents once filtered by collection and deduped down to
+        // one row per document (a small minority collection can easily lose
+        // out to a fixed-size raw top-k). Double `k` until enough in-scope
+        // documents are found or the whole index has been searched.
+        let mut k = limit.saturating_mul(4).max(1);
+        let mut by_doc: HashMap<String, (f32, crate::types::Document, String)> = HashMap::new();
+
+        loop {
+            let raw = self.hnsw.search(&embedding, k)?;
+            by_doc.clear();
+            for (vid, sim) in raw {
+                let Some((doc, body)) = doc_for_vid(&self.db, vid)? else {
+                    continue;
+                };
+                if let Some(cols) = &effective {
+                    if !cols.iter().any(|c| c == &doc.collection) {
                         continue;
                     }
                 }
                 let filepath = format!("{}/{}", doc.collection, doc.path);
-                // Pick the first chunk as the snippet — no re-chunking needed.
-                let chunks = chunk_document(&body);
-                let best = chunks
-                    .into_iter()
-                    .next()
-                    .map(|c| c.text)
-                    .unwrap_or_default();
-                let docid = docid_from_hash(&doc.hash).to_string();
-                let ctx = get_context_for_path(&self.db, &doc.collection, &doc.path)
-                    .ok()
-                    .flatten();
-                results.push(SearchResult {
-                    file: format!("rqmd://{filepath}"),
-                    title: doc.title.clone(),
-                    body: body.clone(),
-                    best_chunk: best,
-                    best_chunk_pos: 0,
-                    score: sim,
-                    docid,
-                    collection: doc.collection,
-                    path: doc.path,
-                    context: ctx,
-                });
-                if results.len() >= limit {
-                    break;
+                // Keep only the best-scoring chunk per document — a multi-chunk
+                // document must appear once in results, not once per chunk.
+                let keep = match by_doc.get(&filepath) {
+                    Some((existing_sim, _, _)) => sim > *existing_sim,
+                    None => true,
+                };
+                if keep {
+                    by_doc.insert(filepath, (sim, doc, body));
                 }
             }
+
+            if by_doc.len() >= limit || k >= total_vectors {
+                break;
+            }
+            k = (k * 2).min(total_vectors);
+        }
+
+        let mut ranked: Vec<(f32, crate::types::Document, String)> = by_doc.into_values().collect();
+        ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(limit);
+
+        let mut results = Vec::with_capacity(ranked.len());
+        for (sim, doc, body) in ranked {
+            let filepath = format!("{}/{}", doc.collection, doc.path);
+            // Pick the first chunk as the snippet — no re-chunking needed.
+            let chunks = chunk_document(&body);
+            let best = chunks
+                .into_iter()
+                .next()
+                .map(|c| c.text)
+                .unwrap_or_default();
+            let docid = docid_from_hash(&doc.hash).to_string();
+            let ctx = get_context_for_path(&self.db, &doc.collection, &doc.path)
+                .ok()
+                .flatten();
+            results.push(SearchResult {
+                file: format!("rqmd://{filepath}"),
+                title: doc.title.clone(),
+                body,
+                best_chunk: best,
+                best_chunk_pos: 0,
+                score: sim,
+                docid,
+                collection: doc.collection,
+                path: doc.path,
+                context: ctx,
+            });
         }
         Ok(results)
     }
@@ -425,9 +481,11 @@ impl Store {
         )
     }
 
-    /// Same as `hybrid_query`, but matches any of several collections. `None` or an
-    /// empty slice searches every collection. Backs the MCP server's `collections`
-    /// filter (multi-collection parity with qmd 2.6.3).
+    /// Same as `hybrid_query`, but matches any of several collections. An absent
+    /// or empty filter resolves to the collections with `include_by_default = 1`
+    /// (see `effective_collections`) rather than literally "every collection" —
+    /// pass an explicit list to search collections regardless of that flag.
+    /// Backs the MCP server's `collections` filter.
     ///
     /// `no_expand` skips the LLM query-expansion/HyDE round-trip (step 3 below),
     /// leaving BM25 + vector retrieval and RRF fusion intact — a faster, pure
@@ -441,6 +499,26 @@ impl Store {
         skip_rerank: bool,
         no_expand: bool,
     ) -> Result<Vec<SearchResult>> {
+        let effective = self.effective_collections(collections)?;
+        if matches!(effective, Some(ref cols) if cols.is_empty()) {
+            return Ok(vec![]);
+        }
+        let collections = effective.as_deref();
+
+        // Internal candidate-fetch size for FTS/vector retrieval and the final
+        // rerank pool: scales with the caller's requested `limit` instead of a
+        // hardcoded constant, so e.g. `limit=25` isn't silently capped below
+        // what was asked for. Capped at 100 — see `RERANK_CANDIDATE_LIMIT`.
+        let requested_candidates = limit.saturating_mul(2);
+        let fetch_size = requested_candidates.clamp(RERANK_CANDIDATE_LIMIT, 100);
+        if requested_candidates > 100 {
+            tracing::warn!(
+                "query requested limit={limit} (wants {requested_candidates} rerank \
+                 candidates); capping the candidate pool at {fetch_size} since rerank \
+                 builds one LlamaContext per candidate and cost is linear in pool size"
+            );
+        }
+
         let mut ranked_lists: Vec<Vec<RankedResult>> = Vec::new();
         let mut list_meta: Vec<RankedListMeta> = Vec::new();
 
@@ -471,7 +549,9 @@ impl Store {
                 };
                 match sub.qtype {
                     QueryType::Lex => {
-                        let hits = self.fts.search_fts_multi(&sub.text, 20, collections)?;
+                        let hits = self
+                            .fts
+                            .search_fts_multi(&sub.text, fetch_size, collections)?;
                         if !hits.is_empty() {
                             ranked_lists.push(fts_hits_to_ranked(&hits));
                             list_meta.push(RankedListMeta {
@@ -482,7 +562,7 @@ impl Store {
                     }
                     QueryType::Vec | QueryType::Hyde => {
                         let emb = self.backend.embed(&sub.text).context("embed sub-query")?;
-                        let hits = self.hnsw.search(&emb, 20)?;
+                        let hits = self.hnsw.search(&emb, fetch_size)?;
                         let results = self.vec_hits_to_ranked(hits, collections)?;
                         if !results.is_empty() {
                             ranked_lists.push(results);
@@ -506,7 +586,9 @@ impl Store {
             let expand_text = parsed.expand_text.as_deref().unwrap_or(query);
 
             // Step 1: BM25 probe on the raw query.
-            let initial_fts = self.fts.search_fts_multi(expand_text, 20, collections)?;
+            let initial_fts = self
+                .fts
+                .search_fts_multi(expand_text, fetch_size, collections)?;
             let top_score = initial_fts.first().map(|r| r.2).unwrap_or(0.0);
             let second_score = initial_fts.get(1).map(|r| r.2).unwrap_or(0.0);
             let strong_signal = !initial_fts.is_empty()
@@ -523,7 +605,7 @@ impl Store {
 
             // Step 2: Embed original query for vector search.
             let query_embedding = self.backend.embed(expand_text).context("embed query")?;
-            let vec_hits = self.hnsw.search(&query_embedding, 20)?;
+            let vec_hits = self.hnsw.search(&query_embedding, fetch_size)?;
             let vec_results = self.vec_hits_to_ranked(vec_hits, collections)?;
             if !vec_results.is_empty() {
                 ranked_lists.push(vec_results);
@@ -540,7 +622,7 @@ impl Store {
                 match self.backend.generate(&prompt) {
                     Ok(expansion) => {
                         let expansion_lists =
-                            self.parse_and_run_expansion(&expansion, collections)?;
+                            self.parse_and_run_expansion(&expansion, collections, fetch_size)?;
                         ranked_lists.extend(expansion_lists.0);
                         list_meta.extend(expansion_lists.1);
                     }
@@ -559,7 +641,7 @@ impl Store {
         }
         let weights = rrf_weights(&list_meta);
         let fused = reciprocal_rank_fusion(&ranked_lists, &weights);
-        let candidates = &fused[..RERANK_CANDIDATE_LIMIT.min(fused.len())];
+        let candidates = &fused[..fetch_size.min(fused.len())];
 
         // Step 5: Resolve candidates to full documents.
         let mut candidate_docs: Vec<(RankedResult, String, String)> = Vec::new();
@@ -690,7 +772,9 @@ impl Store {
     ) -> Result<Vec<RankedResult>> {
         let mut results = Vec::new();
         for (vid, sim) in hits {
-            if let Some((doc, _body)) = doc_for_vid(&self.db, vid)? {
+            // Ranking only needs document identity, not the body — `doc_for_vid_meta`
+            // skips the `content` join that `doc_for_vid` pays for on every candidate.
+            if let Some(doc) = doc_for_vid_meta(&self.db, vid)? {
                 if let Some(cols) = collections {
                     if !cols.is_empty() && !cols.iter().any(|c| c == &doc.collection) {
                         continue;
@@ -723,10 +807,14 @@ impl Store {
     /// each expansion as a search, returning ranked lists + their metadata.
     ///
     /// Malformed or absent lines are silently skipped (expansion is best-effort).
+    /// `fetch_size` is the caller's already-computed candidate-pool size (see
+    /// `hybrid_query_multi`) — threaded through so expansion searches scale
+    /// with the requested `limit` the same way the original-query searches do.
     fn parse_and_run_expansion(
         &mut self,
         expansion: &str,
         collections: Option<&[String]>,
+        fetch_size: usize,
     ) -> Result<(Vec<Vec<RankedResult>>, Vec<RankedListMeta>)> {
         let mut lists: Vec<Vec<RankedResult>> = Vec::new();
         let mut metas: Vec<RankedListMeta> = Vec::new();
@@ -736,7 +824,7 @@ impl Store {
             if let Some(text) = line.strip_prefix("lex:") {
                 let text = text.trim();
                 if !text.is_empty() {
-                    let hits = self.fts.search_fts_multi(text, 20, collections)?;
+                    let hits = self.fts.search_fts_multi(text, fetch_size, collections)?;
                     if !hits.is_empty() {
                         lists.push(fts_hits_to_ranked(&hits));
                         metas.push(RankedListMeta {
@@ -749,7 +837,7 @@ impl Store {
                 let text = text.trim();
                 if !text.is_empty() {
                     let emb = self.backend.embed(text).context("embed vec expansion")?;
-                    let hits = self.hnsw.search(&emb, 20)?;
+                    let hits = self.hnsw.search(&emb, fetch_size)?;
                     let results = self.vec_hits_to_ranked(hits, collections)?;
                     if !results.is_empty() {
                         lists.push(results);
@@ -763,7 +851,7 @@ impl Store {
                 let text = text.trim();
                 if !text.is_empty() {
                     let emb = self.backend.embed(text).context("embed hyde expansion")?;
-                    let hits = self.hnsw.search(&emb, 20)?;
+                    let hits = self.hnsw.search(&emb, fetch_size)?;
                     let results = self.vec_hits_to_ranked(hits, collections)?;
                     if !results.is_empty() {
                         lists.push(results);
@@ -777,6 +865,41 @@ impl Store {
         }
 
         Ok((lists, metas))
+    }
+
+    /// Resolve the collections a query should search when the caller passed no
+    /// explicit filter (`None`, or an empty slice — the two are equivalent
+    /// "unspecified" inputs throughout this API). An explicit, non-empty filter
+    /// always wins outright, bypassing default-inclusion entirely.
+    ///
+    /// Otherwise, resolve to the collections with `include_by_default = 1` —
+    /// this is the one place that flag is actually consulted; collection
+    /// management commands previously only wrote and displayed it.
+    ///
+    /// Returns `Ok(None)` when every configured collection is included by
+    /// default (or none are configured yet), so callers can skip scoping cost
+    /// entirely. Returns `Ok(Some(list))` otherwise, where `list` may be empty
+    /// if no collection is currently included by default — callers MUST treat
+    /// that as "match nothing" and short-circuit, rather than forwarding the
+    /// empty list on: to the FTS/vector search functions an empty slice means
+    /// "no filter", which would silently widen back to "search everything".
+    fn effective_collections(&self, requested: Option<&[String]>) -> Result<Option<Vec<String>>> {
+        if let Some(cols) = requested {
+            if !cols.is_empty() {
+                return Ok(Some(cols.to_vec()));
+            }
+        }
+
+        let all = db::list_collections(&self.db).context("list collections for default scope")?;
+        if all.iter().all(|c| c.include_by_default) {
+            return Ok(None);
+        }
+        Ok(Some(
+            all.into_iter()
+                .filter(|c| c.include_by_default)
+                .map(|c| c.name)
+                .collect(),
+        ))
     }
 }
 

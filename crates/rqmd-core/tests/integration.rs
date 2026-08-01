@@ -1,4 +1,4 @@
-//! Integration tests for qmd-core: chunking, RRF, and DB layer.
+//! Integration tests for rqmd-core: chunking, RRF, and DB layer.
 //! Does NOT require inference backend (no model downloads).
 
 use rqmd_core::{
@@ -417,7 +417,7 @@ fn dotted_version_tokenizes_and_matches_bm25() {
     );
 }
 
-// ── MCP multi-collection filter (qmd 2.6.3 parity: `collection` → `collections`) ──
+// ── MCP multi-collection filter (`collection` → `collections`) ──────────────
 
 #[test]
 fn search_fts_multi_filters_to_requested_collections() {
@@ -448,6 +448,136 @@ fn search_fts_multi_filters_to_requested_collections() {
         .iter()
         .all(|h| h.collection == "alpha" || h.collection == "beta"));
     assert!(!subset.iter().any(|h| h.collection == "gamma"));
+}
+
+#[test]
+fn search_fts_multi_finds_minority_collection_despite_bulk_corpus() {
+    // Regression guard: collection scoping used to truncate-then-filter — the
+    // top-`limit` BM25 hits were collected globally, THEN filtered down to the
+    // requested collection. A small target collection buried in a much larger
+    // corpus could be squeezed entirely out of that global top-`limit` before
+    // the filter ever ran, producing a false-empty result despite matching
+    // documents existing.
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+
+    for i in 0..50 {
+        store
+            .index_document_fts_only(
+                "bulk",
+                &format!("doc{i}.md"),
+                "Bulk Doc",
+                "widget widget widget",
+            )
+            .unwrap();
+    }
+    for i in 0..2 {
+        store
+            .index_document_fts_only("target", &format!("doc{i}.md"), "Target Doc", "widget")
+            .unwrap();
+    }
+    store.flush().unwrap();
+
+    let target = vec!["target".to_string()];
+    let hits = store.search_fts_multi("widget", 5, Some(&target)).unwrap();
+    assert_eq!(
+        hits.len(),
+        2,
+        "expected both target-collection docs despite a 50-doc bulk collection: {hits:?}"
+    );
+    assert!(hits.iter().all(|h| h.collection == "target"));
+}
+
+#[test]
+fn search_fts_lenient_parse_recovers_from_colon_syntax() {
+    // Regression guard: a query fragment tantivy's default parser reads as a
+    // field specifier (the colon in "error: connection refused" looks like
+    // `field:value`) used to fail parsing outright, and that parse error
+    // degraded to a silent empty `Ok(vec![])` with no diagnostic. Lenient
+    // parsing degrades only the unparseable fragment instead of the whole
+    // query.
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+
+    store
+        .index_document_fts_only(
+            "coll",
+            "log.md",
+            "Log Entry",
+            "error: connection refused while dialing upstream",
+        )
+        .unwrap();
+    store.flush().unwrap();
+
+    let hits = store
+        .search_fts("error: connection refused", 5, None)
+        .unwrap();
+    assert!(
+        !hits.is_empty(),
+        "lenient parse should still surface a match for a colon-bearing query"
+    );
+}
+
+#[test]
+fn search_fts_multi_none_resolves_to_include_by_default_collections() {
+    // Regression guard: `include_by_default = 0` was written and displayed by
+    // collection management commands but never consulted by any query path —
+    // `collection exclude` was a no-op that reported success while every
+    // search continued to cover the "excluded" collection anyway.
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+
+    store
+        .index_document_fts_only("visible", "doc.md", "Visible Doc", "widget")
+        .unwrap();
+    store
+        .index_document_fts_only("hidden", "doc.md", "Hidden Doc", "widget")
+        .unwrap();
+    store.flush().unwrap();
+
+    rqmd_core::db::upsert_collection(
+        &store.db,
+        &rqmd_core::types::Collection {
+            name: "visible".to_string(),
+            path: "/tmp/visible".to_string(),
+            pattern: "**/*.md".to_string(),
+            ignore: vec![],
+            include_by_default: true,
+            update_command: None,
+            allow_hidden: false,
+        },
+    )
+    .unwrap();
+    rqmd_core::db::upsert_collection(
+        &store.db,
+        &rqmd_core::types::Collection {
+            name: "hidden".to_string(),
+            path: "/tmp/hidden".to_string(),
+            pattern: "**/*.md".to_string(),
+            ignore: vec![],
+            include_by_default: false,
+            update_command: None,
+            allow_hidden: false,
+        },
+    )
+    .unwrap();
+
+    // No explicit filter → only the default-included collection.
+    let default_scope = store.search_fts_multi("widget", 10, None).unwrap();
+    assert_eq!(
+        default_scope.len(),
+        1,
+        "expected only the default-included collection: {default_scope:?}"
+    );
+    assert_eq!(default_scope[0].collection, "visible");
+
+    // Explicit filter still reaches the excluded collection.
+    let explicit = vec!["hidden".to_string()];
+    let hits = store
+        .search_fts_multi("widget", 10, Some(&explicit))
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].collection, "hidden");
 }
 
 #[test]

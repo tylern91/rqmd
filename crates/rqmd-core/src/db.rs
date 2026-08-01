@@ -494,6 +494,36 @@ pub fn doc_for_vid(conn: &Connection, vid: u64) -> Result<Option<(Document, Stri
     .context("doc_for_vid")
 }
 
+/// Look up (collection, path, title, hash) for a vector ID, without the
+/// document body. Callers that only need identity/metadata (e.g. ranking
+/// and dedup before any chunk is selected) should prefer this over
+/// `doc_for_vid` — it skips the `content` join entirely, avoiding an
+/// unused body fetch on every candidate.
+pub fn doc_for_vid_meta(conn: &Connection, vid: u64) -> Result<Option<Document>> {
+    conn.query_row(
+        r#"
+        SELECT d.id, d.collection, d.path, d.title, d.hash, d.active
+        FROM content_vectors cv
+        JOIN documents d ON d.hash = cv.hash AND d.active = 1
+        WHERE cv.vid = ?1
+        LIMIT 1
+        "#,
+        params![vid as i64],
+        |row| {
+            Ok(Document {
+                id: row.get(0)?,
+                collection: row.get(1)?,
+                path: row.get(2)?,
+                title: row.get(3)?,
+                hash: row.get(4)?,
+                active: row.get::<_, i64>(5)? != 0,
+            })
+        },
+    )
+    .optional()
+    .context("doc_for_vid_meta")
+}
+
 /// Load all (vid → (hash, seq)) pairs for rebuilding the HNSW index on startup.
 pub fn load_all_vid_mappings(conn: &Connection) -> Result<Vec<(u64, String, i64)>> {
     let mut stmt = conn
