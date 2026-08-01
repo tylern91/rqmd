@@ -11,6 +11,17 @@ use crate::types::{QueryType, RankedListMeta, RankedResult};
 
 const RRF_K: f32 = 60.0;
 
+/// Collapse a ranked list down to one entry per document (`filepath`), keeping
+/// the first occurrence — i.e. the best-scoring one, since callers hand us
+/// lists already sorted descending by backend score.
+fn dedupe_by_filepath(list: &[RankedResult]) -> Vec<RankedResult> {
+    let mut seen = std::collections::HashSet::new();
+    list.iter()
+        .filter(|r| seen.insert(r.filepath.clone()))
+        .cloned()
+        .collect()
+}
+
 /// Return per-list weights based on query type.
 pub fn rrf_weights(meta: &[RankedListMeta]) -> Vec<f32> {
     meta.iter()
@@ -43,7 +54,14 @@ pub fn reciprocal_rank_fusion(
 
     for (list_idx, list) in result_lists.iter().enumerate() {
         let weight = weights.get(list_idx).copied().unwrap_or(1.0);
-        for (rank, result) in list.iter().enumerate() {
+        // Collapse to one entry per document before ranking. A ranked list can
+        // hold several chunk-level rows for the same document (one per
+        // embedded chunk) — without this, a document broken into more chunks
+        // racks up more rank-based contributions than one with fewer chunks at
+        // equivalent relevance, systematically biasing the fused ranking
+        // toward longer documents.
+        let deduped = dedupe_by_filepath(list);
+        for (rank, result) in deduped.iter().enumerate() {
             let contribution = weight / (RRF_K + rank as f32 + 1.0);
             match scores.get_mut(&result.filepath) {
                 Some(entry) => {
@@ -119,6 +137,25 @@ mod tests {
         let fused = reciprocal_rank_fusion(&[l1, l2], &[1.0, 1.0]);
         // "a" appears at rank 0 in both lists → highest score
         assert_eq!(fused[0].filepath, "a");
+    }
+
+    #[test]
+    fn rrf_does_not_favor_long_document_by_chunk_count() {
+        // "short" is a single-chunk document holding the single best match in
+        // the list. "long" is a 10-chunk document whose every individual chunk
+        // is a strictly weaker match than "short" — but without per-list dedup,
+        // its 10 chunk-rows would each contribute their own rank-based RRF
+        // term, letting sheer chunk count out-accumulate one strong match.
+        let mut list = vec![result("short", 1.0)];
+        for i in 0..10 {
+            list.push(result("long", 0.9 - i as f32 * 0.05));
+        }
+        let fused = reciprocal_rank_fusion(&[list], &[1.0]);
+        assert_eq!(
+            fused[0].filepath, "short",
+            "a document with more chunks must not out-rank a stronger single \
+             match purely by accumulating more chunk-level contributions: {fused:?}"
+        );
     }
 
     #[test]

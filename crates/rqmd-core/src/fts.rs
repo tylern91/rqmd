@@ -8,9 +8,9 @@ use std::path::Path;
 use tantivy::{
     collector::TopDocs,
     doc,
-    query::QueryParser,
-    schema::{Field, Schema, SchemaBuilder, Value, FAST, STORED, TEXT},
-    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument,
+    query::{BooleanQuery, ConstScoreQuery, Query, QueryParser, TermQuery},
+    schema::{Field, IndexRecordOption, Schema, SchemaBuilder, Value, FAST, STORED, TEXT},
+    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
 };
 
 pub struct FtsSchema {
@@ -160,11 +160,38 @@ impl FtsIndex {
     ) -> Result<Vec<(String, i64, f32)>> {
         let searcher = self.reader.searcher();
 
-        // Return empty on parse error (e.g., unmatched quotes, special chars).
-        let query = match self.query_parser.parse_query(query_text) {
-            Ok(q) => q,
-            Err(_) => return Ok(vec![]),
-        };
+        // `parse_query` fails hard on a fragment tantivy reads as a field specifier
+        // (e.g. "error: connection refused" — the colon looks like `field:value`).
+        // `parse_query_lenient` degrades that fragment to a best-effort clause
+        // instead of returning zero results with no explanation; surface each
+        // degradation as a warning so it's diagnosable.
+        let (mut query, parse_errors) = self.query_parser.parse_query_lenient(query_text);
+        for err in &parse_errors {
+            tracing::warn!("fts query {query_text:?} parsed leniently: {err}");
+        }
+
+        // Pushdown: require the requested collection(s) to match (tokenized the
+        // same way the filepath field itself is indexed) so `TopDocs::with_limit`
+        // can't drop a small collection's hits before the exact-prefix filter
+        // below ever sees them. This can over-match (a collection named "notes"
+        // could also match "other/my-notes.md") — that's fine, the post-filter
+        // is still the final guarantee. Wrapped in a ConstScoreQuery so filtering
+        // never perturbs BM25 ranking.
+        if let Some(cols) = collections.filter(|c| !c.is_empty()) {
+            let mut clause_groups: Vec<Box<dyn Query>> = Vec::new();
+            for c in cols {
+                if let Some(clause) = self.collection_pushdown_clause(c)? {
+                    clause_groups.push(clause);
+                }
+            }
+            if !clause_groups.is_empty() {
+                let pushdown = BooleanQuery::union(clause_groups);
+                query = Box::new(BooleanQuery::intersection(vec![
+                    query,
+                    Box::new(ConstScoreQuery::new(Box::new(pushdown), 0.0)),
+                ]));
+            }
+        }
 
         let collector = TopDocs::with_limit(limit).order_by_score();
         let top_docs = searcher
@@ -210,5 +237,41 @@ impl FtsIndex {
         }
 
         Ok(results)
+    }
+
+    /// Build a filter clause requiring every token of `collection` (tokenized the
+    /// same way the filepath field itself is indexed) to appear on that field.
+    /// Returns `None` when the collection name yields no usable tokens, in which
+    /// case there is no clause that could ever match and callers should skip
+    /// pushdown for it, relying on the exact-prefix post-filter alone.
+    fn collection_pushdown_clause(&self, collection: &str) -> Result<Option<Box<dyn Query>>> {
+        let mut analyzer = self
+            .index
+            .tokenizer_for_field(self.schema.filepath)
+            .context("tokenizer for filepath field")?;
+
+        let mut terms = Vec::new();
+        {
+            let mut stream = analyzer.token_stream(collection);
+            stream.process(&mut |token| {
+                // Defensive — the "default" tokenizer's RemoveLongFilter(40) already
+                // drops tokens over 40 chars before indexing, so this is normally a
+                // no-op. But a token that long can never appear in the index, so a
+                // MUST clause requiring one would guarantee zero matches; skip it.
+                if token.text.len() <= 40 {
+                    terms.push(Term::from_field_text(self.schema.filepath, &token.text));
+                }
+            });
+        }
+
+        if terms.is_empty() {
+            return Ok(None);
+        }
+
+        let must_all: Vec<Box<dyn Query>> = terms
+            .into_iter()
+            .map(|t| Box::new(TermQuery::new(t, IndexRecordOption::Basic)) as Box<dyn Query>)
+            .collect();
+        Ok(Some(Box::new(BooleanQuery::intersection(must_all))))
     }
 }
