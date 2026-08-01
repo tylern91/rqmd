@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod commands;
+mod daemon;
 mod document;
 mod exclusions;
 mod format;
@@ -148,13 +149,29 @@ enum Commands {
         /// Serve over Streamable HTTP instead of stdio
         #[arg(long)]
         http: bool,
-        /// HTTP port (default: 8181)
-        #[arg(long, default_value = "8181")]
+        /// HTTP port
+        #[arg(long, default_value = "8181", env = "RRQMD_MCP_PORT")]
         port: u16,
+        /// HTTP bind host. A non-loopback value exposes this index's full-text
+        /// and semantic search (and `get`, which returns file content) with no
+        /// authentication to anything that can reach it — only use on a
+        /// trusted network or container.
+        #[arg(long, default_value = "127.0.0.1", env = "RRQMD_MCP_HOST")]
+        host: String,
         /// Run as a background daemon (implies --http); daemonize and exit
-        #[arg(long, conflicts_with = "http")]
+        #[arg(long)]
         daemon: bool,
+        #[command(subcommand)]
+        action: Option<McpAction>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum McpAction {
+    /// Show MCP daemon status (pid, health, uptime)
+    Status,
+    /// Stop the running MCP daemon
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -334,8 +351,16 @@ fn main() -> Result<()> {
         Commands::Doctor => commands::index::run_doctor(&index_dir),
         Commands::Bench { rounds } => commands::bench::run_bench(&index_dir, rounds),
         Commands::Eval { mode, verbose } => commands::eval::run_eval(&index_dir, &mode, verbose),
-        Commands::Mcp { http, port, daemon } => {
-            commands::mcp::run_mcp(&index_dir, http || daemon, port, daemon)
-        }
+        Commands::Mcp {
+            http,
+            port,
+            host,
+            daemon,
+            action,
+        } => match action {
+            Some(McpAction::Status) => commands::mcp::run_mcp_status(&index_dir),
+            Some(McpAction::Stop) => commands::mcp::run_mcp_stop(&index_dir),
+            None => commands::mcp::run_mcp(&index_dir, http || daemon, &host, port, daemon),
+        },
     }
 }

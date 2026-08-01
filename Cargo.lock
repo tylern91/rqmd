@@ -2535,6 +2535,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -2629,16 +2630,19 @@ dependencies = [
 
 [[package]]
 name = "rqmd-cli"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "clap",
  "dirs 5.0.1",
  "globset",
  "indicatif 0.17.11",
+ "libc",
+ "reqwest",
  "rqmd-core",
  "rqmd-llm",
  "rqmd-mcp",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2648,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-core"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "hex",
@@ -2666,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-llm"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -2681,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-mcp"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "axum",

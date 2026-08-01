@@ -38,6 +38,12 @@ impl RqmdServer {
         })
     }
 
+    /// The index directory this server was opened against — used by the HTTP
+    /// `/health` endpoint so a caller can confirm it reached the daemon it expects.
+    pub fn index_dir(&self) -> &Path {
+        &self.index_dir
+    }
+
     /// Return the ML store, initialising it (loading models) on first call.
     fn ml(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Store>> {
         let store = self.ml_store.get_or_try_init(|| {

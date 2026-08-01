@@ -1019,7 +1019,7 @@ fn best_chunk(body: &str, query_terms: &[String]) -> (String, usize) {
 /// Implemented without the `chrono` crate using civil-time arithmetic on the
 /// POSIX epoch so that the `created_at`/`modified_at`/`embedded_at` columns
 /// are human-readable ISO-8601.
-fn rfc3339_now() -> String {
+pub fn rfc3339_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
