@@ -4,6 +4,14 @@
 
 ---
 
+## [0.8.1] - 2026-08-02
+### Fixed
+- `release.yml`: every future release body now gets commit/PR provenance
+  stamped in — previously `stamp-changelog-refs.sh` was only ever invoked as a
+  one-time manual backfill and was never wired into the pipeline itself.
+
+---
+
 ## [0.8.0] - 2026-08-01
 ### Fixed
 - `-c`/`--collection` on `query`, `search`, `vsearch`, and `multi-get` was
