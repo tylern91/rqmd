@@ -1,6 +1,6 @@
-# QMD Query Syntax
+# rqmd Query Syntax
 
-QMD queries are structured documents with typed sub-queries. Each line specifies a search type and query text.
+rqmd queries are structured documents with typed sub-queries. Each line specifies a search type and query text.
 
 ## Grammar
 
@@ -28,7 +28,7 @@ newline        = "\n" ;
 
 ## Default Behavior
 
-A QMD query is either a single expand query or a multi-line query document. Any single-line query with no prefix is treated as an expand query and passed to the expansion model, which emits lex, vec, and hyde variants automatically.
+A rqmd query is either a single expand query or a multi-line query document. Any single-line query with no prefix is treated as an expand query and passed to the expansion model, which emits lex, vec, and hyde variants automatically.
 
 ```
 # These are equivalent and cannot be combined with typed lines:
@@ -45,15 +45,25 @@ lex_query   = { lex_term } ;
 lex_term    = negation | phrase | word ;
 negation    = "-" ( phrase | word ) ;
 phrase      = '"' { character } '"' ;
-word        = { letter | digit | "'" } ;
+word        = { letter | digit } ;
 ```
+
+Tokenization splits on any non-alphanumeric character. An apostrophe or a
+period is not part of a `word` — each acts as a token boundary, so `don't`
+indexes as two tokens (`don`, `t`) and `rqmd.core` indexes as two tokens
+(`rqmd`, `core`).
 
 | Syntax | Meaning | Example |
 |--------|---------|---------|
-| `word` | Prefix match | `perf` matches "performance" |
+| `word` | Exact token match (no prefix/stemming/ngram matching) | `perf` matches only the token `perf` — it does **not** match "performance" |
 | `"phrase"` | Exact phrase | `"rate limiter"` |
 | `-word` | Exclude term | `-sports` |
 | `-"phrase"` | Exclude phrase | `-"test data"` |
+
+Multiple `lex_term`s are OR-combined by default: `auth session` matches any
+document containing "auth" **or** "session", not necessarily both.
+`-word`/`-"phrase"` terms are still subtracted regardless — negation is not
+affected by the OR default.
 
 ### Examples
 
@@ -132,9 +142,9 @@ Without intent, "performance" is ambiguous (web-perf? team health? fitness?). Wi
 Restrict queries to specific collections with `-c` (CLI) or `collections` (MCP/SDK):
 
 ```bash
-# CLI — by collection name (see `qmd collection list`)
-qmd query -c docs "how does auth work"
-qmd query -c docs -c notes $'lex: auth\nvec: authentication flow'
+# CLI — by collection name (see `rqmd collection list`)
+rqmd query -c docs "how does auth work"
+rqmd query -c docs -c notes $'lex: auth\nvec: authentication flow'
 ```
 
 For MCP, pass a plural `collections` array (OR match):
@@ -145,7 +155,7 @@ For MCP, pass a plural `collections` array (OR match):
 
 `-c`/`collections` matches by collection name and works from any directory.
 Multiple values are OR-combined. Without scoping, all default-included collections
-are searched; collections marked excluded (`qmd collection exclude <name>`) are
+are searched; collections marked excluded (`rqmd collection exclude <name>`) are
 skipped unless explicitly named. In MCP the parameter is the plural `collections`
 array — a singular `collection` is silently ignored.
 
@@ -183,17 +193,34 @@ BM25-only lookups.
 
 ```bash
 # Single line (implicit expand)
-qmd query "how does auth work"
+rqmd query "how does auth work"
 
 # Multi-line with types
-qmd query $'lex: auth token\nvec: how does authentication work'
+rqmd query $'lex: auth token\nvec: how does authentication work'
 
 # Structured
-qmd query $'lex: keywords\nvec: question\nhyde: hypothetical answer...'
+rqmd query $'lex: keywords\nvec: question\nhyde: hypothetical answer...'
 
 # With intent (inline)
-qmd query $'intent: web performance and latency\nlex: performance\nvec: how to improve performance'
+rqmd query $'intent: web performance and latency\nlex: performance\nvec: how to improve performance'
 
 # With intent (flag)
-qmd query --intent "web performance and latency" "performance"
+rqmd query --intent "web performance and latency" "performance"
+
+# Skip query expansion — direct hybrid retrieval, no LLM round-trip.
+# CLI counterpart to the MCP `expand: false` field documented above.
+rqmd query --no-expand "how does auth work"
 ```
+
+## Output Format
+
+`--format` accepts `cli` (default), `json`, `csv`, `md` (alias `markdown`),
+`xml`, or `files`; see the README's CLI reference for what each renders.
+Format choice does not change how query syntax is parsed — the rules above
+apply the same regardless of `--format`.
+
+## `rqmd similar`
+
+`rqmd similar <path>` takes a document reference — a file path or `#docid` —
+not a query string. None of the query-syntax rules on this page (lex/vec/hyde
+typed lines, expand, intent) apply to it.
