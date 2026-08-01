@@ -4,6 +4,35 @@
 
 ---
 
+## [0.6.5] - 2026-08-01
+### Fixed
+- `mcp --daemon` on a port that's already occupied used to print "started"
+  and exit 0 even though the child died immediately, because the child's
+  stderr went to `/dev/null` and the parent never checked whether the
+  server actually came up. The daemon now writes a pidfile, and the parent
+  pre-checks the port, waits for the daemon's `/health` endpoint after
+  spawning, and on failure surfaces the real log tail and exits non-zero
+  instead of reporting false success.
+- Added `mcp stop`/`mcp status`, backed by the same pidfile. Identity is
+  confirmed by cross-checking the recorded pid against the daemon's own
+  `/health` response (never a bare pid match, since pids get recycled),
+  so `stop`/`status` never signal an unrelated process and a stale
+  pidfile never blocks a fresh start.
+- The daemon now shuts down gracefully on SIGTERM/ctrl-c instead of
+  needing to be killed as an orphan, logs to a real file instead of
+  `/dev/null`, and `--daemon` now implies `--http` instead of conflicting
+  with it. `--host`/`RRQMD_MCP_HOST` is supported for non-loopback binds,
+  with a loud warning naming what's exposed (unauthenticated full-text
+  and semantic search, plus arbitrary file content via `get`).
+- Docs: removed the `SYNTAX.md` MCP `searches` array and REST `/query`
+  endpoint, neither of which exist — the `query`/`search` MCP tools take
+  the same `query` string as the CLI, served over the MCP protocol
+  itself (stdio or `/mcp`), with `/health` as the only bespoke REST
+  endpoint. Also removed the dead `RRQMD_CI`/`QMD_CI` README rows —
+  nothing in the codebase reads that variable.
+
+---
+
 ## [0.6.4] - 2026-08-01
 ### Fixed
 - `embed_fingerprint` (used to detect a stale vector index) was derived
