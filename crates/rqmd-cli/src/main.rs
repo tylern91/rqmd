@@ -41,8 +41,8 @@ enum Commands {
         collection: Option<String>,
         #[arg(short = 'n', default_value = "10")]
         num: usize,
-        #[arg(long, default_value = "cli")]
-        format: String,
+        #[arg(long, value_enum, default_value = "cli")]
+        format: format::Format,
         #[arg(long)]
         no_rerank: bool,
         #[arg(long)]
@@ -61,8 +61,8 @@ enum Commands {
         collection: Option<String>,
         #[arg(short = 'n', default_value = "10")]
         num: usize,
-        #[arg(long, default_value = "cli")]
-        format: String,
+        #[arg(long, value_enum, default_value = "cli")]
+        format: format::Format,
         #[arg(long)]
         full: bool,
     },
@@ -73,10 +73,18 @@ enum Commands {
         collection: Option<String>,
         #[arg(short = 'n', default_value = "10")]
         num: usize,
-        #[arg(long, default_value = "cli")]
-        format: String,
+        #[arg(long, value_enum, default_value = "cli")]
+        format: format::Format,
         #[arg(long)]
         full: bool,
+    },
+    /// Find documents most similar to an already-indexed one (by path or #docid)
+    Similar {
+        path: String,
+        #[arg(short = 'n', default_value = "10")]
+        num: usize,
+        #[arg(long, value_enum, default_value = "cli")]
+        format: format::Format,
     },
     /// Get document by path or docid (#abc123)
     Get {
@@ -85,8 +93,8 @@ enum Commands {
         max_lines: Option<usize>,
         #[arg(long)]
         no_line_numbers: bool,
-        #[arg(long, default_value = "cli")]
-        format: String,
+        #[arg(long, value_enum, default_value = "cli")]
+        format: format::Format,
     },
     /// Get multiple documents by glob or comma-separated list
     #[command(name = "multi-get")]
@@ -96,8 +104,8 @@ enum Commands {
         collection: Option<String>,
         #[arg(short = 'l', long)]
         max_lines: Option<usize>,
-        #[arg(long, default_value = "cli")]
-        format: String,
+        #[arg(long, value_enum, default_value = "cli")]
+        format: format::Format,
     },
     /// List collections or files in a collection
     Ls {
@@ -285,7 +293,7 @@ fn main() -> Result<()> {
             intent.as_deref(),
             collection.as_deref(),
             num,
-            &format,
+            format,
             no_rerank,
             full,
             no_expand,
@@ -301,7 +309,7 @@ fn main() -> Result<()> {
             &query,
             collection.as_deref(),
             num,
-            &format,
+            format,
             full,
         ),
         Commands::Vsearch {
@@ -315,15 +323,18 @@ fn main() -> Result<()> {
             &query,
             collection.as_deref(),
             num,
-            &format,
+            format,
             full,
         ),
+        Commands::Similar { path, num, format } => {
+            commands::similar::run_similar(&index_dir, &path, num, format)
+        }
         Commands::Get {
             path,
             max_lines,
             no_line_numbers,
             format,
-        } => commands::get::run_get(&index_dir, &path, max_lines, no_line_numbers, &format),
+        } => commands::get::run_get(&index_dir, &path, max_lines, no_line_numbers, format),
         Commands::MultiGet {
             pattern,
             collection,
@@ -334,7 +345,7 @@ fn main() -> Result<()> {
             &pattern,
             collection.as_deref(),
             max_lines,
-            &format,
+            format,
         ),
         Commands::Ls { path } => commands::get::run_ls(&index_dir, path.as_deref()),
         Commands::Collection(cmd) => commands::collection::run(&index_dir, cmd),

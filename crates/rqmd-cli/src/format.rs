@@ -1,6 +1,48 @@
+use std::collections::HashMap;
+use std::path::Path;
+
+use anyhow::{bail, Context, Result};
+use clap::ValueEnum;
 use rqmd_core::{extract_snippet, SearchResult};
 
-pub type Format = str;
+/// Output format shared by every `--format` flag in the CLI. Not every
+/// variant makes sense for every command — `print_document` rejects the
+/// list-oriented variants explicitly rather than silently rendering CLI
+/// output for a format it doesn't implement.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Format {
+    /// Human-readable, colorized terminal output (default).
+    Cli,
+    Json,
+    Csv,
+    #[value(alias = "markdown")]
+    Md,
+    Xml,
+    /// Real, absolute filesystem paths, one per line — pipe-friendly.
+    Files,
+}
+
+impl Format {
+    fn as_str(self) -> &'static str {
+        match self {
+            Format::Cli => "cli",
+            Format::Json => "json",
+            Format::Csv => "csv",
+            Format::Md => "md",
+            Format::Xml => "xml",
+            Format::Files => "files",
+        }
+    }
+}
+
+/// Join a collection's root filesystem path with a document's relative path
+/// to produce a real, absolute path usable outside rqmd (`cat`, `xargs`, …).
+pub fn resolve_absolute_path(collection_root: &str, rel_path: &str) -> String {
+    Path::new(collection_root)
+        .join(rel_path)
+        .to_string_lossy()
+        .into_owned()
+}
 
 // ── ANSI helpers ──────────────────────────────────────────────────────────────
 
@@ -310,14 +352,20 @@ pub fn highlight_terms(text: &str, query: &str) -> String {
 
 // ── Format dispatch ───────────────────────────────────────────────────────────
 
-pub fn print_results(results: &[SearchResult], format: &Format, show_full: bool, query: &str) {
+pub fn print_results(
+    results: &[SearchResult],
+    format: Format,
+    show_full: bool,
+    query: &str,
+    roots: &HashMap<String, String>,
+) {
     match format {
-        "json" => print_json(results, show_full, query),
-        "csv" => print_csv(results, show_full, query),
-        "md" | "markdown" => print_markdown(results, show_full, query),
-        "xml" => print_xml(results, show_full, query),
-        "files" => print_files(results),
-        _ => print_cli(results, show_full, query),
+        Format::Json => print_json(results, show_full, query),
+        Format::Csv => print_csv(results, show_full, query),
+        Format::Md => print_markdown(results, show_full, query),
+        Format::Xml => print_xml(results, show_full, query),
+        Format::Files => print_files(results, roots),
+        Format::Cli => print_cli(results, show_full, query),
     }
 }
 
@@ -565,27 +613,32 @@ fn print_xml(results: &[SearchResult], show_full: bool, query: &str) {
 // ── Files ─────────────────────────────────────────────────────────────────────
 // Mirrors `outputResults` files branch in qmd.ts (lines 2200–2211).
 
-fn print_files(results: &[SearchResult]) {
+fn print_files(results: &[SearchResult], roots: &HashMap<String, String>) {
     for r in results {
-        let ctx = r
-            .context
-            .as_deref()
-            .map(|c| format!(",\"{}\"", c.replace('"', "\"\"")))
-            .unwrap_or_default();
-        println!("#{},{:.2},{}{ctx}", r.docid, r.score, r.file);
+        match roots.get(&r.collection) {
+            Some(root) => println!("{}", resolve_absolute_path(root, &r.path)),
+            None => eprintln!(
+                "rqmd: warning: unknown collection {:?} for {} — skipping in --format files output",
+                r.collection, r.file
+            ),
+        }
     }
 }
 
 // ── Document output (for get / multi-get) ────────────────────────────────────
 
+/// `abs_path` is the document's real absolute filesystem path, pre-resolved
+/// by the caller (collection root + relative path) — required for
+/// `Format::Files` and ignored otherwise.
 pub fn print_document(
     file: &str,
     title: &str,
     body: &str,
-    format: &Format,
+    format: Format,
     max_lines: Option<usize>,
     line_numbers: bool,
-) {
+    abs_path: Option<&str>,
+) -> Result<()> {
     let text = if let Some(max) = max_lines {
         body.lines().take(max).collect::<Vec<_>>().join("\n")
     } else {
@@ -593,7 +646,7 @@ pub fn print_document(
     };
 
     match format {
-        "json" => {
+        Format::Json => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -604,10 +657,13 @@ pub fn print_document(
                 .unwrap_or_default()
             );
         }
-        "files" => {
-            println!("{file}");
+        Format::Files => {
+            let path = abs_path.context(
+                "cannot resolve an absolute path for --format files (unknown collection)",
+            )?;
+            println!("{path}");
         }
-        _ => {
+        Format::Cli => {
             println!("{}", b(&format!("# {title}")));
             println!("{}", dim(&format!("── {file} ──")));
             println!();
@@ -619,5 +675,12 @@ pub fn print_document(
                 println!("{text}");
             }
         }
+        Format::Csv | Format::Md | Format::Xml => {
+            bail!(
+                "--format {} is not supported for this command — use cli, json, or files",
+                format.as_str()
+            );
+        }
     }
+    Ok(())
 }

@@ -3,7 +3,7 @@
 //! Orchestrates rusqlite (metadata), Tantivy (BM25), usearch (HNSW), and
 //! the InferenceBackend (embed/rerank) to provide a hybrid search pipeline.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,6 +33,11 @@ use crate::{
 /// is capped at 100 — rerank builds one fresh `LlamaContext` per candidate,
 /// so its cost is linear in pool size.
 const RERANK_CANDIDATE_LIMIT: usize = 20;
+
+/// Cap on how many of a source document's chunks `similar_to_hash` will search
+/// against the HNSW index. A very long document would otherwise pay one HNSW
+/// search per chunk; callers are warned via `tracing::warn!` when this truncates.
+const SIMILAR_MAX_CHUNKS: usize = 8;
 
 /// BM25 strong-signal threshold — if the top normalized BM25 score exceeds this
 /// and the gap to second place is ≥ STRONG_SIGNAL_MIN_GAP, skip LLM query expansion.
@@ -443,6 +448,98 @@ impl Store {
         for (sim, doc, body) in ranked {
             let filepath = format!("{}/{}", doc.collection, doc.path);
             // Pick the first chunk as the snippet — no re-chunking needed.
+            let chunks = chunk_document(&body);
+            let best = chunks
+                .into_iter()
+                .next()
+                .map(|c| c.text)
+                .unwrap_or_default();
+            let docid = docid_from_hash(&doc.hash).to_string();
+            let ctx = get_context_for_path(&self.db, &doc.collection, &doc.path)
+                .ok()
+                .flatten();
+            results.push(SearchResult {
+                file: format!("rqmd://{filepath}"),
+                title: doc.title.clone(),
+                body,
+                best_chunk: best,
+                best_chunk_pos: 0,
+                score: sim,
+                docid,
+                collection: doc.collection,
+                path: doc.path,
+                context: ctx,
+            });
+        }
+        Ok(results)
+    }
+
+    /// Find documents most similar to an already-indexed document, identified by its
+    /// content hash. Reads previously computed chunk vectors straight out of the HNSW
+    /// index — no embedding model is invoked, so this works with a backend-less store
+    /// (`open_store_no_backend`) and never loads a model.
+    ///
+    /// Searches once per source chunk (capped at `SIMILAR_MAX_CHUNKS`; a document with
+    /// more chunks logs a warning naming the cap), keeping the best similarity per
+    /// neighbour document — mirroring `search_vec`'s per-document dedup — and never
+    /// returning the source document itself.
+    pub fn similar_to_hash(
+        &self,
+        hash: &str,
+        source_collection: &str,
+        source_path: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let mut vids = db::vids_for_hash(&self.db, hash)?;
+        if vids.is_empty() {
+            bail!("no stored vectors for this document — run `rqmd embed` first");
+        }
+        if vids.len() > SIMILAR_MAX_CHUNKS {
+            tracing::warn!(
+                total_chunks = vids.len(),
+                used = SIMILAR_MAX_CHUNKS,
+                "rqmd similar: document has more chunks than the cap — using only the first {SIMILAR_MAX_CHUNKS}"
+            );
+            vids.truncate(SIMILAR_MAX_CHUNKS);
+        }
+
+        let source_filepath = format!("{source_collection}/{source_path}");
+        let total_vectors = self.hnsw.size();
+        let k = limit
+            .saturating_mul(4)
+            .saturating_add(vids.len())
+            .max(limit + 1)
+            .min(total_vectors.max(1));
+
+        let mut by_doc: HashMap<String, (f32, crate::types::Document, String)> = HashMap::new();
+        for vid in vids {
+            let embedding = self.hnsw.get_vector(vid)?;
+            let hits = self.hnsw.search(&embedding, k)?;
+            for (hit_vid, sim) in hits {
+                let Some((doc, body)) = doc_for_vid(&self.db, hit_vid)? else {
+                    continue;
+                };
+                let filepath = format!("{}/{}", doc.collection, doc.path);
+                if filepath == source_filepath {
+                    continue;
+                }
+                let keep = match by_doc.get(&filepath) {
+                    Some((existing_sim, _, _)) => sim > *existing_sim,
+                    None => true,
+                };
+                if keep {
+                    by_doc.insert(filepath, (sim, doc, body));
+                }
+            }
+        }
+
+        let mut ranked: Vec<(f32, crate::types::Document, String)> = by_doc.into_values().collect();
+        ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(limit);
+
+        let mut results = Vec::with_capacity(ranked.len());
+        for (sim, doc, body) in ranked {
+            let filepath = format!("{}/{}", doc.collection, doc.path);
             let chunks = chunk_document(&body);
             let best = chunks
                 .into_iter()

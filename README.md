@@ -417,7 +417,7 @@ Paths below use the Linux default; on macOS the base is `~/Library/Caches/` inst
 |------|------|
 | Index + collections (SQLite) | `~/.cache/rqmd/index.sqlite` |
 | BM25 index (Tantivy) | `~/.cache/rqmd/tantivy/` |
-| Vector index (usearch) | `~/.cache/rqmd/vectors.usearch` |
+| Vector index (usearch) | `~/.cache/rqmd/hnsw.usearch` |
 | Model cache (HuggingFace) | `~/.cache/huggingface/hub/` |
 | Project-local index | `.rqmd/` (created by `rqmd init`) |
 

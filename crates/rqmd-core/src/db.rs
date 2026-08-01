@@ -536,6 +536,17 @@ pub fn doc_for_vid_meta(conn: &Connection, vid: u64) -> Result<Option<Document>>
     .context("doc_for_vid_meta")
 }
 
+/// Return all vids for a content hash's chunks, ordered by `seq` (chunk order).
+/// Used by `rqmd similar` to gather every chunk vector for a resolved document.
+pub fn vids_for_hash(conn: &Connection, hash: &str) -> Result<Vec<u64>> {
+    let mut stmt = conn.prepare("SELECT vid FROM content_vectors WHERE hash = ?1 ORDER BY seq")?;
+    let rows = stmt
+        .query_map(params![hash], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("vids_for_hash")?;
+    Ok(rows.into_iter().map(|v| v as u64).collect())
+}
+
 /// Load all (vid → (hash, seq)) pairs for rebuilding the HNSW index on startup.
 pub fn load_all_vid_mappings(conn: &Connection) -> Result<Vec<(u64, String, i64)>> {
     let mut stmt = conn
