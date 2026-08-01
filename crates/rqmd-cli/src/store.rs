@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use rqmd_core::{db, store as core_store, Store, StoreConfig};
 use rqmd_llm::{create_backend, no_backend, BackendKind, LlamaCppConfig};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use crate::format::Format;
 
 /// Resolve the index directory:
 ///   1. `--index-dir` flag / `RQMD_INDEX_DIR` env
@@ -83,4 +86,17 @@ pub fn warn_if_fingerprint_stale(s: &Store) {
              since last embed) — run `rqmd embed --rebuild` to refresh\x1b[0m"
         );
     }
+}
+
+/// Collection name → root filesystem path, needed to resolve a document's
+/// real absolute path for `--format files`. Only worth a DB round-trip when
+/// the chosen format actually needs it.
+pub fn collection_roots(s: &Store, format: Format) -> Result<HashMap<String, String>> {
+    if format != Format::Files {
+        return Ok(HashMap::new());
+    }
+    Ok(db::list_collections(&s.db)?
+        .into_iter()
+        .map(|c| (c.name, c.path))
+        .collect())
 }

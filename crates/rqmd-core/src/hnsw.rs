@@ -155,6 +155,21 @@ impl VectorIndex {
     pub fn size(&self) -> usize {
         self.inner.size()
     }
+
+    /// Fetch the stored vector for a given vid. Works on both writable and
+    /// `view()`-opened (mmap, read-only) indexes — `usearch::Index::get`
+    /// takes `&Index`, so reads never require mutable access.
+    pub fn get_vector(&self, vid: u64) -> Result<Vec<f32>> {
+        let mut buf = vec![0.0_f32; EMBED_DIM];
+        let found = self
+            .inner
+            .get(vid, &mut buf)
+            .map_err(|e| anyhow!("usearch get: {e}"))?;
+        if found == 0 {
+            bail!("no vector found for vid {vid}");
+        }
+        Ok(buf)
+    }
 }
 
 #[cfg(test)]
@@ -182,5 +197,28 @@ mod tests {
         assert!(viewed.add(&embedding).is_err());
         assert!(viewed.add_with_vid(99, &embedding).is_err());
         assert!(viewed.save(&path).is_err());
+    }
+
+    /// Load-bearing for `rqmd similar`: it must be able to read back a
+    /// stored vector from a `view()`-opened (mmap, read-only) index without
+    /// ever loading a model or mutating the index.
+    #[test]
+    fn get_vector_works_on_view_opened_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hnsw.usearch");
+
+        let mut writable = VectorIndex::new().unwrap();
+        let embedding: Vec<f32> = (0..EMBED_DIM).map(|i| i as f32 * 0.001).collect();
+        let vid = writable.add(&embedding).unwrap();
+        writable.save(&path).unwrap();
+
+        let viewed = VectorIndex::view(&path).unwrap();
+        let fetched = viewed.get_vector(vid).unwrap();
+        assert_eq!(fetched.len(), EMBED_DIM);
+        for (a, b) in fetched.iter().zip(embedding.iter()) {
+            assert!((a - b).abs() < 1e-4, "expected {b}, got {a}");
+        }
+
+        assert!(viewed.get_vector(vid + 1).is_err());
     }
 }
