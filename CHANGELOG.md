@@ -4,6 +4,38 @@
 
 ---
 
+## [0.6.1] - 2026-08-01
+### Fixed
+- `collection add`/`index update` no longer report success while indexing
+  zero files: a collection root under a dot-directory (e.g. a dotfiles
+  checkout) is now resolved relative to the collection root before the
+  exclusion scan, instead of matching dot-components in the absolute path.
+  Dot-directories nested inside the tree are still excluded by default; pass
+  `--hidden` to include them.
+- Frontmatter is now parsed: every note used to be titled `"---"` because the
+  YAML fence was indexed verbatim. Title now resolves from frontmatter
+  `title:` → first `#` heading → filename stem, the fence is stripped from
+  indexed/searched text, and `tags:`/`aliases:` values are folded in as extra
+  search terms. Content hashing runs over the stripped text, so a
+  metadata-only frontmatter edit no longer forces a full re-embed.
+- Multi-glob collection masks (`**/*.{md,mdx,txt}`, comma-separated patterns)
+  used to match zero or only some files, and `collection add` vs.
+  `index update` could silently disagree on membership. Both now share one
+  glob-set builder that errors loudly on a malformed pattern instead of
+  matching nothing.
+- Unreadable files were previously skipped with no count; the indexing
+  summary now reports skips by reason (not UTF-8, permission denied, I/O
+  error). `collection add <file>` on a non-directory path now fails instead
+  of persisting a document with an empty relative path.
+- README: corrected the documented index-storage path — `dirs::cache_dir()`
+  resolves to `~/Library/Caches/rqmd/` on macOS, not `~/.cache/rqmd/`.
+
+### Removed
+- `example-index.yml`, a stale artifact demonstrating the now-fixed
+  multi-extension glob bug.
+
+---
+
 ## [0.6.0] - 2026-07-31
 ### Added
 - Each GGUF model (embed, rerank, generate) now loads lazily on first use
