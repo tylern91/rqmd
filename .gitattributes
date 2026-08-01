@@ -13,6 +13,9 @@
 *.pdf     filter=lfs diff=lfs merge=lfs -text
 *.gguf    filter=lfs diff=lfs merge=lfs -text
 *.onnx    filter=lfs diff=lfs merge=lfs -text
-*.bin     filter=lfs diff=lfs merge=lfs -text
-*.tar.gz  filter=lfs diff=lfs merge=lfs -text
-*.zip     filter=lfs diff=lfs merge=lfs -text
+
+# *.tar.gz / *.zip / *.bin intentionally NOT LFS-tracked: release tarballs are built
+# in the CI runner workspace and never committed, so tracking them here is a pure
+# footgun — one accidental commit of a 6-9 MB tarball goes straight into LFS against
+# the 1 GB free quota. Re-add only if a real binary asset in one of these extensions
+# needs to be committed to the repo.
