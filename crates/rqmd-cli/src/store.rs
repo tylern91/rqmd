@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::format::Format;
 
 /// Resolve the index directory:
-///   1. `--index-dir` flag / `RQMD_INDEX_DIR` env
+///   1. `--index-dir` flag / `RRQMD_INDEX_DIR` env
 ///   2. `.rqmd/` in the current directory (project-local)
 ///   3. `~/.cache/rqmd/` (global default)
 pub fn resolve_index_dir(override_path: Option<&str>) -> Result<PathBuf> {
@@ -47,7 +47,7 @@ pub fn open_store_no_backend(index_dir: &Path, read_only: bool) -> Result<Store>
     Store::open(store_config(index_dir, read_only), no_backend())
 }
 
-/// Open a store with the inference backend selected by `RQMD_INFERENCE_BACKEND`
+/// Open a store with the inference backend selected by `RRQMD_INFERENCE_BACKEND`
 /// (or the provided override). Downloads models on first run.
 pub fn open_store_with_backend(index_dir: &Path, read_only: bool) -> Result<Store> {
     open_store_with_backend_kind(index_dir, &BackendKind::from_env(), read_only)
