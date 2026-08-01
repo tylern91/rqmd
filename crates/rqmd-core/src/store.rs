@@ -191,8 +191,9 @@ impl Store {
     /// Index a document for BM25 only — skips embedding. Useful for offline eval
     /// and commands that never run vector search (e.g. `rqmd eval --mode bm25`).
     ///
-    /// Returns [`IndexOutcome`] so callers (e.g. `rqmd update`) can report accurate
-    /// new / updated / unchanged counts rather than claiming everything as "updated".
+    /// Thin wrapper over [`Self::index_document_fts_only_with_raw`] that hashes
+    /// and indexes the same text it stores — the historical behavior, preserved
+    /// for callers (eval harness, existing tests) that have no raw/indexed split.
     pub fn index_document_fts_only(
         &mut self,
         collection: &str,
@@ -200,8 +201,35 @@ impl Store {
         title: &str,
         body: &str,
     ) -> Result<IndexOutcome> {
+        self.index_document_fts_only_with_raw(collection, rel_path, title, body, body)
+    }
+
+    /// Index a document for BM25 only, hashing/searching `indexed_text` while
+    /// storing `raw` as the retrievable content (`rqmd get` returns `raw`
+    /// verbatim).
+    ///
+    /// Deliberately hashes `indexed_text`, not `raw`: a metadata-only edit to a
+    /// document's frontmatter (e.g. an `updated:` timestamp bumped with no
+    /// change to the body, tags, or aliases) does NOT change the content hash,
+    /// so it does not force a full re-embed. The tradeoff is that the stored
+    /// raw content — and, if only the frontmatter `title:` scalar changed, the
+    /// stored title — can lag behind the file on disk by exactly the
+    /// frontmatter block, until a change to the indexed text forces a fresh
+    /// hash.
+    ///
+    /// Returns [`IndexOutcome`] so callers (e.g. `rqmd update`) can report
+    /// accurate new / updated / unchanged counts rather than claiming
+    /// everything as "updated".
+    pub fn index_document_fts_only_with_raw(
+        &mut self,
+        collection: &str,
+        rel_path: &str,
+        title: &str,
+        indexed_text: &str,
+        raw: &str,
+    ) -> Result<IndexOutcome> {
         let now = rfc3339_now();
-        let hash = content_hash(body);
+        let hash = content_hash(indexed_text);
 
         // Classify the change before upserting so we can return an honest outcome.
         let outcome = match db::get_document_by_filepath(&self.db, collection, rel_path)
@@ -222,12 +250,12 @@ impl Store {
             return Ok(IndexOutcome::Unchanged);
         }
 
-        upsert_content(&self.db, &hash, body, &now).context("upsert content")?;
+        upsert_content(&self.db, &hash, raw, &now).context("upsert content")?;
         let doc_id = upsert_document(&self.db, collection, rel_path, title, &hash, &now)
             .context("upsert document")?;
         let filepath = format!("{collection}/{rel_path}");
         self.fts
-            .add_document(&filepath, title, body, doc_id)
+            .add_document(&filepath, title, indexed_text, doc_id)
             .context("add to tantivy")?;
         Ok(outcome)
     }

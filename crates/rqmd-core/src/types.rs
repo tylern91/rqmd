@@ -10,6 +10,11 @@ pub struct Collection {
     pub ignore: Vec<String>,
     pub include_by_default: bool,
     pub update_command: Option<String>,
+    /// Persisted `--hidden` setting from `collection add` — `update` re-reads
+    /// this so re-indexing honors the same dot-directory policy the
+    /// collection was created with.
+    #[serde(default)]
+    pub allow_hidden: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

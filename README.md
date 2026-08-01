@@ -402,7 +402,7 @@ For Claude Desktop, add to `claude_desktop_config.json`:
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `RRQMD_INDEX_DIR` | path | `~/.cache/rqmd/` | Index storage directory |
+| `RRQMD_INDEX_DIR` | path | `~/.cache/rqmd/` (Linux) / `~/Library/Caches/rqmd/` (macOS) | Index storage directory |
 | `RRQMD_INFERENCE_BACKEND` | `llama`, `ort` | `llama` | Inference backend |
 | `RRQMD_ORT_EP` | `auto`, `coreml`, `cuda`, `directml`, `cpu` | `auto` | ONNX Runtime EP |
 | `RRQMD_FORCE_CPU` | `1` | *(unset)* | Disable GPU layers in LlamaCppBackend |
@@ -411,6 +411,8 @@ For Claude Desktop, add to `claude_desktop_config.json`:
 ---
 
 ## Where data lives
+
+Paths below use the Linux default; on macOS the base is `~/Library/Caches/` instead of `~/.cache/` (from `dirs::cache_dir()`).
 
 | What | Path |
 |------|------|
@@ -523,7 +525,7 @@ rqmd mcp --http --port 9000     # custom port
 | Aspect | Choice |
 |--------|--------|
 | Search backend | Tantivy (BM25) + usearch (HNSW) |
-| Index location | `~/.cache/rqmd/` |
+| Index location | `~/.cache/rqmd/` (Linux) / `~/Library/Caches/rqmd/` (macOS) |
 | Embed model | embeddinggemma-300M (GGUF, Metal/CPU) |
 | Rerank model | Qwen3-Reranker-0.6B (GGUF) |
 | ORT backend | ✓ CoreML / CUDA / DirectML (feature-gated) |
@@ -549,7 +551,7 @@ See [BENCHMARK.md](BENCHMARK.md) for the de-risking spike results (inference bac
 | Search pipeline | BM25 + vector + RRF + rerank | Same pipeline, same parameters |
 | MCP server identity | `qmd` | `rqmd` |
 | Chunking | tree-sitter AST-aware | Regex heuristic (headings, code fences, lists) |
-| Index location | `~/.cache/qmd/` | `~/.cache/rqmd/` |
+| Index location | `~/.cache/qmd/` | `~/.cache/rqmd/` (Linux) / `~/Library/Caches/rqmd/` (macOS) |
 | File exclusion | `.gitignore` aware | Built-in exclusions + per-collection `ignore` list |
 
 Search quality is equivalent — the RRF formula, BM25 field weights, chunk size (900 tokens / 15% overlap), and docid scheme are all ported verbatim from qmd.
@@ -558,7 +560,7 @@ Search quality is equivalent — the RRF formula, BM25 field weights, chunk size
 
 ## Migrating from qmd
 
-rqmd uses its own index at `~/.cache/rqmd/` — existing qmd collections need to be re-added:
+rqmd uses its own index at `~/.cache/rqmd/` (Linux) / `~/Library/Caches/rqmd/` (macOS) — existing qmd collections need to be re-added:
 
 ```sh
 rqmd collection add ~/path/to/your/docs --name your-collection
@@ -656,5 +658,5 @@ rqmd embed                    # downloads models on first run (~900 MB)
 ```
 
 Your existing collections need to be re-added (rqmd uses its own index at
-`~/.cache/rqmd/`), but the search commands and MCP surface work the same way.
+`~/.cache/rqmd/` on Linux, `~/Library/Caches/rqmd/` on macOS), but the search commands and MCP surface work the same way.
 See [Migrating from qmd](#migrating-from-qmd) for the full env-var mapping.

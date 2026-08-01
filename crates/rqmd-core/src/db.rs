@@ -76,7 +76,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             ignore_patterns    TEXT,
             include_by_default INTEGER DEFAULT 1,
             update_command     TEXT,
-            context            TEXT
+            context            TEXT,
+            allow_hidden       INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS store_config (
@@ -85,6 +86,43 @@ fn init_schema(conn: &Connection) -> Result<()> {
         );
     "#,
     )?;
+    // `allow_hidden` is this codebase's first schema migration: the CREATE TABLE
+    // above is a no-op against a database that already has `store_collections`
+    // from before this column existed, so existing installs need an explicit
+    // ALTER TABLE to catch up.
+    ensure_column(
+        conn,
+        "store_collections",
+        "allow_hidden",
+        "allow_hidden INTEGER NOT NULL DEFAULT 0",
+    )?;
+    Ok(())
+}
+
+/// Add `column` to `table` if it isn't already present, by running
+/// `ALTER TABLE <table> ADD COLUMN <ddl>`. Idempotent — safe to call on every
+/// startup regardless of whether the column was just added to the `CREATE
+/// TABLE` DDL above or already exists from a prior run.
+///
+/// Deliberately minimal: a single guarded ALTER, not a general migration
+/// framework. `table` and `column` are always internal constants (never user
+/// input), so building the PRAGMA/ALTER statements with `format!` carries no
+/// injection risk.
+fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .context("prepare table_info")?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("query table_info")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("read table_info rows")?
+        .iter()
+        .any(|name| name == column);
+    if !exists {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {ddl}"), [])
+            .with_context(|| format!("add column {table}.{column}"))?;
+    }
     Ok(())
 }
 
@@ -478,14 +516,15 @@ pub fn upsert_collection(conn: &Connection, c: &Collection) -> Result<()> {
     let ignore = serde_json::to_string(&c.ignore)?;
     conn.execute(
         r#"
-        INSERT INTO store_collections(name, path, pattern, ignore_patterns, include_by_default, update_command)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        INSERT INTO store_collections(name, path, pattern, ignore_patterns, include_by_default, update_command, allow_hidden)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         ON CONFLICT(name) DO UPDATE SET
             path               = excluded.path,
             pattern            = excluded.pattern,
             ignore_patterns    = excluded.ignore_patterns,
             include_by_default = excluded.include_by_default,
-            update_command     = excluded.update_command
+            update_command     = excluded.update_command,
+            allow_hidden       = excluded.allow_hidden
         "#,
         params![
             c.name,
@@ -494,13 +533,16 @@ pub fn upsert_collection(conn: &Connection, c: &Collection) -> Result<()> {
             ignore,
             c.include_by_default as i64,
             c.update_command,
+            c.allow_hidden as i64,
         ],
     )?;
     Ok(())
 }
 
 pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>> {
-    let mut stmt = conn.prepare("SELECT name, path, pattern, ignore_patterns, include_by_default, update_command FROM store_collections")?;
+    let mut stmt = conn.prepare(
+        "SELECT name, path, pattern, ignore_patterns, include_by_default, update_command, allow_hidden FROM store_collections",
+    )?;
     let rows = stmt
         .query_map([], |row| {
             Ok((
@@ -510,24 +552,28 @@ pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>> {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     rows.into_iter()
-        .map(|(name, path, pattern, ignore_json, include, update)| {
-            let ignore: Vec<String> = ignore_json
-                .map(|j| serde_json::from_str(&j).unwrap_or_default())
-                .unwrap_or_default();
-            Ok(Collection {
-                name,
-                path,
-                pattern,
-                ignore,
-                include_by_default: include != 0,
-                update_command: update,
-            })
-        })
+        .map(
+            |(name, path, pattern, ignore_json, include, update, allow_hidden)| {
+                let ignore: Vec<String> = ignore_json
+                    .map(|j| serde_json::from_str(&j).unwrap_or_default())
+                    .unwrap_or_default();
+                Ok(Collection {
+                    name,
+                    path,
+                    pattern,
+                    ignore,
+                    include_by_default: include != 0,
+                    update_command: update,
+                    allow_hidden: allow_hidden != 0,
+                })
+            },
+        )
         .collect()
 }
 

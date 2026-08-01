@@ -6,7 +6,7 @@ use walkdir::WalkDir;
 
 use rqmd_core::{db, store as core_store, IndexOutcome, PendingVectorMeta};
 
-use crate::{format as fmt, store};
+use crate::{document, exclusions, format as fmt, store};
 
 pub fn run_status(index_dir: &Path) -> Result<()> {
     let s = store::open_store_no_backend(index_dir, true)?;
@@ -487,66 +487,63 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             }
         }
 
-        let ext = col
-            .pattern
-            .rsplit('/')
-            .next()
-            .and_then(|base| base.rsplit('.').next())
-            .filter(|e| *e != "*")
-            .map(|e| e.to_string());
-
-        let ignore_set = crate::exclusions::build_ignore_set(&col.ignore);
+        let include_set = match exclusions::build_include_set(&col.pattern) {
+            Ok(set) => set,
+            Err(e) => {
+                eprintln!(
+                    "  WARN: {}: invalid mask '{}': {e:#}",
+                    col.name, col.pattern
+                );
+                continue;
+            }
+        };
+        let ignore_set = exclusions::build_ignore_set(&col.ignore);
 
         let mut new_count = 0usize;
         let mut updated_count = 0usize;
         let mut unchanged_count = 0usize;
         let mut processed = 0usize;
+        let mut skips = document::SkipCounts::default();
 
         // Pre-collect matching paths so we know the total before indexing begins,
-        // enabling "Indexing: N/total" progress (matching qmd's output).
-        let files: Vec<std::path::PathBuf> = WalkDir::new(dir)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .map(|e| e.into_path())
-            .filter(|p| p.is_file())
-            .filter(|p| !crate::exclusions::is_excluded(p, dir, &ignore_set))
-            .filter(|p| match &ext {
-                Some(ext_filter) => {
-                    p.extension().and_then(|e| e.to_str()) == Some(ext_filter.as_str())
-                }
-                None => true,
-            })
-            .collect();
+        // enabling "Indexing: N/total" progress (matching qmd's output). Reuses the
+        // same walk/filter logic `collection add` uses, so a re-index can't silently
+        // disagree with the original add about which files belong in the collection.
+        let files = document::collect_candidates(dir, &include_set, &ignore_set, col.allow_hidden);
         let total = files.len();
+        if total == 0 {
+            eprintln!(
+                "  WARN: mask '{}' matched 0 files under {} (try --hidden if content lives under a dot-directory)",
+                col.pattern,
+                dir.display()
+            );
+        }
 
         for path in &files {
-            let rel = path
-                .strip_prefix(dir)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string();
-            let body = match std::fs::read_to_string(path) {
-                Ok(b) => b,
-                Err(_) => continue,
+            let doc = match document::prepare(path, dir) {
+                Ok(doc) => doc,
+                Err(reason) => {
+                    skips.record(reason);
+                    processed += 1;
+                    continue;
+                }
             };
-            let title = body
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or(&rel)
-                .trim_start_matches('#')
-                .trim()
-                .to_string();
 
             processed += 1;
             if is_tty {
-                let line = format!("Indexing: {processed}/{total} {rel}");
+                let line = format!("Indexing: {processed}/{total} {}", doc.rel_path);
                 let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
                 eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
             }
 
-            match s.index_document_fts_only(&col.name, &rel, &title, &body) {
-                Err(e) => eprintln!("  WARN: {rel}: {e:#}"),
+            match s.index_document_fts_only_with_raw(
+                &col.name,
+                &doc.rel_path,
+                &doc.title,
+                &doc.indexed_text,
+                &doc.raw,
+            ) {
+                Err(e) => eprintln!("  WARN: {}: {e:#}", doc.rel_path),
                 Ok(IndexOutcome::New) => new_count += 1,
                 Ok(IndexOutcome::Updated) => updated_count += 1,
                 Ok(IndexOutcome::Unchanged) => unchanged_count += 1,
@@ -559,9 +556,15 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             eprint!("\r\x1b[2K");
         }
 
-        // Summary line matching qmd's "Indexed: X new, Y updated..." (qmd.ts:735).
+        // Summary line matching qmd's "Indexed: X new, Y updated..." (qmd.ts:735), extended
+        // with an honest skip-reason breakdown instead of silently dropping unreadable files.
+        let skip_suffix = if skips.total() > 0 {
+            format!(", skipped {} ({})", skips.total(), skips.describe())
+        } else {
+            String::new()
+        };
         println!(
-            "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, 0 removed"
+            "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, 0 removed{skip_suffix}"
         );
     }
 
