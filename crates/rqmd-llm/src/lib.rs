@@ -1,12 +1,12 @@
-//! qmd-llm — inference backend abstraction and llama-cpp-2 implementation.
+//! rqmd-llm — inference backend abstraction and llama-cpp-2 implementation.
 //!
 //! Feature flags:
 //!   (default)    — LlamaCppBackend via llama-cpp-2 (GGUF, Metal/CUDA/Vulkan)
 //!   ort-backend  — OrtBackend via ONNX Runtime (CoreML/CUDA/DirectML/CPU)
 //!
 //! Backend selection at runtime (read by `create_backend()`):
-//!   RQMD_INFERENCE_BACKEND=llama|ort   (default: llama)
-//!   RQMD_ORT_EP=auto|coreml|cuda|directml|cpu
+//!   RRQMD_INFERENCE_BACKEND=llama|ort   (default: llama)
+//!   RRQMD_ORT_EP=auto|coreml|cuda|directml|cpu
 //!
 //! All API shapes validated against llama-cpp-2 v0.1.150 in spike-inference.
 //! Critical gotchas (all confirmed by spike):
@@ -239,8 +239,8 @@ pub struct LlamaCppBackend {
 impl LlamaCppBackend {
     /// Download models via hf-hub and initialize. Blocks the current thread.
     pub fn new(mut config: LlamaCppConfig) -> Result<Self> {
-        // Honour RQMD_FORCE_CPU=1: disable Metal/CUDA offload for both models.
-        // Matches the TS original's RQMD_FORCE_CPU contract documented in README.
+        // Honour RRQMD_FORCE_CPU=1: disable Metal/CUDA offload for both models.
+        // Matches the TS original's RRQMD_FORCE_CPU contract documented in README.
         let force_cpu = std::env::var("RRQMD_FORCE_CPU")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
@@ -708,8 +708,8 @@ pub use ort_backend::{OrtBackend, OrtConfig, OrtEp};
 
 /// Backend selection. Read by `create_backend()`.
 ///
-///   RQMD_INFERENCE_BACKEND=llama|ort  (default: llama)
-///   RQMD_ORT_EP=auto|coreml|cuda|directml|cpu
+///   RRQMD_INFERENCE_BACKEND=llama|ort  (default: llama)
+///   RRQMD_ORT_EP=auto|coreml|cuda|directml|cpu
 #[derive(Debug, Clone)]
 pub enum BackendKind {
     Llama,
