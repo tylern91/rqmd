@@ -61,6 +61,23 @@ const EMBED_CONTEXT_SIZE: usize = 2048;
 /// BOS/EOS overhead margin, matching qmd (src/llm.ts:1291 `maxTokens - 4`).
 const EMBED_TOKEN_MARGIN: usize = 4;
 
+/// EmbeddingGemma's documented query-side prompt template.
+const EMBEDDINGGEMMA_QUERY_PREFIX: &str = "task: search result | query: ";
+/// EmbeddingGemma's documented passage-side prompt template, using the documented
+/// "no title" fallback — threading real chunk titles through is not worth the plumbing.
+const EMBEDDINGGEMMA_PASSAGE_PREFIX: &str = "title: none | text: ";
+
+/// L2-normalize a vector in place, matching `InferenceBackend::embed`'s documented
+/// unit-normalized contract. Mirrors `ort_backend::l2_normalize`; duplicated rather
+/// than shared because `ort_backend` is feature-gated and not built by default.
+fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
+    let norm = v.iter().map(|&x| x * x).sum::<f32>().sqrt().max(1e-12);
+    for x in &mut v {
+        *x /= norm;
+    }
+    v
+}
+
 // ── InferenceBackend trait ────────────────────────────────────────────────────
 
 /// Core inference operations needed by qmd's search pipeline.
@@ -73,6 +90,30 @@ pub trait InferenceBackend: Send {
         let mut out = Vec::with_capacity(texts.len());
         for text in texts {
             out.push(self.embed(text)?);
+        }
+        Ok(out)
+    }
+
+    /// Embed text that will be matched against via `hnsw.search()` — a search query,
+    /// or (for HyDE) a hypothetical document that plays the query's role in the
+    /// pipeline. Default: identical to `embed`. Backends whose model documents an
+    /// asymmetric query/passage prompt convention (e.g. EmbeddingGemma) override this.
+    fn embed_query(&mut self, text: &str) -> Result<Vec<f32>> {
+        self.embed(text)
+    }
+
+    /// Embed text that will be stored and matched against via `hnsw.add()` — an
+    /// indexed document chunk. Default: identical to `embed`. See `embed_query`.
+    fn embed_passage(&mut self, text: &str) -> Result<Vec<f32>> {
+        self.embed(text)
+    }
+
+    /// Batched form of `embed_passage`. Default: sequential loop — override for
+    /// batched acceleration.
+    fn embed_batch_passage(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let mut out = Vec::with_capacity(texts.len());
+        for text in texts {
+            out.push(self.embed_passage(text)?);
         }
         Ok(out)
     }
@@ -427,7 +468,15 @@ impl InferenceBackend for LlamaCppBackend {
         batch.add_sequence(&tokens, 0, true)?;
         ctx.encode(&mut batch).context("encode")?;
         let emb = ctx.embeddings_seq_ith(0).context("embedding extract")?;
-        Ok(emb.to_vec())
+        Ok(l2_normalize(emb.to_vec()))
+    }
+
+    fn embed_query(&mut self, text: &str) -> Result<Vec<f32>> {
+        self.embed(&format!("{EMBEDDINGGEMMA_QUERY_PREFIX}{text}"))
+    }
+
+    fn embed_passage(&mut self, text: &str) -> Result<Vec<f32>> {
+        self.embed(&format!("{EMBEDDINGGEMMA_PASSAGE_PREFIX}{text}"))
     }
 
     fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>> {
