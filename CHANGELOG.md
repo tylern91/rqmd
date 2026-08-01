@@ -4,6 +4,22 @@
 
 ---
 
+## [0.8.1] - 2026-08-01
+### Documentation
+- `README.md` and `docs/SYNTAX.md` brought up to date with the v0.7.0 CLI
+  surface: `similar`, `mcp status`/`stop`, `--rebuild`, `--mask`/`--hidden`,
+  `--host`, `--no-expand`, and the real four-counter `update` summary;
+  `--format` expanded to all six values; the rerank candidate-pool cap
+  explained; the "hidden files always skipped" claim corrected; a Quick
+  Start example fixed (missing trailing slash on `context add`); an MCP
+  `--host` security warning and tool-parameters reference added; three new
+  sections (Score interpretation, How it works + smart chunking, Model
+  configuration); `docs/SYNTAX.md` rebranded from `qmd` to `rqmd` and
+  corrected on tokenization (exact-token match, not prefix; OR-combined
+  multi-term queries).
+
+---
+
 ## [0.8.0] - 2026-08-01
 ### Fixed
 - `-c`/`--collection` on `query`, `search`, `vsearch`, and `multi-get` was
