@@ -550,6 +550,36 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             }
         }
 
+        // Prune documents whose file is no longer on disk (deleted or renamed away).
+        // Built from `files` — the raw walked candidate list — not from the set of
+        // docs that made it through `prepare` above: a file that still exists but
+        // failed to read this run (permission denied, transient I/O error) is still
+        // *present* and must not be soft-deleted just because this pass couldn't
+        // read it. Skipped entirely when the mask matched 0 files (warned above) —
+        // a config/mount glitch must never read as "delete everything".
+        let removed_count = if total > 0 {
+            let present_paths: HashSet<String> = files
+                .iter()
+                .map(|p| {
+                    p.strip_prefix(dir)
+                        .unwrap_or(p)
+                        .to_string_lossy()
+                        .to_string()
+                })
+                .collect();
+            let removed = db::deactivate_missing_documents(&s.db, &col.name, &present_paths)
+                .context("deactivate missing documents")?;
+            for path in &removed {
+                let filepath = format!("{}/{path}", col.name);
+                if let Err(e) = s.remove_from_fts(&filepath) {
+                    eprintln!("  WARN: failed to remove stale FTS entry for {filepath}: {e:#}");
+                }
+            }
+            removed.len()
+        } else {
+            0
+        };
+
         s.flush()?;
 
         if is_tty {
@@ -564,7 +594,7 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             String::new()
         };
         println!(
-            "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, 0 removed{skip_suffix}"
+            "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, {removed_count} removed{skip_suffix}"
         );
     }
 
@@ -684,6 +714,19 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
             println!(
                 "    Run 'rqmd embed --rebuild' to re-embed everything under the current model"
             );
+        }
+
+        // Orphaned-vector check: `rqmd update` soft-deletes documents whose file was
+        // removed or renamed (active=0) rather than hard-deleting, so their
+        // content_vectors/HNSW vids survive but become unreachable — every
+        // vector→document join requires an active document. Say this plainly rather
+        // than implying the space is freed; only `embed --rebuild` reclaims it.
+        let orphaned_vectors = db::count_orphaned_vectors(&s.db).unwrap_or(0);
+        if orphaned_vectors > 0 {
+            println!(
+                "\n  \x1b[33m⚠ {orphaned_vectors} orphaned vector(s)\x1b[0m — left behind by documents removed or renamed since their last embed. Unreachable in search but not yet freed from the HNSW file."
+            );
+            println!("    Run 'rqmd embed --rebuild' to reclaim the space");
         }
 
         // Recommended next steps.
