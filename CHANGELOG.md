@@ -4,6 +4,31 @@
 
 ---
 
+## [0.7.0] - 2026-08-01
+### Added
+- `rqmd similar <path|#docid>` finds documents most similar to an
+  already-indexed one, reusing the existing HNSW index directly — no
+  model load required.
+
+### Changed
+- `--format` is now a validated enum instead of a bare string: an
+  unsupported value (e.g. a typo, or a format a given command doesn't
+  support like `get --format md`) now fails fast instead of silently
+  falling back to human-readable CLI rendering.
+- `--format files` now emits real, absolute filesystem paths (collection
+  root joined with the relative path), one per line, instead of the old
+  synthetic `#docid,score,file` shape — the old output wasn't a real
+  path and couldn't be piped to `xargs`/`cat`. Scripts parsing the old
+  `files` shape need to switch to plain path handling.
+
+### Fixed
+- Fixed stale single-R `RQMD_*` env var names in `rqmd-cli/src/store.rs`
+  doc comments and a stale `vectors.usearch` path in the README; the var
+  actually read is `RRQMD_INDEX_DIR`/`RRQMD_INFERENCE_BACKEND` and the
+  on-disk file is `hnsw.usearch`.
+
+---
+
 ## [0.6.5] - 2026-08-01
 ### Fixed
 - `mcp --daemon` on a port that's already occupied used to print "started"
