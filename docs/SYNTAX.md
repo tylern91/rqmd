@@ -137,10 +137,10 @@ qmd query -c docs "how does auth work"
 qmd query -c docs -c notes $'lex: auth\nvec: authentication flow'
 ```
 
-For MCP / HTTP, pass a plural `collections` array (OR match):
+For MCP, pass a plural `collections` array (OR match):
 
 ```json
-{ "searches": [ { "type": "lex", "query": "auth" } ], "collections": ["docs", "notes"] }
+{ "query": "lex: auth", "collections": ["docs", "notes"] }
 ```
 
 `-c`/`collections` matches by collection name and works from any directory.
@@ -149,17 +149,17 @@ are searched; collections marked excluded (`qmd collection exclude <name>`) are
 skipped unless explicitly named. In MCP the parameter is the plural `collections`
 array — a singular `collection` is silently ignored.
 
-## MCP/HTTP API
+## MCP API
 
-The `query` tool (and the REST `/query` endpoint) accept a structured query with a
-`searches` array. There is no `q` string parameter — `searches` is required:
+The `query` tool takes the same `query` string as the CLI — plain text, or a
+multi-line typed document with `lex:`/`vec:`/`hyde:`/`intent:` lines. There is no
+`searches` array and no separate REST query endpoint; `query` is served over the
+MCP protocol itself (stdio, or `/mcp` when running with `--http`/`--daemon` — see
+`GET /health` on the same port for daemon liveness, not for search).
 
 ```json
 {
-  "searches": [
-    { "type": "lex", "query": "CAP theorem" },
-    { "type": "vec", "query": "consistency vs availability" }
-  ],
+  "query": "lex: CAP theorem\nvec: consistency vs availability",
   "collections": ["docs"],
   "limit": 10
 }
@@ -169,12 +169,15 @@ With intent:
 
 ```json
 {
-  "searches": [
-    { "type": "lex", "query": "performance" }
-  ],
+  "query": "lex: performance",
   "intent": "web page load times and Core Web Vitals"
 }
 ```
+
+Other `query` fields: `rerank` (default `true`, set `false` to skip LLM
+reranking) and `expand` (default `true`, set `false` to skip query-expansion/HyDE).
+The `search` tool takes the same `query`/`collections`/`limit` shape for
+BM25-only lookups.
 
 ## CLI
 

@@ -406,7 +406,6 @@ For Claude Desktop, add to `claude_desktop_config.json`:
 | `RRQMD_INFERENCE_BACKEND` | `llama`, `ort` | `llama` | Inference backend |
 | `RRQMD_ORT_EP` | `auto`, `coreml`, `cuda`, `directml`, `cpu` | `auto` | ONNX Runtime EP |
 | `RRQMD_FORCE_CPU` | `1` | *(unset)* | Disable GPU layers in LlamaCppBackend |
-| `RRQMD_CI` | `1` | *(unset)* | Skip model downloads (CI / offline use) |
 
 ---
 
@@ -575,7 +574,6 @@ All environment variables are prefixed `RRQMD_` instead of `QMD_`:
 | `QMD_INFERENCE_BACKEND` | `RRQMD_INFERENCE_BACKEND` |
 | `QMD_ORT_EP` | `RRQMD_ORT_EP` |
 | `QMD_FORCE_CPU` | `RRQMD_FORCE_CPU` |
-| `QMD_CI` | `RRQMD_CI` |
 
 The MCP server now identifies as `rqmd` — update any `claude_desktop_config.json` entries accordingly.
 
