@@ -4,6 +4,29 @@
 
 ---
 
+## [0.6.2] - 2026-08-01
+### Fixed
+- Collection scoping (`-c <collection>`) no longer returns false-empty when
+  the target collection is a small minority of a larger corpus: BM25 now
+  pushes a must-clause down onto the indexed `filepath` field to narrow the
+  candidate pool before the existing exact-prefix post-filter, and vector
+  search widens its candidate count until enough in-scope hits are found.
+- `vsearch`/hybrid search no longer return the same document once per chunk:
+  both vector search and RRF fusion now dedupe to the best-scoring chunk per
+  document. This also removes RRF's systematic bias toward long documents,
+  which previously accumulated a rank-based score once per chunk.
+  `-n`/`--limit` is no longer silently capped at 20 — the internal rerank
+  candidate pool now scales with the requested limit
+  (`clamp(limit*2, RERANK_CANDIDATE_LIMIT, 100)`), warning when it's capped.
+- A query containing FTS special syntax (e.g. a colon read as a field
+  specifier) no longer degrades to a silent empty result — parsing is now
+  lenient, with a warning logged on partial parse failures.
+- `collection exclude` (`include_by_default = 0`) is no longer a no-op:
+  default-scope queries now resolve the included-collection set once per
+  query and skip scoping entirely when every collection is included.
+
+---
+
 ## [0.6.1] - 2026-08-01
 ### Fixed
 - `collection add`/`index update` no longer report success while indexing
