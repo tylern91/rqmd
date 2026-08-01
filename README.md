@@ -97,19 +97,25 @@ LLAMA_METAL=0 cargo install --git https://github.com/tylern91/rqmd --locked rqmd
 ### Prebuilt binary (manual download)
 
 Download from the [latest GitHub Release](https://github.com/tylern91/rqmd/releases/latest),
-then verify and install:
+then verify and install. Asset names carry the version (e.g.
+`rqmd-v0.8.0-aarch64-apple-darwin.tar.gz`), so resolve the tag first rather than guessing
+an unversioned filename:
 
 ```sh
+VERSION="$(curl -fsSL https://api.github.com/repos/tylern91/rqmd/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+
 # macOS arm64
-curl -fLO https://github.com/tylern91/rqmd/releases/latest/download/rqmd-aarch64-apple-darwin.tar.gz
-shasum -a 256 -c rqmd-aarch64-apple-darwin.tar.gz.sha256
-tar -xf rqmd-aarch64-apple-darwin.tar.gz
+curl -fLO "https://github.com/tylern91/rqmd/releases/download/${VERSION}/rqmd-${VERSION}-aarch64-apple-darwin.tar.gz"
+curl -fLO "https://github.com/tylern91/rqmd/releases/download/${VERSION}/rqmd-${VERSION}-aarch64-apple-darwin.tar.gz.sha256"
+shasum -a 256 -c "rqmd-${VERSION}-aarch64-apple-darwin.tar.gz.sha256"
+tar -xf "rqmd-${VERSION}-aarch64-apple-darwin.tar.gz"
 install -m 0755 rqmd ~/.local/bin/rqmd   # or /usr/local/bin/rqmd
 
 # Linux x86_64
-curl -fLO https://github.com/tylern91/rqmd/releases/latest/download/rqmd-x86_64-unknown-linux-gnu.tar.gz
-shasum -a 256 -c rqmd-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xf rqmd-x86_64-unknown-linux-gnu.tar.gz
+curl -fLO "https://github.com/tylern91/rqmd/releases/download/${VERSION}/rqmd-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+curl -fLO "https://github.com/tylern91/rqmd/releases/download/${VERSION}/rqmd-${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256"
+shasum -a 256 -c "rqmd-${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256"
+tar -xf "rqmd-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 install -m 0755 rqmd ~/.local/bin/rqmd
 ```
 
