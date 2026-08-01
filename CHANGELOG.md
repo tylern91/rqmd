@@ -4,6 +4,34 @@
 
 ---
 
+## [0.6.4] - 2026-08-01
+### Fixed
+- `embed_fingerprint` (used to detect a stale vector index) was derived
+  from hardcoded literals that happened to match the chunking constants
+  at one point in time, so a chunking change was permanently
+  undetectable. It's now derived from the actual chunking constants.
+- Embedding now applies the model's documented query/passage prompt
+  asymmetry instead of embedding queries and document chunks
+  identically; HyDE's hypothetical-document text is embedded on the
+  passage side, since that's the subspace it needs to land in to work.
+- The llama.cpp backend now L2-normalizes its embedding output, matching
+  the documented contract and the ONNX Runtime backend's existing
+  behavior (previously the two backends silently disagreed). Cosine
+  similarity is scale-invariant, so result ordering is unaffected.
+- `doctor`, `embed` (without `--rebuild`), `query`, and `vsearch` now
+  share one stale-fingerprint check that warns instead of silently
+  degrading or auto-rebuilding, and correctly flags a single uniformly
+  stale index — not just a mix of fingerprints.
+- Fixed stale single-R `RQMD_*` env var names in `rqmd-llm` doc
+  comments; the vars actually read are `RRQMD_INFERENCE_BACKEND`,
+  `RRQMD_ORT_EP`, and `RRQMD_FORCE_CPU`.
+
+**Note:** every fix above shifts the embedding fingerprint, so upgrading
+triggers one re-embed (`rqmd embed --rebuild`) rather than three
+separate ones across future releases.
+
+---
+
 ## [0.6.3] - 2026-08-01
 ### Fixed
 - `update` no longer reports a hardcoded "0 removed": it now diffs the
