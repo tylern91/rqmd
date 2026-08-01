@@ -4,6 +4,18 @@
 
 ---
 
+## [0.8.0] - 2026-08-01
+### Fixed
+- `-c`/`--collection` on `query`, `search`, `vsearch`, and `multi-get` was
+  declared as a single-valued flag even though it was documented as
+  repeatable and OR-matched across collections. Passing `-c a -c b`
+  silently kept only the last value (`b`) and dropped `a` — no error, no
+  warning, just a narrower result set than requested. The flag is now
+  genuinely repeatable, wired through the existing multi-collection
+  plumbing already used by the MCP server.
+
+---
+
 ## [0.7.0] - 2026-08-01
 ### Added
 - `rqmd similar <path|#docid>` finds documents most similar to an
