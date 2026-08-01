@@ -23,6 +23,9 @@ Built on the search pipeline and ideas of **[tobi/qmd](https://github.com/tobi/q
 - [Workspace layout](#workspace-layout)
 - [Crate API](#crate-api)
 - [Design decisions](#design-decisions)
+- [Score interpretation](#score-interpretation)
+- [How it works](#how-it-works)
+- [Model configuration](#model-configuration)
 - [Differences from qmd](#differences-from-qmd)
 - [Migrating from qmd](#migrating-from-qmd)
 - [Troubleshooting](#troubleshooting)
@@ -52,6 +55,8 @@ rqmd ships as a ~60MB self-contained binary with no runtime dependencies:
 | Cross-encoder reranking | ✅ |
 | MCP server (stdio + HTTP) | ✅ |
 | Query expansion (lex/vec/hyde via LLM) | ✅ |
+| Similar-document search (`rqmd similar`) | ✅ |
+| MCP daemon lifecycle management (`mcp status`/`mcp stop`) | ✅ |
 
 Plain-text queries are auto-expanded by a local Qwen3-1.7B model
 (`ggml-org/Qwen3-1.7B-GGUF`, downloaded on first `rqmd query`) into `lex`/`vec`/`hyde`
@@ -171,13 +176,14 @@ RUSTFLAGS="-C target-feature=+crt-static" \
 ```sh
 # Index a directory
 rqmd collection add ~/notes --name notes
-rqmd context add rqmd://notes "Personal notes and ideas"
+rqmd context add rqmd://notes/ "Personal notes and ideas"
 rqmd embed                          # downloads GGUF models on first run (~900MB)
 
 # Search
 rqmd search "project timeline"      # BM25 keyword
 rqmd vsearch "deployment process"   # vector similarity
 rqmd query "quarterly planning"     # hybrid BM25 + vector + rerank + LLM expansion (best quality)
+rqmd similar notes/project-plan.md  # find documents most similar to an already-indexed one
 
 # MCP server (for Claude, Cursor, etc.)
 rqmd mcp                            # stdio transport
@@ -190,20 +196,23 @@ rqmd mcp --http --port 8181         # Streamable HTTP transport
 
 | Command | Description |
 |---------|-------------|
-| `rqmd query <text>` | Hybrid search: BM25 + vector + rerank + LLM query expansion |
+| `rqmd query <text> [--no-expand]` | Hybrid search: BM25 + vector + rerank + LLM query expansion |
 | `rqmd search <text>` | BM25 keyword search only |
 | `rqmd vsearch <text>` | Vector similarity only |
+| `rqmd similar <path\|#docid>` | Find documents most similar to an already-indexed one |
 | `rqmd get <path\|#docid>` | Retrieve document by path or content hash |
 | `rqmd multi-get <glob>` | Retrieve multiple documents |
 | `rqmd ls [collection[/path]]` | List collections or files |
-| `rqmd embed [-c collection]` | Generate embeddings |
-| `rqmd update [-c collection]` | Re-index collections |
+| `rqmd embed [-c collection] [--rebuild]` | Generate embeddings (`--rebuild`: clear vectors and re-embed from scratch) |
+| `rqmd update [-c collection]` | Re-index: reports new, updated, unchanged, and removed (soft-deleted) document counts |
 | `rqmd status` | Index health and collection summary |
 | `rqmd doctor` | Diagnose config, index, model, and device issues |
 | `rqmd bench [-n N]` | Embed throughput benchmark (default: 5 rounds) |
 | `rqmd eval [--mode bm25\|vec\|hybrid] [--verbose]` | Search quality eval against synthetic fixtures |
-| `rqmd mcp [--http] [--port N] [--daemon]` | Start MCP server |
-| `rqmd collection add <path> [--ignore PATTERN]` | Add a directory as a collection |
+| `rqmd mcp [--http] [--port N] [--host HOST] [--daemon]` | Start MCP server |
+| `rqmd mcp status` | Show MCP daemon status (pid, health, uptime) |
+| `rqmd mcp stop` | Stop the running MCP daemon |
+| `rqmd collection add <path> [--mask PATTERN] [--ignore PATTERN] [--hidden]` | Add a directory as a collection |
 | `rqmd collection list` | List all collections |
 | `rqmd collection remove <name>` | Remove a collection |
 | `rqmd collection rename <old> <new>` | Rename a collection |
@@ -240,9 +249,36 @@ their respective single-mode search only.
 | `--intent <text>` | *(none)* | Background context to steer expansion and reranking |
 | `-n <num>` | `10` | Number of results to return |
 | `-c/--collection <name>` | *(all)* | Scope to a collection (repeatable, OR-matched) |
+| `--no-expand` | off | Skip LLM query expansion; search the query text as-is (env: `RRQMD_NO_EXPAND`) |
 | `--no-rerank` | off | Skip cross-encoder reranking (expansion still runs) |
 | `--full` | off | Return full document bodies instead of snippets |
-| `--format cli\|json` | `cli` | Output format |
+| `--format <fmt>` | `cli` | Output format — see below |
+
+**`--format` values:**
+
+| Value | Description |
+|-------|-------------|
+| `cli` | Human-readable, colorized terminal output |
+| `json` | Pretty-printed JSON array of results |
+| `csv` | `docid,score,file,title,context,line,snippet` — every field is CSV-escaped (quoted, with embedded quotes doubled, whenever it contains a comma, quote, or newline) |
+| `md` (alias `markdown`) | Markdown-formatted result list |
+| `xml` | XML-wrapped result list |
+| `files` | Just the absolute filesystem path of each matching file, one per line — pipeable straight into `xargs` |
+
+An unrecognized `--format` value is a hard argument-parsing error (clap rejects
+it before the command runs) — it no longer silently falls back to `cli`.
+`rqmd get` and `rqmd multi-get` only support `cli`, `json`, and `files`; passing
+`csv`, `md`, or `xml` to those two commands fails with an explicit error rather
+than producing malformed output.
+
+**Candidate pool sizing (`-n`):** reranking is the expensive step — each
+candidate costs one `LlamaContext` evaluation — so the number of chunks
+fetched for reranking is not simply the requested `-n`. rqmd asks for
+`limit * 2` candidates, then clamps that to a minimum of 20 and a maximum of
+100. Requesting more than 50 results (which would ask for over 100
+candidates) triggers a logged warning that the candidate pool has been capped
+at 100, rather than silently truncating — since rerank cost scales linearly
+with pool depth, this cap keeps `-n` from causing runaway latency.
 
 **Examples:**
 
@@ -273,13 +309,48 @@ Full grammar (typed lines, lex phrase/negation operators, MCP `searches` array):
 
 ## Excluding files
 
-By default rqmd indexes every file matching a collection's pattern (`**/*.md`).
-It reads **no** ignore files — `.gitignore` and `.ignore` are never consulted.
+By default rqmd indexes every file matching a collection's mask pattern
+(`**/*.md`). It reads **no** ignore files — `.gitignore` and `.ignore` are
+never consulted.
 
-**Built-in exclusions** (always skipped):
+**Built-in exclusions** (skipped unless overridden):
 
-- Hidden files and directories (names starting with `.`)
-- `node_modules`, `vendor`, `dist`, `build`, `target`, `.cache`
+- Hidden files and directories — any path component (relative to the
+  collection root) starting with `.`. Pass `--hidden` when adding a
+  collection to index these. This only affects components *inside* the
+  tree: the collection root itself is never subject to this rule, so adding
+  a dot-prefixed directory (e.g. `~/.dotfiles`) as a collection always works
+  regardless of `--hidden`.
+- `node_modules`, `vendor`, `dist`, `build`, `target`, `.cache` — these are
+  always skipped and are not affected by `--hidden`.
+
+```sh
+# Index hidden files/dirs under the collection root too
+rqmd collection add ~/notes --hidden
+```
+
+**`--mask` — which files are candidates for indexing:**
+
+The mask is a glob (default `**/*.md`) evaluated relative to the collection
+root. Two ways to match more than one pattern:
+
+```sh
+# Brace alternation — a single glob, one pattern
+rqmd collection add ~/notes --mask '**/*.{md,mdx,txt}'
+
+# Comma-separated globs — split on top-level commas only (commas inside
+# {...} are left alone, so the two forms can be combined)
+rqmd collection add ~/notes --mask '**/*.md,**/*.txt'
+
+# Directory-scoped glob — restrict to a subtree
+rqmd collection add ~/docs --mask 'docs/**/*.md'
+```
+
+An invalid `--mask` glob is a hard error at `collection add` time (it decides
+what gets indexed at all, so a silently-dropped alternative would mean
+documents vanish from the index with no diagnostic). An invalid `--ignore`
+glob, by contrast, is silently skipped — an unmatchable extra exclusion is
+harmless.
 
 **Per-collection ignore patterns** (gitignore-style globs):
 
@@ -291,8 +362,8 @@ rqmd collection add ~/notes --ignore '*.log' --ignore 'tmp/'
 rqmd collection add ~/docs --ignore 'drafts/**' --ignore '**/node_modules'
 ```
 
-Ignore patterns are stored with the collection and apply on every subsequent
-`rqmd update` run — you only need to specify them once.
+Mask and ignore patterns are stored with the collection and apply on every
+subsequent `rqmd update` run — you only need to specify them once.
 
 ---
 
@@ -380,7 +451,10 @@ rqmd includes a built-in MCP server exposing its search index as tools for Claud
 rqmd mcp                        # stdio (Claude Desktop, Cursor, etc.)
 rqmd mcp --http                 # Streamable HTTP on port 8181
 rqmd mcp --http --port 9000     # custom port
+rqmd mcp --http --host 0.0.0.0  # bind on all interfaces — see warning below
 rqmd mcp --daemon               # background HTTP (implies --http)
+rqmd mcp status                 # pid, health, uptime of the running daemon
+rqmd mcp stop                   # stop the running daemon
 ```
 
 For Claude Desktop, add to `claude_desktop_config.json`:
@@ -396,6 +470,61 @@ For Claude Desktop, add to `claude_desktop_config.json`:
 }
 ```
 
+### Daemon lifecycle
+
+`rqmd mcp --daemon` forks the HTTP server into the background and tracks it
+under the index directory: a pidfile at `<index-dir>/mcp.pid` and its
+stdout/stderr log at `<index-dir>/mcp.log`. `rqmd mcp status` and
+`rqmd mcp stop` don't just trust the pidfile — before sending a stop signal
+or reporting the daemon as running, they issue a `GET /health` request on the
+recorded host:port and cross-check the pid the daemon reports against the
+pid on record. Only an exact match counts as confirmed; an unreachable
+`/health` means the pidfile is stale, and a reachable `/health` reporting a
+*different* pid means another process now owns that port. Starting a daemon
+on a port that's already bound fails immediately with an error instead of
+silently colliding with the existing listener.
+
+### Binding beyond localhost
+
+`--host` (default `127.0.0.1`, env `RRQMD_MCP_HOST`) controls the bind
+address for `--http`/`--daemon` mode; `--port` (default `8181`, env
+`RRQMD_MCP_PORT`) controls the port. Binding to anything other than a
+loopback address prints this warning to stderr:
+
+> WARNING: binding to {host} exposes this index's full-text and semantic
+> search — including `get`, which returns arbitrary indexed file content —
+> with no authentication to anything that can reach {host}:{port}. Only do
+> this on a trusted network or container.
+
+rqmd ships **no authentication** for the HTTP/MCP listener at all — anyone
+who can reach the bound host:port can query and read every indexed
+document. Treat `--host 0.0.0.0` (or any non-loopback address) as
+production-network-exposure, not a convenience flag.
+
+### MCP tool parameters
+
+Exact input fields per tool, as accepted by the JSON-RPC tool call
+(`collections` is plural, matching the CLI's repeatable `-c`/`--collection`):
+
+| Tool | Field | Type | Notes |
+|------|-------|------|-------|
+| `query` | `query` | `string` (required) | The search text |
+| | `intent` | `string`, optional | Background context steering expansion/reranking |
+| | `collections` | `string[]`, optional | Scope to these collections |
+| | `limit` | `number`, optional | Default 10 |
+| | `rerank` | `boolean`, optional | Default `true` |
+| | `expand` | `boolean`, optional | Default `true` |
+| `search` | `query` | `string` (required) | BM25-only search text |
+| | `collections` | `string[]`, optional | Scope to these collections |
+| | `limit` | `number`, optional | Default 10 |
+| `get` | `file` | `string` (required) | Path or `#docid` |
+| | `from_line` | `number`, optional | Start line for partial retrieval |
+| | `max_lines` | `number`, optional | Cap on lines returned |
+| `multi_get` | `pattern` | `string` (required) | Glob pattern |
+| | `collections` | `string[]`, optional | Scope to these collections |
+| | `max_lines` | `number`, optional | Cap on lines returned per document |
+| `status` | *(none)* | | Takes no input |
+
 ---
 
 ## Environment variables
@@ -406,6 +535,11 @@ For Claude Desktop, add to `claude_desktop_config.json`:
 | `RRQMD_INFERENCE_BACKEND` | `llama`, `ort` | `llama` | Inference backend |
 | `RRQMD_ORT_EP` | `auto`, `coreml`, `cuda`, `directml`, `cpu` | `auto` | ONNX Runtime EP |
 | `RRQMD_FORCE_CPU` | `1` | *(unset)* | Disable GPU layers in LlamaCppBackend |
+| `RRQMD_MCP_HOST` | host/IP | `127.0.0.1` | Bind address for `rqmd mcp --http`/`--daemon` |
+| `RRQMD_MCP_PORT` | port number | `8181` | Bind port for `rqmd mcp --http`/`--daemon` |
+| `RRQMD_MODEL_IDLE_TTL` | seconds | `300` | MCP daemon: unload an idle model after this many seconds of no use; `0` disables eviction |
+| `RRQMD_NO_EXPAND` | `1` | *(unset)* | Equivalent to always passing `--no-expand` to `rqmd query` |
+| `RRQMD_VERBOSE` | `1` | *(unset)* | Verbose ORT backend logging |
 
 ---
 
@@ -538,6 +672,153 @@ the original qmd design so search quality is preserved.
 
 See [BENCHMARK.md](BENCHMARK.md) for the de-risking spike results (inference backend
 + DB bake-off) that drove the Tantivy+usearch and llama-cpp-2 decisions.
+
+---
+
+## Score interpretation
+
+Every result carries a single `score` field, but what that number *means*
+depends on which stage produced it — and the three stages are not on a
+common scale, so comparing a 0.62 from one query to a 0.71 from another
+tells you very little on its own.
+
+- **BM25 / FTS score** (`rqmd search`): Tantivy's raw BM25 score is a
+  positive, unbounded value where higher is better, but its magnitude isn't
+  meaningful in isolation — it depends on term rarity and document length.
+  rqmd squashes it into a fixed `[0, 1)` range with the monotonic
+  transform `score / (1 + score)`. This preserves ordering exactly (it's
+  monotonic) and needs no per-query normalization, but it means a 0.9 from
+  one query and a 0.9 from another aren't "equally good" in any absolute
+  sense — the transform only makes the *number* boundable, not
+  cross-query-comparable.
+- **Vector / cosine score** (`rqmd vsearch`): embeddings are unit-normalized,
+  so nearest-neighbor search reduces to cosine similarity. The underlying
+  index returns a distance where 0 means identical; rqmd reports
+  `1 - distance` as the similarity, so 1.0 is a perfect match and scores
+  trend toward 0 (or negative, in principle) as vectors diverge.
+- **Hybrid / fused score** (`rqmd query`): the default pipeline runs BM25
+  and vector search (plus LLM-expanded lex/vec/hyde variants when expansion
+  is active) as separate ranked lists, then fuses them with Reciprocal Rank
+  Fusion. Each list contributes `weight / (60 + rank + 1)` per document,
+  where `rank` is that document's zero-based position within its list
+  after collapsing duplicate chunks down to one entry per document. The
+  original query's own lists get weight 2.0; expansion-derived lists get
+  weight 1.0. Whichever list ranks a document at position 0 anywhere adds a
+  flat +0.05 bonus; ranking at position 1 or 2 (without hitting position 0)
+  adds +0.02. These bonuses apply unconditionally — they aren't gated on
+  how far ahead of the next result a document is — so the fused score is a
+  relative ranking signal assembled from several inputs, not a probability
+  or confidence value. When reranking runs, the cross-encoder's score for a
+  candidate is blended back in as `0.75 * rerank_score + 0.25 * rrf_score`;
+  rerank scores themselves are not normalized across pairs, so this blend
+  is only meaningful as a way of biasing the RRF ordering, not as an
+  absolute quality metric either.
+
+The practical takeaway: use scores to compare results *within* one query's
+result set, not across different queries or across `search`/`vsearch`/`query`
+modes. Because RRF's OR-semantics mean a document can rank purely from
+matching one of several expansion variants, plus the unconditional rank
+bonuses above, there's no fixed score threshold below which a result is
+"irrelevant" — a low fused score can still be the best available match for
+a query with generally weak recall.
+
+---
+
+## How it works
+
+**Indexing** (`rqmd collection add` / `rqmd update`): each matched file is
+read, hashed (SHA-256 of its content — the resulting hash's first 6 hex
+characters become the document's `#docid`), and inserted into the BM25 index
+immediately. Vector indexing is a separate, deferred step — `rqmd update`
+only touches BM25 and bookkeeping, so it stays usable without a model loaded.
+
+**Embedding** (`rqmd embed`): documents that don't have vectors yet (or, with
+`--rebuild`, every document) are split into chunks, each chunk is embedded,
+and the resulting vectors are added to the HNSW index. `rqmd doctor` can
+detect when the chunking parameters or embed model have changed since the
+last embed run by comparing a stored fingerprint (below) against the current
+configuration.
+
+**Query**: `rqmd search` and `rqmd vsearch` each run a single retrieval mode
+directly. `rqmd query` (and the MCP `query` tool) additionally runs LLM-based
+query expansion by default — see [Query syntax and expansion](#query-syntax-and-expansion)
+— fuses every resulting list with RRF, and reranks the fused candidates with
+a cross-encoder. As a latency optimization, if the initial BM25 probe on the
+raw query already returns a dominant top result (score above a fixed
+threshold with a clear gap to the runner-up), expansion is skipped entirely
+and the pipeline proceeds directly to reranking that candidate set.
+
+### Smart chunking
+
+Documents longer than the chunk size are split at content-aware break
+points rather than at a fixed character offset. The chunker looks for the
+highest-scoring break point inside a window centered on the ideal cut
+position, scoring candidates by what kind of boundary they are: an H1
+heading scores highest, descending through H2–H6, with code-fence
+boundaries and horizontal rules scored similarly high, blank lines (paragraph
+breaks) lower, list items lower still, and a bare newline as the last
+resort. Breaks are never placed inside a fenced code block — if the ideal
+cut would land inside one, the search continues past it.
+
+The chunk target is 3,600 characters (roughly 900 tokens at the ~4
+characters/token EmbeddingGemma tends toward) with a 540-character (15%)
+overlap between consecutive chunks, and the break-point search window
+extends 400 characters either side of the ideal cut. Because these figures
+are byte offsets into UTF-8 text, and multi-byte characters (accented
+letters, em dashes, CJK text) can span two or three bytes each, every
+computed cut point is snapped forward or backward to the nearest valid
+character boundary before the text is sliced — cutting mid-character would
+otherwise corrupt the chunk and panic on decode.
+
+These three constants (embed model name, chunk size, chunk overlap) feed a
+short fingerprint hash that gets stored alongside the index. If any of them
+changes — a different embed model, or a future tuning pass on the chunking
+parameters — the stored fingerprint no longer matches, and `rqmd doctor`
+surfaces that the existing vectors were built under a different
+configuration and may need re-embedding.
+
+---
+
+## Model configuration
+
+rqmd's default backend uses three local GGUF models: an embedding model, a
+reranker, and a small generation model for query expansion.
+
+**Asymmetric embedding prompts**: the embedding model documents different
+recommended prompt templates for queries versus the passages being searched,
+and rqmd honors that distinction rather than embedding both sides
+identically. Query-side text (and HyDE's hypothetical-document text, which
+plays a query's role in the pipeline) is prefixed with
+`"task: search result | query: "`; passage-side text (indexed document
+chunks) is prefixed with `"title: none | text: "` — the "no title" form of
+the documented template, since threading real per-chunk titles through
+wasn't judged worth the added plumbing. Using the wrong prefix on either
+side doesn't break the pipeline, but it does mean queries and documents
+embed into slightly different regions of the vector space than the model
+intends, degrading retrieval quality.
+
+**Reranking**: the cross-encoder scores a query/document pair using the
+template `"Query: {query}\nDocument: {doc}"`. As noted in
+[Score interpretation](#score-interpretation), these scores are not
+normalized across pairs — they're only meaningful as a relative ordering
+within one rerank call, which is why they're blended with, rather than
+replacing, the RRF score.
+
+**Query expansion**: the generation model is prompted with a ChatML-formatted
+instruction asking it to produce short `lex:`/`vec:`/`hyde:` lines — a
+literal-keyword variant, a semantic-phrasing variant, and a hypothetical
+answer passage, respectively — which are parsed back out of its free-form
+output and fed into the fusion pipeline as separate ranked lists.
+
+**Backend parity note**: the local llama.cpp-based backend explicitly
+L2-normalizes every embedding vector it returns, even though the embedding
+model's own output is expected to already be close to unit length. This
+exists so that the local and ONNX Runtime backends produce vectors with
+identical normalization guarantees — cosine similarity is scale-invariant,
+so a vector that's merely *close to* unit length would still rank
+identically within a single backend's own index. The normalization matters
+for consistency of the stored contract across backends, not for
+within-backend ranking correctness.
 
 ---
 
