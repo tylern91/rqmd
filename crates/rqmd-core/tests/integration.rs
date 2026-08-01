@@ -4,15 +4,18 @@
 use rqmd_core::{
     chunking::chunk_document,
     db::{
-        collection_context_key, content_hash, docid_from_hash, find_documents_by_needles,
-        get_config, get_context_for_path, get_document_by_docid_prefix, get_document_by_filepath,
-        open_db, set_config, upsert_content, upsert_document,
+        collection_context_key, content_hash, count_orphaned_vectors, deactivate_missing_documents,
+        docid_from_hash, find_documents_by_needles, get_config, get_context_for_path,
+        get_document_by_docid_prefix, get_document_by_filepath, list_documents, open_db,
+        purge_collection, set_config, upsert_content, upsert_document, upsert_vector_meta,
     },
     resolve::resolve_multi_get,
     rrf::{reciprocal_rank_fusion, rrf_weights},
     types::{QueryType, RankedListMeta, RankedResult},
     Store, StoreConfig,
 };
+use rusqlite::params;
+use std::collections::HashSet;
 use tempfile::TempDir;
 
 // ── Chunking ──────────────────────────────────────────────────────────────────
@@ -709,4 +712,257 @@ fn resolve_multi_get_combines_docid_glob_and_plain_patterns() {
         "docid pattern must not pull in unrelated docs: {paths:?}"
     );
     assert_eq!(docs.len(), 2, "expected no duplicates: {docs:?}");
+}
+
+#[test]
+fn reindex_same_filepath_deletes_old_fts_entry() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    let collection = "coll";
+    let path = "notes/a.md";
+
+    store
+        .index_document_fts_only(collection, path, "Title", "uniquealphatoken")
+        .unwrap();
+    store.flush().unwrap();
+
+    let before = store.search_fts("uniquealphatoken", 10, None).unwrap();
+    assert_eq!(before.len(), 1, "sanity: first index should be findable");
+
+    store
+        .index_document_fts_only(collection, path, "Title", "uniquebetatoken")
+        .unwrap();
+    store.flush().unwrap();
+
+    let old_hits = store.search_fts("uniquealphatoken", 10, None).unwrap();
+    let new_hits = store.search_fts("uniquebetatoken", 10, None).unwrap();
+    assert_eq!(
+        old_hits.len(),
+        0,
+        "stale ghost entry for old body must not remain searchable after re-indexing the same filepath"
+    );
+    assert_eq!(new_hits.len(), 1);
+}
+
+// ── Deletions actually delete ──────────────────────────────────────────────────
+//
+// `update` used to hardcode "0 removed" — a deleted or renamed file's document
+// row was never deactivated, so it stayed active, searchable, and pointing at a
+// path that no longer existed on disk. `collection remove` only dropped the
+// store_collections row, leaving documents/content/content_vectors/Tantivy
+// entries fully intact. These tests lock in the fix at the db + Store level —
+// the CLI commands (`run_update`, `collection remove`) are thin sequencing
+// wrappers over exactly these calls.
+
+#[test]
+fn deactivate_missing_documents_soft_deletes_removed_and_keeps_present() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    let collection = "coll";
+
+    store
+        .index_document_fts_only(collection, "a.md", "A", "alpha body")
+        .unwrap();
+    store
+        .index_document_fts_only(collection, "b.md", "B", "beta body")
+        .unwrap();
+    store.flush().unwrap();
+
+    // Simulate a disk walk that no longer sees a.md (deleted or renamed away).
+    let present: HashSet<String> = ["b.md".to_string()].into_iter().collect();
+    let removed = deactivate_missing_documents(&store.db, collection, &present).unwrap();
+    assert_eq!(removed, vec!["a.md".to_string()]);
+
+    // Soft-deleted: gone from the active-only read path...
+    let active = list_documents(&store.db, Some(collection)).unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].path, "b.md");
+
+    // ...but the row itself still exists (recoverable, not hard-deleted).
+    let still_present: i64 = store
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM documents WHERE collection = ?1 AND path = 'a.md'",
+            params![collection],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(still_present, 1, "soft delete must not drop the row");
+
+    // Re-running with the same present set is a no-op — nothing left to deactivate.
+    let removed_again = deactivate_missing_documents(&store.db, collection, &present).unwrap();
+    assert!(removed_again.is_empty());
+}
+
+#[test]
+fn update_prune_removes_stale_document_from_fts_search() {
+    // End-to-end regression for the rename/delete ghost-path bug: after a file
+    // disappears from the walked candidate set, it must both disappear from
+    // SQLite's active view AND stop being returned by BM25 search — sweeping
+    // only one of the two stores was the original defect.
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    let collection = "coll";
+
+    store
+        .index_document_fts_only(collection, "a.md", "A", "uniquegammatoken")
+        .unwrap();
+    store
+        .index_document_fts_only(collection, "b.md", "B", "uniquedeltatoken")
+        .unwrap();
+    store.flush().unwrap();
+
+    assert_eq!(
+        store
+            .search_fts("uniquegammatoken", 10, None)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // a.md vanished from disk; b.md is still there.
+    let present: HashSet<String> = ["b.md".to_string()].into_iter().collect();
+    let removed = deactivate_missing_documents(&store.db, collection, &present).unwrap();
+    assert_eq!(removed, vec!["a.md".to_string()]);
+    for path in &removed {
+        store
+            .remove_from_fts(&format!("{collection}/{path}"))
+            .unwrap();
+    }
+    store.flush().unwrap();
+
+    let stale_hits = store.search_fts("uniquegammatoken", 10, None).unwrap();
+    let live_hits = store.search_fts("uniquedeltatoken", 10, None).unwrap();
+    assert_eq!(
+        stale_hits.len(),
+        0,
+        "removed document must not remain searchable via Tantivy"
+    );
+    assert_eq!(
+        live_hits.len(),
+        1,
+        "the still-present document must be unaffected"
+    );
+}
+
+#[test]
+fn purge_collection_hard_deletes_and_preserves_shared_content() {
+    // Content is deduplicated globally by hash, so purging one collection must
+    // not delete a `content` row that another collection's document still
+    // references — only orphaned rows (referenced by no remaining document)
+    // may be removed.
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+
+    store
+        .index_document_fts_only("keep", "shared.md", "Shared", "shared body text")
+        .unwrap();
+    store
+        .index_document_fts_only("drop", "shared.md", "Shared", "shared body text")
+        .unwrap();
+    store
+        .index_document_fts_only("drop", "unique.md", "Unique", "uniqueepsilontoken")
+        .unwrap();
+    store.flush().unwrap();
+
+    let shared_hash = get_document_by_filepath(&store.db, "keep", "shared.md")
+        .unwrap()
+        .unwrap()
+        .hash;
+    let unique_hash = get_document_by_filepath(&store.db, "drop", "unique.md")
+        .unwrap()
+        .unwrap()
+        .hash;
+
+    let filepaths = purge_collection(&store.db, "drop").unwrap();
+    assert_eq!(
+        filepaths.iter().collect::<HashSet<_>>(),
+        ["drop/shared.md".to_string(), "drop/unique.md".to_string()]
+            .iter()
+            .collect::<HashSet<_>>()
+    );
+    for filepath in &filepaths {
+        store.remove_from_fts(filepath).unwrap();
+    }
+    store.flush().unwrap();
+
+    // `drop` is fully gone: no documents, and its Tantivy entries are unreachable.
+    assert!(list_documents(&store.db, Some("drop")).unwrap().is_empty());
+    assert_eq!(
+        store
+            .search_fts("uniqueepsilontoken", 10, None)
+            .unwrap()
+            .len(),
+        0
+    );
+
+    // `keep`'s copy of the shared content survives untouched.
+    assert!(get_document_by_filepath(&store.db, "keep", "shared.md")
+        .unwrap()
+        .is_some());
+    let shared_content_count: i64 = store
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM content WHERE hash = ?1",
+            params![shared_hash],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        shared_content_count, 1,
+        "content still referenced by `keep` must survive the purge of `drop`"
+    );
+
+    // The content unique to the purged collection is actually gone, not orphaned.
+    let unique_content_count: i64 = store
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM content WHERE hash = ?1",
+            params![unique_hash],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        unique_content_count, 0,
+        "content with no remaining document reference must be purged"
+    );
+}
+
+#[test]
+fn count_orphaned_vectors_counts_vectors_for_inactive_documents() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    let collection = "coll";
+
+    store
+        .index_document_fts_only(collection, "a.md", "A", "alpha body")
+        .unwrap();
+    store.flush().unwrap();
+    let hash = get_document_by_filepath(&store.db, collection, "a.md")
+        .unwrap()
+        .unwrap()
+        .hash;
+
+    // Fake a previously-embedded vector for this document (no live backend needed
+    // for this check — it exercises the counting query, not the embed pipeline).
+    upsert_vector_meta(
+        &store.db,
+        &hash,
+        0,
+        0,
+        "model",
+        "fp",
+        1,
+        999,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    assert_eq!(count_orphaned_vectors(&store.db).unwrap(), 0);
+
+    // Once the only document referencing this hash is soft-deleted, its vector
+    // becomes unreachable (every vector->document join requires active=1) but is
+    // not physically removed until `embed --rebuild`.
+    let present: HashSet<String> = HashSet::new();
+    deactivate_missing_documents(&store.db, collection, &present).unwrap();
+    assert_eq!(count_orphaned_vectors(&store.db).unwrap(), 1);
 }

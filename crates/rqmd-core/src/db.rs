@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use hex;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::types::{Collection, Document};
@@ -161,7 +162,16 @@ pub fn get_content(conn: &Connection, hash: &str) -> Result<Option<String>> {
 
 // ── Document CRUD ─────────────────────────────────────────────────────────────
 
-/// Insert or update a document record. Returns the rowid.
+/// Insert or update a document record. Returns the document's stable row id.
+///
+/// Uses `RETURNING id` rather than `last_insert_rowid()`: on the `ON CONFLICT
+/// DO UPDATE` arm, SQLite leaves `last_insert_rowid()` untouched (it only
+/// advances on an actual `INSERT`), so it would otherwise reflect whichever
+/// unrelated row — e.g. the `content` row `upsert_content` just inserted for
+/// the new hash — was last inserted on the connection, not this document's
+/// own id. Every caller re-indexing an existing (collection, path) hit that
+/// exact sequence, so the id fed into Tantivy's `doc_id` field was wrong on
+/// every content update.
 pub fn upsert_document(
     conn: &Connection,
     collection: &str,
@@ -170,7 +180,7 @@ pub fn upsert_document(
     hash: &str,
     now: &str,
 ) -> Result<i64> {
-    conn.execute(
+    conn.query_row(
         r#"
         INSERT INTO documents(collection, path, title, hash, created_at, modified_at, active)
         VALUES (?1, ?2, ?3, ?4, ?5, ?5, 1)
@@ -179,10 +189,12 @@ pub fn upsert_document(
             hash        = excluded.hash,
             modified_at = excluded.modified_at,
             active      = 1
+        RETURNING id
         "#,
         params![collection, path, title, hash, now],
-    )?;
-    Ok(conn.last_insert_rowid())
+        |row| row.get(0),
+    )
+    .context("upsert document")
 }
 
 pub fn get_document_by_filepath(
@@ -618,9 +630,82 @@ pub fn collection_doc_stats(conn: &Connection, collection: &str) -> Result<(i64,
     Ok((count, latest))
 }
 
-pub fn delete_collection(conn: &Connection, name: &str) -> Result<()> {
-    conn.execute("DELETE FROM store_collections WHERE name=?1", params![name])?;
-    Ok(())
+/// Soft-delete active documents whose `path` is no longer among `current_paths`
+/// — files removed or renamed on disk since the collection was last indexed.
+/// Sets `active = 0` rather than deleting the row: every read path already
+/// filters `WHERE active = 1`, so this alone makes the document unreachable,
+/// while leaving its `content`/`content_vectors`/HNSW vids in place (usearch
+/// has no API to remove a single vector from the graph). Those vectors are
+/// reclaimed on the next `embed --rebuild`.
+///
+/// Returns the deactivated collection-relative paths so the caller can sweep
+/// the matching Tantivy entries — this module has no Tantivy handle.
+pub fn deactivate_missing_documents(
+    conn: &Connection,
+    collection: &str,
+    current_paths: &HashSet<String>,
+) -> Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT path FROM documents WHERE collection = ?1 AND active = 1")?;
+    let existing: Vec<String> = stmt
+        .query_map(params![collection], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+
+    let missing: Vec<String> = existing
+        .into_iter()
+        .filter(|p| !current_paths.contains(p))
+        .collect();
+
+    for path in &missing {
+        conn.execute(
+            "UPDATE documents SET active = 0 WHERE collection = ?1 AND path = ?2",
+            params![collection, path],
+        )?;
+    }
+
+    Ok(missing)
+}
+
+/// Fully remove everything a collection owns: its `documents` rows (hard
+/// delete — unlike `update`'s soft-delete prune, the collection itself is
+/// gone, so there is nothing left to reactivate), any `content`/
+/// `content_vectors` rows no longer referenced by a document in another
+/// collection (content is deduplicated globally by hash, so a shared file
+/// must survive), and the `store_collections` row itself.
+///
+/// Returns the deleted documents' Tantivy filepaths (`"collection/path"`) so
+/// the caller can sweep the matching Tantivy entries — this module has no
+/// Tantivy handle.
+pub fn purge_collection(conn: &Connection, name: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT path, hash FROM documents WHERE collection = ?1")?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map(params![name], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+
+    let filepaths: Vec<String> = rows.iter().map(|(p, _)| format!("{name}/{p}")).collect();
+
+    conn.execute("DELETE FROM documents WHERE collection = ?1", params![name])?;
+
+    for (_, hash) in &rows {
+        let still_referenced: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM documents WHERE hash = ?1",
+            params![hash],
+            |row| row.get(0),
+        )?;
+        if still_referenced == 0 {
+            conn.execute("DELETE FROM content_vectors WHERE hash = ?1", params![hash])?;
+            conn.execute("DELETE FROM content WHERE hash = ?1", params![hash])?;
+        }
+    }
+
+    conn.execute(
+        "DELETE FROM store_collections WHERE name = ?1",
+        params![name],
+    )?;
+
+    Ok(filepaths)
 }
 
 /// Remove all content_vectors rows for a collection's documents.
@@ -635,6 +720,22 @@ pub fn clear_vectors_for_collection(conn: &Connection, collection: &str) -> Resu
         params![collection],
     )?;
     Ok(n)
+}
+
+/// Count `content_vectors` rows whose hash has no active document referencing
+/// it — orphaned by [`deactivate_missing_documents`]'s soft-delete prune.
+/// These vectors are unreachable (every vector→document join requires an
+/// active document) but not physically freed from the HNSW file; only
+/// `embed --rebuild` reclaims that space. Surfaced by `rqmd doctor` so the
+/// accumulation isn't silent.
+pub fn count_orphaned_vectors(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM content_vectors \
+         WHERE hash NOT IN (SELECT hash FROM documents WHERE active = 1)",
+        [],
+        |row| row.get(0),
+    )
+    .context("count orphaned vectors")
 }
 
 pub fn rename_collection(conn: &Connection, old: &str, new: &str) -> Result<()> {

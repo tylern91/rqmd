@@ -327,6 +327,16 @@ impl Store {
         Ok(())
     }
 
+    /// Remove a single filepath's entry from the Tantivy index (no-op if
+    /// absent). `fts` is a private field, so this is the only way callers in
+    /// other crates (`rqmd update`'s stale-document sweep, `collection
+    /// remove`'s full purge) can reach [`FtsIndex::delete_by_filepath`].
+    /// Callers must still call [`Self::flush`] afterward — this only stages
+    /// the delete in the writer, it does not commit.
+    pub fn remove_from_fts(&mut self, filepath: &str) -> Result<()> {
+        self.fts.delete_by_filepath(filepath)
+    }
+
     // ── Search ────────────────────────────────────────────────────────────────
 
     /// BM25 full-text search only (no vector, no rerank).
@@ -1037,5 +1047,58 @@ mod tests {
         // 2024-03-15T12:30:45Z = 1710505845 seconds since epoch
         // Verified: python3 -c "import datetime; print(int(datetime.datetime(2024,3,15,12,30,45,tzinfo=datetime.timezone.utc).timestamp()))"
         assert_eq!(format_rfc3339(1_710_505_845), "2024-03-15T12:30:45Z");
+    }
+
+    /// Re-indexing an existing (collection, path) must keep the same
+    /// `documents.id` across updates, and the Store-level join must reflect
+    /// the new content, not a stale or dropped result.
+    ///
+    /// Regression test for a compound bug: `db::upsert_document` returned
+    /// `last_insert_rowid()`, which SQLite does not advance on the
+    /// `ON CONFLICT DO UPDATE` arm — so it silently returned whichever
+    /// unrelated row `upsert_content`'s immediately-preceding `INSERT` had
+    /// just created, feeding a wrong `doc_id` into Tantivy on every content
+    /// update. Combined with the (separately fixed) stale-Tantivy-entry bug,
+    /// a query for the old content used to join to a bogus id — sometimes an
+    /// unrelated document, sometimes nothing at all.
+    #[test]
+    fn reindex_same_path_keeps_stable_doc_id_and_correct_join() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = StoreConfig {
+            db_path: dir.path().join("test.sqlite"),
+            tantivy_dir: dir.path().join("tantivy"),
+            hnsw_path: dir.path().join("hnsw.usearch"),
+            read_only: false,
+        };
+        let mut store = Store::open(config, rqmd_llm::no_backend()).unwrap();
+
+        let outcome1 = store
+            .index_document_fts_only("coll", "notes/a.md", "Title", "uniquealphatoken")
+            .unwrap();
+        assert_eq!(outcome1, IndexOutcome::New);
+        store.flush().unwrap();
+
+        let outcome2 = store
+            .index_document_fts_only("coll", "notes/a.md", "Title", "uniquebetatoken")
+            .unwrap();
+        assert_eq!(outcome2, IndexOutcome::Updated);
+        store.flush().unwrap();
+
+        assert_eq!(
+            store.fts.reader.searcher().num_docs(),
+            1,
+            "the stale entry from the first index must not linger as a ghost"
+        );
+
+        let raw_alpha = store.fts.search_fts("uniquealphatoken", 10, None).unwrap();
+        let raw_beta = store.fts.search_fts("uniquebetatoken", 10, None).unwrap();
+        assert_eq!(raw_alpha.len(), 0, "old content must no longer match");
+        assert_eq!(raw_beta[0].1, 1, "doc_id must stay stable across re-index");
+
+        let store_alpha = store.search_fts("uniquealphatoken", 10, None).unwrap();
+        let store_beta = store.search_fts("uniquebetatoken", 10, None).unwrap();
+        assert_eq!(store_alpha.len(), 0);
+        assert_eq!(store_beta.len(), 1);
+        assert_eq!(store_beta[0].body, "uniquebetatoken");
     }
 }

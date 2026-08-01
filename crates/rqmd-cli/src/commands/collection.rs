@@ -188,14 +188,30 @@ fn list(index_dir: &Path) -> Result<()> {
 }
 
 fn remove(index_dir: &Path, name: &str) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir, true)?;
+    // Write access (not the usual read_only=true for a metadata-only op): the sweep
+    // below deletes rows and Tantivy entries, and flush() needs a non-view HNSW handle.
+    let mut s = store::open_store_no_backend(index_dir, false)?;
     // Verify it exists first
     let cols = db::list_collections(&s.db)?;
     if !cols.iter().any(|c| c.name == name) {
         bail!("collection '{name}' not found");
     }
-    db::delete_collection(&s.db, name)?;
-    println!("Collection '{name}' removed.");
+
+    // Purge everything this collection owns — documents, orphaned content/vectors,
+    // and the store_collections row — then sweep the matching Tantivy entries so
+    // removed documents stop being searchable everywhere, not just via SQLite.
+    let filepaths = db::purge_collection(&s.db, name).context("purge collection")?;
+    for filepath in &filepaths {
+        if let Err(e) = s.remove_from_fts(filepath) {
+            eprintln!("  WARN: failed to remove stale FTS entry for {filepath}: {e:#}");
+        }
+    }
+    s.flush()?;
+
+    println!(
+        "Collection '{name}' removed ({} document(s) purged).",
+        filepaths.len()
+    );
     Ok(())
 }
 

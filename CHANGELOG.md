@@ -4,6 +4,27 @@
 
 ---
 
+## [0.6.3] - 2026-08-01
+### Fixed
+- `update` no longer reports a hardcoded "0 removed": it now diffs the
+  indexed set against the real walked file list per collection and
+  soft-deletes (`active = 0`) documents whose file was deleted or renamed
+  away, sweeping the matching Tantivy entries so they stop being
+  searchable immediately. Previously a rename permanently doubled that
+  document in search results, and a deleted file kept being returned with
+  a path that no longer existed.
+- `collection remove` no longer leaves every document, its content,
+  vectors, and search-index entries fully searchable after the collection
+  is supposedly gone — it now purges everything it owns (content/vectors
+  no longer referenced by any other collection are dropped too, since
+  content is deduplicated globally by hash).
+- Re-indexing an existing path could silently feed a stale/unrelated
+  document id into the search index (SQLite doesn't advance
+  `last_insert_rowid()` on an upsert's `ON CONFLICT DO UPDATE` arm); fixed
+  by reading the id back with `RETURNING id`.
+
+---
+
 ## [0.6.2] - 2026-08-01
 ### Fixed
 - Collection scoping (`-c <collection>`) no longer returns false-empty when

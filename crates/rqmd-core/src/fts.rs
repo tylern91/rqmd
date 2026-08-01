@@ -8,7 +8,7 @@ use std::path::Path;
 use tantivy::{
     collector::TopDocs,
     doc,
-    query::{BooleanQuery, ConstScoreQuery, Query, QueryParser, TermQuery},
+    query::{BooleanQuery, ConstScoreQuery, PhraseQuery, Query, QueryParser, TermQuery},
     schema::{Field, IndexRecordOption, Schema, SchemaBuilder, Value, FAST, STORED, TEXT},
     Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
 };
@@ -114,9 +114,8 @@ impl FtsIndex {
             self.schema.body,
             self.schema.doc_id,
         );
-        let term = tantivy::Term::from_field_text(f_filepath, filepath);
+        self.delete_by_filepath(filepath)?;
         let w = self.writer_mut()?;
-        w.delete_term(term);
         w.add_document(doc!(
             f_filepath => filepath,
             f_title => title,
@@ -124,6 +123,75 @@ impl FtsIndex {
             f_doc_id => doc_id,
         ))?;
         Ok(())
+    }
+
+    /// Delete every previously-indexed document under this exact `filepath`.
+    /// Callers should call `commit()` afterward. A no-op (not an error) if
+    /// nothing is currently indexed under this filepath.
+    ///
+    /// Used both to clear the stale entry before re-indexing an updated
+    /// document (`add_document`) and to sweep entries for files removed or
+    /// renamed on disk (`Store::update`'s prune pass).
+    pub fn delete_by_filepath(&mut self, filepath: &str) -> Result<()> {
+        if let Some(query) = self.exact_filepath_query(filepath)? {
+            let w = self.writer_mut()?;
+            w.delete_query(query).context("delete tantivy doc")?;
+        }
+        Ok(())
+    }
+
+    /// Build a query that matches only documents indexed under exactly this
+    /// `filepath` string.
+    ///
+    /// `filepath` is a tokenized `TEXT` field (not a raw/`STRING` field), so a
+    /// term built from the whole untokenized string — as
+    /// `Term::from_field_text(f_filepath, filepath)` naively does — can never
+    /// match anything: the term dictionary only contains the post-tokenizer
+    /// sub-tokens. Adding an untokenized field to disambiguate would change
+    /// the Tantivy schema, forcing every existing user to fully reindex
+    /// (detected only by an opaque open failure) — not worth it. Instead,
+    /// tokenize `filepath` the same way indexing did and build an exact
+    /// phrase query (positions taken from the real token stream, not assumed
+    /// consecutive indices, so a >40-char segment dropped by
+    /// `RemoveLongFilter` can't shift a false match onto a different path).
+    /// A plain intersection (AND) of the tokens would over-match any other
+    /// path whose token set is a superset of this one's — fine for a search
+    /// pushdown with a post-filter (see `collection_pushdown_clause`), but
+    /// not for a destructive delete. Returns `None` when tokenization yields
+    /// no usable terms (matches nothing).
+    fn exact_filepath_query(&self, filepath: &str) -> Result<Option<Box<dyn Query>>> {
+        let mut analyzer = self
+            .index
+            .tokenizer_for_field(self.schema.filepath)
+            .context("tokenizer for filepath field")?;
+
+        let mut terms = Vec::new();
+        {
+            let mut stream = analyzer.token_stream(filepath);
+            stream.process(&mut |token| {
+                // Defensive — RemoveLongFilter(40) already drops tokens over
+                // 40 chars before indexing, so this token could never be in
+                // the index; including it would guarantee zero matches.
+                if token.text.len() <= 40 {
+                    terms.push((
+                        token.position,
+                        Term::from_field_text(self.schema.filepath, &token.text),
+                    ));
+                }
+            });
+        }
+
+        match terms.len() {
+            0 => Ok(None),
+            1 => {
+                let (_, term) = terms.into_iter().next().unwrap();
+                Ok(Some(Box::new(TermQuery::new(
+                    term,
+                    IndexRecordOption::Basic,
+                ))))
+            }
+            _ => Ok(Some(Box::new(PhraseQuery::new_with_offset(terms)))),
+        }
     }
 
     /// Commit buffered writes so they become searchable.
@@ -273,5 +341,72 @@ impl FtsIndex {
             .map(|t| Box::new(TermQuery::new(t, IndexRecordOption::Basic)) as Box<dyn Query>)
             .collect();
         Ok(Some(Box::new(BooleanQuery::intersection(must_all))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Re-indexing the same filepath must not leave the previous body's
+    /// terms searchable, and must not leave a ghost document behind — the
+    /// live doc count must return to 1, not accumulate to 2.
+    #[test]
+    fn add_document_replaces_stale_entry_for_same_filepath() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+
+        idx.add_document("notes/a.md", "Title", "uniquealphatoken", 1)
+            .unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.reader.searcher().num_docs(), 1);
+
+        idx.add_document("notes/a.md", "Title", "uniquebetatoken", 1)
+            .unwrap();
+        idx.commit().unwrap();
+        assert_eq!(
+            idx.reader.searcher().num_docs(),
+            1,
+            "stale entry from the first index must be deleted, not accumulated"
+        );
+
+        let alpha = idx.search_fts("uniquealphatoken", 10, None).unwrap();
+        let beta = idx.search_fts("uniquebetatoken", 10, None).unwrap();
+        assert_eq!(alpha.len(), 0, "old body's terms must no longer match");
+        assert_eq!(beta.len(), 1, "new body's terms must match");
+    }
+
+    /// A path whose tokenization yields exactly one term (below the
+    /// PhraseQuery two-term minimum) must still be deletable/replaceable.
+    #[test]
+    fn add_document_replaces_single_token_filepath() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+
+        idx.add_document("readme", "Title", "uniquealphatoken", 1)
+            .unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.reader.searcher().num_docs(), 1);
+
+        idx.add_document("readme", "Title", "uniquebetatoken", 1)
+            .unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.reader.searcher().num_docs(), 1);
+
+        let alpha = idx.search_fts("uniquealphatoken", 10, None).unwrap();
+        let beta = idx.search_fts("uniquebetatoken", 10, None).unwrap();
+        assert_eq!(alpha.len(), 0);
+        assert_eq!(beta.len(), 1);
+    }
+
+    /// Deleting a filepath that was never indexed must be a no-op, not an
+    /// error.
+    #[test]
+    fn delete_by_filepath_missing_is_noop() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.delete_by_filepath("never/indexed.md").unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.reader.searcher().num_docs(), 0);
     }
 }
