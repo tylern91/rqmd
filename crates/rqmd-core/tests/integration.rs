@@ -607,6 +607,243 @@ fn list_documents_multi_filters_to_requested_collections() {
         .all(|d| d.collection == "alpha" || d.collection == "gamma"));
 }
 
+// ── Repeatable `-c`/`--collection` CLI flag (Vec<String> instead of Option<String>) ──
+//
+// `rqmd query`/`search`/`vsearch`/`multi-get` used to declare `-c` as a
+// single-valued `Option<String>`; clap silently kept only the *last* `-c`
+// passed on the command line with no error, so `-c a -c b` searched only `b`.
+// The FTS-only path already had coverage above (`search_fts_multi_*`); these
+// tests give the vector-only (`search_vec`/`search_vec_multi`) and hybrid
+// (`hybrid_query`/`hybrid_query_multi`) paths the same coverage, using a
+// deterministic fake embedding backend so no GGUF model download is required.
+
+/// Test-only `InferenceBackend`: embeds any text into a one-hot vector keyed
+/// by a cheap byte-sum hash of the text's first whitespace-delimited token.
+/// Documents sharing a leading "topic word" collide onto the same dimension
+/// (cosine similarity 1.0 — "found it") even when the rest of their body
+/// differs; distinct topic words land on different dimensions almost all the
+/// time (near-orthogonal — "did not match"). Hashing only the first token
+/// (rather than the whole text) lets test documents carry distinct bodies —
+/// and thus distinct content hashes — while still matching a query on their
+/// shared topic word; giving several documents byte-identical bodies would
+/// dedupe them onto one `content_vectors` row (keyed on content hash) and
+/// mask the multi-collection behavior these tests exist to check. This says
+/// nothing about embedding quality and must never be used outside tests.
+struct FakeEmbedBackend;
+
+impl rqmd_llm::InferenceBackend for FakeEmbedBackend {
+    fn embed(&mut self, text: &str) -> anyhow::Result<Vec<f32>> {
+        let key = text.split_whitespace().next().unwrap_or(text);
+        let mut v = vec![0.0_f32; rqmd_llm::EMBED_DIM];
+        let idx = key
+            .bytes()
+            .fold(0usize, |acc, b| acc.wrapping_add(b as usize))
+            % rqmd_llm::EMBED_DIM;
+        v[idx] = 1.0;
+        Ok(v)
+    }
+
+    fn rerank(&mut self, _query: &str, docs: &[&str]) -> anyhow::Result<Vec<f32>> {
+        Ok(vec![0.0; docs.len()])
+    }
+
+    fn generate(&mut self, _prompt: &str) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+
+    fn embed_model_name(&self) -> &str {
+        "fake"
+    }
+
+    fn rerank_model_name(&self) -> &str {
+        "fake"
+    }
+
+    fn generate_model_name(&self) -> &str {
+        "fake"
+    }
+}
+
+fn test_store_with_vectors(dir: &TempDir) -> Store {
+    let config = StoreConfig {
+        db_path: dir.path().join("test.sqlite"),
+        tantivy_dir: dir.path().join("tantivy"),
+        hnsw_path: dir.path().join("hnsw.usearch"),
+        read_only: false,
+    };
+    Store::open(config, Box::new(FakeEmbedBackend)).unwrap()
+}
+
+#[test]
+fn search_vec_multi_filters_to_requested_collections() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store_with_vectors(&dir);
+
+    for collection in ["alpha", "beta", "gamma"] {
+        store
+            .index_document(
+                collection,
+                "doc.md",
+                "Shared Term",
+                &format!("widgetopic distinguishing content for {collection}"),
+            )
+            .unwrap();
+    }
+    store.flush().unwrap();
+
+    // Omitted / None → searches every collection.
+    let all = store.search_vec_multi("widgetopic", 10, None).unwrap();
+    assert_eq!(all.len(), 3, "expected all 3 collections, got {all:?}");
+
+    // Multiple named collections (`-c alpha -c beta`) → OR-matched, gamma excluded.
+    let two = ["alpha".to_string(), "beta".to_string()];
+    let subset = store
+        .search_vec_multi("widgetopic", 10, Some(&two))
+        .unwrap();
+    assert_eq!(subset.len(), 2, "expected 2 collections, got {subset:?}");
+    assert!(subset
+        .iter()
+        .all(|h| h.collection == "alpha" || h.collection == "beta"));
+    assert!(!subset.iter().any(|h| h.collection == "gamma"));
+}
+
+#[test]
+fn search_vec_single_collection_still_scopes_correctly() {
+    // Regression guard: the singular `search_vec` wrapper (still used
+    // internally, and the shape every prior caller relied on) must keep
+    // filtering to exactly the requested collection now that it's a thin
+    // wrapper over `search_vec_multi`.
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store_with_vectors(&dir);
+
+    store
+        .index_document(
+            "alpha",
+            "doc.md",
+            "Alpha Doc",
+            "widgetopic content unique to alpha",
+        )
+        .unwrap();
+    store
+        .index_document(
+            "beta",
+            "doc.md",
+            "Beta Doc",
+            "widgetopic content unique to beta",
+        )
+        .unwrap();
+    store.flush().unwrap();
+
+    let hits = store.search_vec("widgetopic", 10, Some("alpha")).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].collection, "alpha");
+}
+
+#[test]
+fn search_vec_multi_none_resolves_to_include_by_default_collections() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store_with_vectors(&dir);
+
+    store
+        .index_document(
+            "visible",
+            "doc.md",
+            "Visible Doc",
+            "widgetopic content unique to visible",
+        )
+        .unwrap();
+    store
+        .index_document(
+            "hidden",
+            "doc.md",
+            "Hidden Doc",
+            "widgetopic content unique to hidden",
+        )
+        .unwrap();
+    store.flush().unwrap();
+
+    rqmd_core::db::upsert_collection(
+        &store.db,
+        &rqmd_core::types::Collection {
+            name: "visible".to_string(),
+            path: "/tmp/visible".to_string(),
+            pattern: "**/*.md".to_string(),
+            ignore: vec![],
+            include_by_default: true,
+            update_command: None,
+            allow_hidden: false,
+        },
+    )
+    .unwrap();
+    rqmd_core::db::upsert_collection(
+        &store.db,
+        &rqmd_core::types::Collection {
+            name: "hidden".to_string(),
+            path: "/tmp/hidden".to_string(),
+            pattern: "**/*.md".to_string(),
+            ignore: vec![],
+            include_by_default: false,
+            update_command: None,
+            allow_hidden: false,
+        },
+    )
+    .unwrap();
+
+    // No explicit filter (no `-c` at all) → only the default-included collection.
+    let default_scope = store.search_vec_multi("widgetopic", 10, None).unwrap();
+    assert_eq!(
+        default_scope.len(),
+        1,
+        "expected only the default-included collection: {default_scope:?}"
+    );
+    assert_eq!(default_scope[0].collection, "visible");
+
+    // Explicit filter still reaches the excluded collection.
+    let explicit = vec!["hidden".to_string()];
+    let hits = store
+        .search_vec_multi("widgetopic", 10, Some(&explicit))
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].collection, "hidden");
+}
+
+#[test]
+fn hybrid_query_multi_filters_to_requested_collections() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store_with_vectors(&dir);
+
+    for collection in ["alpha", "beta", "gamma"] {
+        store
+            .index_document(
+                collection,
+                "doc.md",
+                "Shared Term",
+                &format!("widgetopic distinguishing content for {collection}"),
+            )
+            .unwrap();
+    }
+    store.flush().unwrap();
+
+    // `no_expand=true, skip_rerank=true` avoids the generate/rerank models this
+    // fake backend doesn't meaningfully implement, exercising FTS + vector
+    // retrieval and RRF fusion with the collection filter threaded through
+    // both legs.
+    let all = store
+        .hybrid_query_multi("widgetopic", None, 10, None, true, true)
+        .unwrap();
+    assert_eq!(all.len(), 3, "expected all 3 collections, got {all:?}");
+
+    let two = ["alpha".to_string(), "beta".to_string()];
+    let subset = store
+        .hybrid_query_multi("widgetopic", None, 10, Some(&two), true, true)
+        .unwrap();
+    assert_eq!(subset.len(), 2, "expected 2 collections, got {subset:?}");
+    assert!(subset
+        .iter()
+        .all(|h| h.collection == "alpha" || h.collection == "beta"));
+    assert!(!subset.iter().any(|h| h.collection == "gamma"));
+}
+
 // ── multi-get resolution hardening ────────────────────────────────────────────
 //
 // Regression guard for the previous unanchored `contains()` matcher: a bare
@@ -657,6 +894,35 @@ fn find_documents_by_needles_respects_collection_filter() {
     let hits = find_documents_by_needles(&db, Some(&only_alpha), &["README.md"]).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].collection, "alpha");
+}
+
+#[test]
+fn resolve_multi_get_ors_across_multiple_collections() {
+    // Regression guard for the CLI's `-c`/`--collection` flag becoming
+    // repeatable: `rqmd multi-get -c alpha -c beta <pattern>` must OR-match
+    // documents from both named collections while excluding a third,
+    // unrequested collection — and passing no `-c` at all must still return
+    // every collection (multi-get's `None` semantics are "no filter", unlike
+    // the search paths' `include_by_default` fallback).
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir.path().join("test.sqlite")).unwrap();
+
+    for collection in ["alpha", "beta", "gamma"] {
+        let hash = content_hash(collection);
+        upsert_content(&db, &hash, "body", "t").unwrap();
+        upsert_document(&db, collection, "README.md", "Readme", &hash, "t").unwrap();
+    }
+
+    let two = ["alpha".to_string(), "beta".to_string()];
+    let hits = resolve_multi_get(&db, Some(&two), "README.md").unwrap();
+    let cols: HashSet<&str> = hits.iter().map(|d| d.collection.as_str()).collect();
+    assert_eq!(cols.len(), 2, "expected 2 collections, got {cols:?}");
+    assert!(cols.contains("alpha") && cols.contains("beta"));
+    assert!(!cols.contains("gamma"));
+
+    // No filter (no `-c` at all) → every collection.
+    let all = resolve_multi_get(&db, None, "README.md").unwrap();
+    assert_eq!(all.len(), 3);
 }
 
 #[test]

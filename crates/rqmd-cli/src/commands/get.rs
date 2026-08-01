@@ -85,15 +85,14 @@ pub fn run_get(
 pub fn run_multi_get(
     index_dir: &Path,
     pattern: &str,
-    collection: Option<&str>,
+    collections: Option<&[String]>,
     max_lines: Option<usize>,
     fmt: Format,
 ) -> Result<()> {
     let s = store::open_store_no_backend(index_dir, true)?;
 
     // Support comma-separated list, "#docid" entries, and glob-style "*" patterns.
-    let owned = collection.map(|c| [c.to_string()]);
-    let docs = resolve::resolve_multi_get(&s.db, owned.as_ref().map(|a| a.as_slice()), pattern)?;
+    let docs = resolve::resolve_multi_get(&s.db, collections, pattern)?;
     let roots = store::collection_roots(&s, fmt)?;
     let mut printed = 0usize;
 

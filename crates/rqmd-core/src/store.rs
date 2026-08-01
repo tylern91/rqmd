@@ -386,6 +386,9 @@ impl Store {
     }
 
     /// Vector similarity search only (no BM25, no rerank).
+    ///
+    /// Thin wrapper over `search_vec_multi` — a one-element slice reproduces this
+    /// exact behavior.
     pub fn search_vec(
         &mut self,
         query: &str,
@@ -393,7 +396,20 @@ impl Store {
         collection: Option<&str>,
     ) -> Result<Vec<SearchResult>> {
         let owned = collection.map(|c| [c.to_string()]);
-        let effective = self.effective_collections(owned.as_ref().map(|a| a.as_slice()))?;
+        self.search_vec_multi(query, limit, owned.as_ref().map(|a| a.as_slice()))
+    }
+
+    /// Same as `search_vec`, but matches any of several collections. An absent or
+    /// empty filter resolves to the collections with `include_by_default = 1`
+    /// (see `effective_collections`) rather than literally "every collection" —
+    /// pass an explicit list to search collections regardless of that flag.
+    pub fn search_vec_multi(
+        &mut self,
+        query: &str,
+        limit: usize,
+        collections: Option<&[String]>,
+    ) -> Result<Vec<SearchResult>> {
+        let effective = self.effective_collections(collections)?;
         if matches!(effective, Some(ref cols) if cols.is_empty()) {
             return Ok(vec![]);
         }

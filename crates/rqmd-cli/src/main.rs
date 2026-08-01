@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 
 mod commands;
 mod daemon;
@@ -37,8 +37,9 @@ enum Commands {
     /// Hybrid search: BM25 + vector + rerank (recommended)
     Query {
         query: String,
-        #[arg(short = 'c', long)]
-        collection: Option<String>,
+        /// Scope to a collection (repeatable, OR-matched): -c docs -c notes
+        #[arg(short = 'c', long, action = ArgAction::Append)]
+        collection: Vec<String>,
         #[arg(short = 'n', default_value = "10")]
         num: usize,
         #[arg(long, value_enum, default_value = "cli")]
@@ -57,8 +58,9 @@ enum Commands {
     /// Full-text keyword search (BM25 only, no LLM)
     Search {
         query: String,
-        #[arg(short = 'c', long)]
-        collection: Option<String>,
+        /// Scope to a collection (repeatable, OR-matched): -c docs -c notes
+        #[arg(short = 'c', long, action = ArgAction::Append)]
+        collection: Vec<String>,
         #[arg(short = 'n', default_value = "10")]
         num: usize,
         #[arg(long, value_enum, default_value = "cli")]
@@ -69,8 +71,9 @@ enum Commands {
     /// Vector similarity search (no rerank)
     Vsearch {
         query: String,
-        #[arg(short = 'c', long)]
-        collection: Option<String>,
+        /// Scope to a collection (repeatable, OR-matched): -c docs -c notes
+        #[arg(short = 'c', long, action = ArgAction::Append)]
+        collection: Vec<String>,
         #[arg(short = 'n', default_value = "10")]
         num: usize,
         #[arg(long, value_enum, default_value = "cli")]
@@ -100,8 +103,9 @@ enum Commands {
     #[command(name = "multi-get")]
     MultiGet {
         pattern: String,
-        #[arg(short = 'c', long)]
-        collection: Option<String>,
+        /// Scope to a collection (repeatable, OR-matched): -c docs -c notes
+        #[arg(short = 'c', long, action = ArgAction::Append)]
+        collection: Vec<String>,
         #[arg(short = 'l', long)]
         max_lines: Option<usize>,
         #[arg(long, value_enum, default_value = "cli")]
@@ -233,6 +237,21 @@ pub enum ContextCommand {
     Check,
 }
 
+/// Convert a `Vec<String>` collected from repeatable `-c`/`--collection` flags
+/// into the `Option<&[String]>` shape the rqmd-core query functions expect.
+/// An empty vec (no `-c` passed at all) MUST become `None`, not `Some(&[])`:
+/// `effective_collections` treats an explicit-but-empty list as "scoped to
+/// nothing" (zero results), whereas `None` means "unscoped" — fall back to
+/// the collections marked `include_by_default`. Losing this distinction would
+/// silently turn "no -c flag" into "match zero collections".
+fn collections_filter(v: &[String]) -> Option<&[String]> {
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -291,7 +310,7 @@ fn main() -> Result<()> {
             &index_dir,
             &query,
             intent.as_deref(),
-            collection.as_deref(),
+            collections_filter(&collection),
             num,
             format,
             no_rerank,
@@ -307,7 +326,7 @@ fn main() -> Result<()> {
         } => commands::query::run_search(
             &index_dir,
             &query,
-            collection.as_deref(),
+            collections_filter(&collection),
             num,
             format,
             full,
@@ -321,7 +340,7 @@ fn main() -> Result<()> {
         } => commands::query::run_vsearch(
             &index_dir,
             &query,
-            collection.as_deref(),
+            collections_filter(&collection),
             num,
             format,
             full,
@@ -343,7 +362,7 @@ fn main() -> Result<()> {
         } => commands::get::run_multi_get(
             &index_dir,
             &pattern,
-            collection.as_deref(),
+            collections_filter(&collection),
             max_lines,
             format,
         ),
