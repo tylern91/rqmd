@@ -4,7 +4,16 @@
 
 ---
 
-## [0.8.1] - 2026-08-01
+## [0.8.0] - 2026-08-01
+### Fixed
+- `-c`/`--collection` on `query`, `search`, `vsearch`, and `multi-get` was
+  declared as a single-valued flag even though it was documented as
+  repeatable and OR-matched across collections. Passing `-c a -c b`
+  silently kept only the last value (`b`) and dropped `a` — no error, no
+  warning, just a narrower result set than requested. The flag is now
+  genuinely repeatable, wired through the existing multi-collection
+  plumbing already used by the MCP server.
+
 ### Documentation
 - `README.md` and `docs/SYNTAX.md` brought up to date with the v0.7.0 CLI
   surface: `similar`, `mcp status`/`stop`, `--rebuild`, `--mask`/`--hidden`,
@@ -17,18 +26,6 @@
   configuration); `docs/SYNTAX.md` rebranded from `qmd` to `rqmd` and
   corrected on tokenization (exact-token match, not prefix; OR-combined
   multi-term queries).
-
----
-
-## [0.8.0] - 2026-08-01
-### Fixed
-- `-c`/`--collection` on `query`, `search`, `vsearch`, and `multi-get` was
-  declared as a single-valued flag even though it was documented as
-  repeatable and OR-matched across collections. Passing `-c a -c b`
-  silently kept only the last value (`b`) and dropped `a` — no error, no
-  warning, just a narrower result set than requested. The flag is now
-  genuinely repeatable, wired through the existing multi-collection
-  plumbing already used by the MCP server.
 
 ---
 
