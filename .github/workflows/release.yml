@@ -75,6 +75,23 @@ jobs:
             printf 'skip=false\n' >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Stamp commit/PR refs into this release's CHANGELOG section
+        # Stamps CHANGELOG.md in THIS ephemeral checkout only — never committed or pushed
+        # back to main (the branch ruleset forbids that regardless: bypass_actors is null,
+        # so not even this job's own token can push to main directly). The tag computed
+        # above (steps.ver.outputs.next) doesn't exist yet at this point in the job, so
+        # STAMP_HEAD_REF tells the script to compute the commit range against HEAD (the
+        # merge commit about to become that tag) instead of requiring the tag to pre-exist.
+        # This is what makes every future release body carry commit/PR provenance
+        # automatically instead of just the one-time historical backfill.
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          STAMP_HEAD_REF: HEAD
+        run: |
+          set -euo pipefail
+          version="${{ steps.ver.outputs.next }}"
+          bash scripts/stamp-changelog-refs.sh "${version#v}"
+
       - name: Build release notes
         if: steps.guard.outputs.skip == 'false'
         env:
@@ -281,6 +298,18 @@ jobs:
           fi
           printf 'darwin=%s\n' "$darwin_sha" >> "$GITHUB_OUTPUT"
           printf 'linux=%s\n' "$linux_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp commit/PR refs into this release's CHANGELOG section
+        # This job re-renders the body from --from-existing (to inject real asset digests),
+        # which would otherwise overwrite the `release` job's stamped body with an unstamped
+        # one — this checkout is independent and starts from unstamped CHANGELOG.md same as
+        # that job did. Same ephemeral-only mechanism: see the identical step in the `release`
+        # job above for the full rationale.
+        env:
+          STAMP_HEAD_REF: HEAD
+        run: |
+          set -euo pipefail
+          bash scripts/stamp-changelog-refs.sh "${VERSION#v}"
 
       - name: Re-render release notes with real digests
         env:

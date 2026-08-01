@@ -36,9 +36,21 @@ if [ ! -f "$CHANGELOG" ]; then
   exit 1
 fi
 
+# Normally the tag must already exist (we're backfilling a published release). The one
+# exception is release.yml's own `release` job: it stamps CHANGELOG.md in its ephemeral
+# checkout *before* the tag is created, so the body it builds from --from-existing carries
+# refs. STAMP_HEAD_REF opts into that: point the range end at a ref that DOES exist (HEAD)
+# instead of the not-yet-created tag. Unset/empty leaves today's exact behavior untouched.
+range_end="$tag"
+head_override=false
 if ! git rev-parse "$tag" >/dev/null 2>&1; then
-  printf 'stamp-changelog-refs: tag %s not found\n' "$tag" >&2
-  exit 1
+  if [ -n "${STAMP_HEAD_REF:-}" ] && git rev-parse "${STAMP_HEAD_REF}" >/dev/null 2>&1; then
+    range_end="$STAMP_HEAD_REF"
+    head_override=true
+  else
+    printf 'stamp-changelog-refs: tag %s not found\n' "$tag" >&2
+    exit 1
+  fi
 fi
 
 # Handles both "git@github.com:owner/repo.git" and "https://github.com/owner/repo.git" —
@@ -51,13 +63,20 @@ fi
 
 # --- Resolve the previous tag, and the commit range for this release --------
 all_tags="$(git tag --sort=v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$')"
-prev_tag="$(printf '%s\n' "$all_tags" | grep -B1 -F -x "$tag" | head -1)"
-[ "$prev_tag" = "$tag" ] && prev_tag=""
+if [ "$head_override" = true ]; then
+  # $tag doesn't exist in $all_tags yet (we're stamping pre-tag-creation) — the current
+  # latest real tag is this release's predecessor by definition, so grep -B1 -x "$tag"
+  # (which needs $tag present in the list to find its neighbor) can't be used here.
+  prev_tag="$(printf '%s\n' "$all_tags" | tail -1)"
+else
+  prev_tag="$(printf '%s\n' "$all_tags" | grep -B1 -F -x "$tag" | head -1)"
+  [ "$prev_tag" = "$tag" ] && prev_tag=""
+fi
 
 if [ -n "$prev_tag" ]; then
-  range="${prev_tag}..${tag}"
+  range="${prev_tag}..${range_end}"
 else
-  range="$tag"
+  range="$range_end"
 fi
 
 all_commit_lines=()
