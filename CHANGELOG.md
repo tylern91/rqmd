@@ -4,6 +4,17 @@
 
 ---
 
+## [0.10.1] - 2026-08-03
+### Fixed
+- `rqmd mcp` no longer leaves an orphaned daemon child process running when
+  the parent's health-check times out (e.g. while a large model is still
+  loading) — the child is now killed and reaped instead of abandoned.
+- Pidfile ownership is now single-writer (the daemon process itself, once
+  its listener is bound) instead of being written by both the parent and
+  child, closing a race that could leave a stale or missing pidfile.
+
+---
+
 ## [0.10.0] - 2026-08-03
 ### Security
 - GGUF model downloads (`rqmd-llm`) now pin an explicit revision per model

@@ -47,8 +47,12 @@ pub fn run_mcp(
         .enable_all()
         .build()?;
 
-    daemon::write_pidfile(index_dir, std::process::id(), host, port)?;
-    let result = rt.block_on(rqmd_mcp::run_http(server, host, port));
+    let index_dir_owned = index_dir.to_path_buf();
+    let host_owned = host.to_string();
+    let pid = std::process::id();
+    let result = rt.block_on(rqmd_mcp::run_http(server, host, port, || {
+        daemon::write_pidfile(&index_dir_owned, pid, &host_owned, port)
+    }));
     daemon::remove_pidfile(index_dir);
     result
 }
@@ -124,18 +128,28 @@ fn spawn_daemon(index_dir: &Path, host: &str, port: u16, allow_non_loopback: boo
         }
     }
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .context("failed to start background MCP server")?;
     let pid = child.id();
 
     match daemon::wait_for_health(host, port, pid, Duration::from_secs(5)) {
         Ok(()) => {
-            daemon::write_pidfile(index_dir, pid, host, port)?;
+            // The daemon writes its own pidfile once its listener is bound
+            // (see run_http's `on_bound` hook) — we only read/report here,
+            // so there is a single writer for the file's whole lifecycle.
             eprintln!("rqmd MCP daemon started (pid {pid}) on http://{host}:{port}");
             Ok(())
         }
         Err(e) => {
+            // Health check timed out — the child may still be alive (e.g.
+            // stuck loading a large model past the check budget). Leaving it
+            // running here would orphan it: we already told the user launch
+            // failed, but the child would keep going, bind the port, and
+            // write a pidfile with nothing tracking it. Kill and reap it
+            // before reporting failure.
+            let _ = child.kill();
+            let _ = child.wait();
             let tail = daemon::tail_log(index_dir, 20);
             bail!(
                 "daemon failed to become healthy within 5s: {e}\n\n--- last 20 lines of {} ---\n{tail}",

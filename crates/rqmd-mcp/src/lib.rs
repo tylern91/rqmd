@@ -175,7 +175,17 @@ async fn shutdown_signal() {
 
 /// Run an MCP server over Streamable HTTP on the given host/port (blocks
 /// until the server is shut down).
-pub async fn run_http(server: RqmdServer, host: &str, port: u16) -> Result<()> {
+///
+/// `on_bound` fires once the listener has actually bound the port — the
+/// right moment for a caller to record this process as the daemon (e.g.
+/// write a pidfile), rather than doing so speculatively before the bind is
+/// known to succeed.
+pub async fn run_http(
+    server: RqmdServer,
+    host: &str,
+    port: u16,
+    on_bound: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     spawn_idle_eviction(server.clone());
 
     let mut allowed_hosts = vec!["localhost".to_string(), "127.0.0.1".to_string()];
@@ -210,6 +220,7 @@ pub async fn run_http(server: RqmdServer, host: &str, port: u16) -> Result<()> {
 
     let router = build_router(service, allowed_hosts, pid, index_dir);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    on_bound()?;
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
