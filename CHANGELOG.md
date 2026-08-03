@@ -18,6 +18,13 @@
   silently discarded via `.ok()`, degrading `query` to BM25+vector-only with
   no user-visible signal. Callers now check `InferenceBackend::capabilities()`
   and log a warning before skipping an unsupported step.
+- `OrtBackend::new()` unconditionally spawned a fresh Tokio runtime to
+  download its model via hf-hub, which panics ("Cannot start a runtime from
+  within a runtime") when called from an already-async context — exactly
+  the situation the MCP-backend-selection fix above now creates the first
+  time `rqmd mcp --http` actually reaches this backend. Fixed by mirroring
+  `LlamaCppBackend::new()`'s existing `Handle::try_current()` +
+  `block_in_place` pattern.
 
 ---
 
