@@ -4,7 +4,7 @@
 
 ---
 
-## [0.9.0] - 2026-08-03
+## [0.10.0] - 2026-08-03
 ### Security
 - GGUF model downloads (`rqmd-llm`) now pin an explicit revision per model
   repo and verify the downloaded file's SHA-256 against a known-good hash
@@ -41,6 +41,19 @@
   fixing non-deterministic document resolution for docids containing
   those characters. Not an injection risk (the query was already
   parameterized) — this was a match-semantics correctness bug.
+
+---
+
+## [0.9.0] - 2026-08-03
+### Added
+- MCP server now enforces an `Origin` allowlist (previously unset, which
+  disabled the underlying library's Origin validation entirely), a request
+  body size cap, and a hard cap on `multi_get` result counts.
+### Changed
+- `/health` now sits behind the same Host-header validation as `/mcp` and no
+  longer leaks the daemon PID or index path in its response.
+- Binding the MCP server to a non-loopback host now requires an explicit
+  opt-in instead of a stderr warning plus automatic self-authorization.
 
 ---
 
