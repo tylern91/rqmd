@@ -4,6 +4,23 @@
 
 ---
 
+## [0.8.2] - 2026-08-03
+### Fixed
+- `rqmd mcp` bypassed the backend factory and hardcoded the llama.cpp
+  backend directly, so `RRQMD_INFERENCE_BACKEND=ort` worked for the CLI but
+  was silently ignored by the MCP server — both now share one construction
+  path (`create_backend`).
+- The stale-embeddings check compared against a hardcoded llama.cpp default
+  fingerprint regardless of which backend actually produced the vectors,
+  causing a permanent false "embeddings are stale" warning whenever a
+  non-default backend (e.g. ORT) was active.
+- Backends that don't support rerank/generate (e.g. ORT) had their errors
+  silently discarded via `.ok()`, degrading `query` to BM25+vector-only with
+  no user-visible signal. Callers now check `InferenceBackend::capabilities()`
+  and log a warning before skipping an unsupported step.
+
+---
+
 ## [0.8.1] - 2026-08-02
 ### Fixed
 - `release.yml`: every future release body now gets commit/PR provenance

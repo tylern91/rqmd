@@ -12,7 +12,7 @@ use rmcp::{
 };
 
 use rqmd_core::{db, resolve, Store, StoreConfig};
-use rqmd_llm::{no_backend, LlamaCppBackend, LlamaCppConfig};
+use rqmd_llm::{create_backend, no_backend, BackendKind};
 
 // ── Server struct ─────────────────────────────────────────────────────────────
 
@@ -47,12 +47,14 @@ impl RqmdServer {
     /// Return the ML store, initialising it (loading models) on first call.
     fn ml(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Store>> {
         let store = self.ml_store.get_or_try_init(|| {
-            eprintln!("[rqmd-mcp] Loading inference backend (models download on first run)...");
-            let backend = LlamaCppBackend::new(LlamaCppConfig::default())
-                .context("failed to init LlamaCpp backend")?;
+            let kind = BackendKind::from_env();
+            eprintln!(
+                "[rqmd-mcp] Loading inference backend (kind={kind:?}, models download on first run)..."
+            );
+            let backend = create_backend(&kind).context("failed to init inference backend")?;
             eprintln!("[rqmd-mcp] Backend ready.");
             let config = make_config(&self.index_dir);
-            let s = Store::open(config, Box::new(backend))?;
+            let s = Store::open(config, backend)?;
             Ok::<_, anyhow::Error>(Arc::new(std::sync::Mutex::new(s)))
         })?;
         store

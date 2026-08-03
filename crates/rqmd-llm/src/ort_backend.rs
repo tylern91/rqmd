@@ -285,6 +285,14 @@ impl OrtBackend {
 }
 
 impl InferenceBackend for OrtBackend {
+    fn capabilities(&self) -> crate::BackendCapabilities {
+        crate::BackendCapabilities {
+            embed: true,
+            rerank: false,
+            generate: false,
+        }
+    }
+
     fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
         Ok(self.run_batch(&[text])?.remove(0))
     }
