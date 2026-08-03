@@ -40,7 +40,7 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
         .unwrap_or(None);
 
     // ── Header (qmd.ts:492 style, rqmd branding) ────────────────────────────────
-    println!("\x1b[1mQMD Status (Rust engine)\x1b[0m\n");
+    println!("\x1b[1mRQMD Status (Rust engine)\x1b[0m\n");
     println!("Index: {}", index_dir.display());
     println!("Size:  {}", fmt_bytes(total_index_size));
     println!();
@@ -626,12 +626,12 @@ pub fn run_init() -> Result<()> {
     // Touch the SQLite db to create it
     let _ = store::open_store_no_backend(&qmd_dir, false)?;
     println!("Initialized local index at {}", qmd_dir.display());
-    println!("Run `qmd collection add <path> --name <name>` to add a collection.");
+    println!("Run `rqmd collection add <path> --name <name>` to add a collection.");
     Ok(())
 }
 
 pub fn run_doctor(index_dir: &Path) -> Result<()> {
-    println!("QMD Doctor (Rust engine)\n");
+    println!("RQMD Doctor (Rust engine)\n");
 
     let db_path = index_dir.join("index.sqlite");
     println!("  Index dir:     {}", index_dir.display());
@@ -640,7 +640,7 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         if db_path.exists() {
             "yes"
         } else {
-            "NO — run any qmd command to create"
+            "NO — run any rqmd command to create"
         }
     );
     println!("  Tantivy dir:   {}", index_dir.join("tantivy").display());
@@ -735,7 +735,7 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         let needs_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(0);
         if needs_embed > 0 {
             println!("\n  Recommended next step");
-            println!("    Run 'qmd embed' to generate embeddings ({needs_embed} hashes pending)");
+            println!("    Run 'rqmd embed' to generate embeddings ({needs_embed} hashes pending)");
         }
     }
     Ok(())

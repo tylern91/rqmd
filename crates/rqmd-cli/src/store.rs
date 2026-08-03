@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rqmd_core::{db, store as core_store, Store, StoreConfig};
-use rqmd_llm::{create_backend, no_backend, BackendKind, LlamaCppConfig};
+use rqmd_llm::{create_backend, no_backend, BackendKind};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -63,13 +63,18 @@ pub fn open_store_with_backend_kind(
     Store::open(store_config(index_dir, read_only), backend)
 }
 
-/// The `embed_fingerprint` the current embed model + chunking constants would
-/// produce. Compare against `db::fingerprint_breakdown` rows to detect stale
-/// vectors — shared by `doctor`, `embed`, `query`, and `vsearch` so there is
-/// exactly one staleness detection path.
+/// The `embed_fingerprint` the currently *configured* backend (per
+/// `RRQMD_INFERENCE_BACKEND`) + chunking constants would produce. Compare
+/// against `db::fingerprint_breakdown` rows to detect stale vectors — shared
+/// by `doctor`, `embed`, `query`, and `vsearch` so there is exactly one
+/// staleness detection path.
+///
+/// Derived from `BackendKind::default_embed_model_name()`, not a hardcoded
+/// `LlamaCppConfig::default()` — otherwise this permanently disagrees with the
+/// real fingerprint whenever a non-default backend (e.g. ORT) is active.
 pub fn expected_fingerprint() -> String {
-    let cfg = LlamaCppConfig::default();
-    core_store::expected_embed_fingerprint(&cfg.embed_repo, &cfg.embed_file)
+    let name = BackendKind::from_env().default_embed_model_name();
+    core_store::expected_embed_fingerprint(&name)
 }
 
 /// Warn once if any content_vectors row was produced by a different model or

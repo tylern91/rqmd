@@ -769,18 +769,25 @@ impl Store {
             // Step 3: Query expansion via generation model (skipped on strong BM25 signal,
             // or unconditionally when the caller passed `no_expand`).
             if !no_expand && !strong_signal {
-                let prompt = build_expansion_prompt(expand_text, effective_intent.as_deref());
-                match self.backend.generate(&prompt) {
-                    Ok(expansion) => {
-                        let expansion_lists =
-                            self.parse_and_run_expansion(&expansion, collections, fetch_size)?;
-                        ranked_lists.extend(expansion_lists.0);
-                        list_meta.extend(expansion_lists.1);
-                    }
-                    Err(e) => {
-                        // Expansion is an enhancement — failures fall back to
-                        // original BM25+vec results rather than surfacing an error.
-                        tracing::warn!("query expansion skipped: {e:#}");
+                if !self.backend.capabilities().generate {
+                    tracing::warn!(
+                        "query expansion skipped: active inference backend does not support \
+                         generation — falling back to BM25+vector fusion only"
+                    );
+                } else {
+                    let prompt = build_expansion_prompt(expand_text, effective_intent.as_deref());
+                    match self.backend.generate(&prompt) {
+                        Ok(expansion) => {
+                            let expansion_lists =
+                                self.parse_and_run_expansion(&expansion, collections, fetch_size)?;
+                            ranked_lists.extend(expansion_lists.0);
+                            list_meta.extend(expansion_lists.1);
+                        }
+                        Err(e) => {
+                            // Expansion is an enhancement — failures fall back to
+                            // original BM25+vec results rather than surfacing an error.
+                            tracing::warn!("query expansion skipped: {e:#}");
+                        }
                     }
                 }
             }
@@ -829,6 +836,12 @@ impl Store {
         let chunk_refs: Vec<&str> = best_chunks.iter().map(|(t, _)| t.as_str()).collect();
 
         let rerank_scores: Option<Vec<f32>> = if skip_rerank {
+            None
+        } else if !self.backend.capabilities().rerank {
+            tracing::warn!(
+                "rerank skipped: active inference backend does not support reranking — \
+                 results are BM25+vector fusion only"
+            );
             None
         } else {
             // Use the intent-prepended rerank query for better cross-encoder scoring.
@@ -1181,12 +1194,14 @@ fn embed_fingerprint(model: &str) -> String {
 }
 
 /// Compute the fingerprint a fresh `rqmd embed` run would produce for the given
-/// embed model, without loading any model weights or contacting HuggingFace.
-/// `embed_repo`/`embed_file` should come from the same `LlamaCppConfig` the
-/// backend would use, so the string matches `InferenceBackend::embed_model_name`
-/// exactly. Used by `rqmd doctor` to tell current vectors from stale ones.
-pub fn expected_embed_fingerprint(embed_repo: &str, embed_file: &str) -> String {
-    embed_fingerprint(&format!("{embed_repo}/{embed_file}"))
+/// embed-model identity, without loading any model weights or contacting
+/// HuggingFace. `embed_model_name` must match whatever the actually-configured
+/// backend's `InferenceBackend::embed_model_name` reports — e.g.
+/// `BackendKind::default_embed_model_name()` for the backend kind currently
+/// selected — not a hardcoded single backend's defaults. Used by `rqmd doctor`
+/// to tell current vectors from stale ones.
+pub fn expected_embed_fingerprint(embed_model_name: &str) -> String {
+    embed_fingerprint(embed_model_name)
 }
 
 #[cfg(test)]
@@ -1256,5 +1271,118 @@ mod tests {
         assert_eq!(store_alpha.len(), 0);
         assert_eq!(store_beta.len(), 1);
         assert_eq!(store_beta[0].body, "uniquebetatoken");
+    }
+
+    /// A stub `InferenceBackend` with a configurable identity and capability
+    /// set. `rerank`/`generate` panic rather than error — call sites must
+    /// check `capabilities()` and skip the call entirely, not attempt-and-discard.
+    struct StubBackend {
+        name: String,
+        caps: rqmd_llm::BackendCapabilities,
+    }
+
+    impl rqmd_llm::InferenceBackend for StubBackend {
+        fn capabilities(&self) -> rqmd_llm::BackendCapabilities {
+            self.caps
+        }
+        fn embed(&mut self, _text: &str) -> Result<Vec<f32>> {
+            // Constant vector: any two calls are identical, so index-time and
+            // query-time embeddings always cosine-match at 1.0 regardless of text.
+            Ok(vec![0.1; rqmd_llm::EMBED_DIM])
+        }
+        fn rerank(&mut self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>> {
+            panic!("rerank must not be called when capabilities().rerank is false")
+        }
+        fn generate(&mut self, _prompt: &str) -> Result<String> {
+            panic!("generate must not be called when capabilities().generate is false")
+        }
+        fn embed_model_name(&self) -> &str {
+            &self.name
+        }
+        fn rerank_model_name(&self) -> &str {
+            "stub-rerank"
+        }
+        fn generate_model_name(&self) -> &str {
+            "stub-generate"
+        }
+    }
+
+    fn open_stub_store(dir: &std::path::Path, backend: StubBackend) -> Store {
+        let config = StoreConfig {
+            db_path: dir.join("test.sqlite"),
+            tantivy_dir: dir.join("tantivy"),
+            hnsw_path: dir.join("hnsw.usearch"),
+            read_only: false,
+        };
+        Store::open(config, Box::new(backend)).unwrap()
+    }
+
+    /// Regression test for the "embeddings are stale" false-positive: the
+    /// expected fingerprint must be computed from whichever backend identity
+    /// actually did the embedding, not a hardcoded `LlamaCppConfig::default()`.
+    #[test]
+    fn expected_fingerprint_matches_whatever_backend_actually_embedded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let backend = StubBackend {
+            name: "stub-org/stub-embed.onnx".to_string(),
+            caps: rqmd_llm::BackendCapabilities {
+                embed: true,
+                rerank: true,
+                generate: true,
+            },
+        };
+        let mut store = open_stub_store(dir.path(), backend);
+
+        store
+            .index_document("coll", "a.md", "Title", "hello world")
+            .unwrap();
+
+        let breakdown = db::fingerprint_breakdown(&store.db).unwrap();
+        assert_eq!(breakdown.len(), 1);
+        let recorded_fp = &breakdown[0].0;
+
+        // Matches when computed from the SAME identity the stub actually used.
+        let expected_for_stub = expected_embed_fingerprint("stub-org/stub-embed.onnx");
+        assert_eq!(recorded_fp, &expected_for_stub);
+
+        // Must NOT match the llama.cpp default identity — otherwise this
+        // assertion would be vacuously true regardless of which backend embedded.
+        let llama_default = expected_embed_fingerprint(&format!(
+            "{}/{}",
+            rqmd_llm::DEFAULT_EMBED_REPO,
+            rqmd_llm::DEFAULT_EMBED_FILE
+        ));
+        assert_ne!(recorded_fp, &llama_default);
+    }
+
+    /// Regression test for silent query-quality degradation: when the active
+    /// backend doesn't support rerank/generate, `hybrid_query_multi` must skip
+    /// those steps (not attempt-and-discard) and still return results.
+    #[test]
+    fn hybrid_query_skips_unsupported_capabilities_without_calling_them() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let backend = StubBackend {
+            name: "embed-only-backend".to_string(),
+            caps: rqmd_llm::BackendCapabilities {
+                embed: true,
+                rerank: false,
+                generate: false,
+            },
+        };
+        let mut store = open_stub_store(dir.path(), backend);
+
+        store
+            .index_document("coll", "a.md", "Title", "hello world")
+            .unwrap();
+        store.flush().unwrap();
+
+        // Query shares no BM25 tokens with the doc (weak/no FTS signal, so
+        // `strong_signal` is false and the generate-expansion step is attempted)
+        // but embeds identically via the stub, so vector search still matches.
+        let results = store
+            .hybrid_query_multi("zzzznonexistentqueryterm", None, 10, None, false, false)
+            .unwrap();
+
+        assert_eq!(results.len(), 1, "vector match must still surface a result");
     }
 }

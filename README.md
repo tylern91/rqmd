@@ -31,6 +31,7 @@ Built on the search pipeline and ideas of **[tobi/qmd](https://github.com/tobi/q
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
 - [Acknowledgements](#acknowledgements)
+- [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [DISCLAIMER.md](DISCLAIMER.md)
 
 ---
 
@@ -122,10 +123,6 @@ install -m 0755 rqmd ~/.local/bin/rqmd
 ### From source (recommended while in development)
 
 Requirements: Rust stable (≥1.78), cmake ≥3.14 (cmake 4.x supported), Xcode Command Line Tools (macOS) or `build-essential` (Linux).
-
-> **Git LFS note:** binary assets (images in `assets/`) are stored in Git LFS.
-> Run `brew install git-lfs && git lfs install` once before cloning if you need those files.
-> A normal `git clone` without LFS still works — the PNG will be an LFS pointer file rather than the full image.
 
 ```sh
 # Clone the repo
@@ -577,7 +574,7 @@ rqmd/                    # repo root = Cargo workspace
 │   ├── rqmd-cli/        # CLI entry point (clap)
 │   └── rqmd-mcp/        # MCP server (rmcp, stdio + HTTP)
 ├── docs/                # SYNTAX.md and other reference docs
-└── assets/              # architecture diagram
+└── assets/              # rqmd-architecture.svg
 ```
 
 ### Build profiles
@@ -731,6 +728,8 @@ a query with generally weak recall.
 ---
 
 ## How it works
+
+![rqmd architecture](assets/rqmd-architecture.svg)
 
 **Indexing** (`rqmd collection add` / `rqmd update`): each matched file is
 read, hashed (SHA-256 of its content — the resulting hash's first 6 hex
@@ -896,13 +895,12 @@ automatically as a fallback.
 
 ## Contributing
 
-Before sending a PR:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide — GPG-signing
+requirement, commit/branch conventions, the CHANGELOG + semver-label
+convention, and what not to rely on yet.
 
-1. Run `cargo fmt --all` and `cargo clippy --workspace -- -D warnings`
-2. Run `cargo test --workspace --lib`
-3. Check that `cargo build --workspace` and `cargo build -p rqmd-cli --features ort-backend` both pass
-
-The search quality gate is `rqmd eval`:
+The non-obvious part is the search-quality gate, `rqmd eval` — run it before
+any change that touches the search path:
 
 ```sh
 # BM25 quality (no model, fast — run this always)
@@ -916,6 +914,10 @@ cargo run -p rqmd-cli -- bench -n 5
 ```
 
 The BM25 eval also runs in CI on every push.
+
+See also: [SECURITY.md](SECURITY.md) for vulnerability reporting and the
+known MCP-listener authentication boundary, and
+[DISCLAIMER.md](DISCLAIMER.md) for license, warranty, and no-telemetry terms.
 
 ---
 
