@@ -4,6 +4,30 @@
 
 ---
 
+## [0.10.4] - 2026-08-03
+### Fixed
+- `rqmd mcp` bypassed the backend factory and hardcoded the llama.cpp
+  backend directly, so `RRQMD_INFERENCE_BACKEND=ort` worked for the CLI but
+  was silently ignored by the MCP server — both now share one construction
+  path (`create_backend`).
+- The stale-embeddings check compared against a hardcoded llama.cpp default
+  fingerprint regardless of which backend actually produced the vectors,
+  causing a permanent false "embeddings are stale" warning whenever a
+  non-default backend (e.g. ORT) was active.
+- Backends that don't support rerank/generate (e.g. ORT) had their errors
+  silently discarded via `.ok()`, degrading `query` to BM25+vector-only with
+  no user-visible signal. Callers now check `InferenceBackend::capabilities()`
+  and log a warning before skipping an unsupported step.
+- `OrtBackend::new()` unconditionally spawned a fresh Tokio runtime to
+  download its model via hf-hub, which panics ("Cannot start a runtime from
+  within a runtime") when called from an already-async context — exactly
+  the situation the MCP-backend-selection fix above now creates the first
+  time `rqmd mcp --http` actually reaches this backend. Fixed by mirroring
+  `LlamaCppBackend::new()`'s existing `Handle::try_current()` +
+  `block_in_place` pattern.
+
+---
+
 ## [0.10.3] - 2026-08-03
 ### Fixed
 - Several user-facing strings (status/doctor output, error messages, help

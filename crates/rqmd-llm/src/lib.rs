@@ -108,8 +108,31 @@ fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
 
 // ── InferenceBackend trait ────────────────────────────────────────────────────
 
+/// Which operations a backend actually supports. Callers (e.g. `hybrid_query`'s
+/// rerank/generate steps) check this before attempting a call so an unsupported
+/// operation degrades with a visible notice instead of a swallowed error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendCapabilities {
+    pub embed: bool,
+    pub rerank: bool,
+    pub generate: bool,
+}
+
 /// Core inference operations needed by qmd's search pipeline.
 pub trait InferenceBackend: Send {
+    /// Which operations this backend actually supports. Default: full support
+    /// (embed + rerank + generate), matching `LlamaCppBackend`. Backends that
+    /// only implement a subset (e.g. `OrtBackend`: embed-only) must override
+    /// this truthfully — callers rely on it to decide whether to attempt
+    /// `rerank`/`generate` at all.
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            embed: true,
+            rerank: true,
+            generate: true,
+        }
+    }
+
     /// Embed a single text. Returns a unit-normalized f32 vector.
     fn embed(&mut self, text: &str) -> Result<Vec<f32>>;
 
@@ -843,6 +866,14 @@ impl InferenceBackend for LlamaCppBackend {
 pub struct NoBackend;
 
 impl InferenceBackend for NoBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            embed: false,
+            rerank: false,
+            generate: false,
+        }
+    }
+
     fn embed(&mut self, _text: &str) -> Result<Vec<f32>> {
         anyhow::bail!("embed called without inference backend — run `rqmd embed` first")
     }
@@ -901,6 +932,25 @@ impl BackendKind {
             _ => Self::Llama,
         }
     }
+
+    /// The embed-model identity (`"repo/file"`) this kind's default config would
+    /// report via `InferenceBackend::embed_model_name`, without downloading or
+    /// constructing anything. Mirrors `create_backend`'s embed config exactly —
+    /// used to detect stale embeddings (`rqmd doctor`) without paying the cost of
+    /// loading a real backend, and without hardcoding one backend's defaults.
+    pub fn default_embed_model_name(&self) -> String {
+        match self {
+            BackendKind::Llama => {
+                let cfg = LlamaCppConfig::default();
+                format!("{}/{}", cfg.embed_repo, cfg.embed_file)
+            }
+            #[cfg(feature = "ort-backend")]
+            BackendKind::Ort => {
+                let cfg = OrtConfig::default();
+                format!("{}/{}", cfg.embed_repo, cfg.embed_file)
+            }
+        }
+    }
 }
 
 /// Create the inference backend configured by env vars and `kind`.
@@ -938,6 +988,34 @@ pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Mutates the shared RRQMD_INFERENCE_BACKEND env var — safe here since no
+    // other test in this crate reads it, but keep any future env-based test
+    // in this same block so ordering stays obvious.
+    #[test]
+    fn backend_kind_from_env_defaults_to_llama_when_unset() {
+        std::env::remove_var("RRQMD_INFERENCE_BACKEND");
+        assert!(matches!(BackendKind::from_env(), BackendKind::Llama));
+    }
+
+    #[test]
+    fn backend_kind_from_env_parses_llama_case_insensitively() {
+        std::env::set_var("RRQMD_INFERENCE_BACKEND", "LLAMA");
+        assert!(matches!(BackendKind::from_env(), BackendKind::Llama));
+        std::env::remove_var("RRQMD_INFERENCE_BACKEND");
+    }
+
+    /// This is the exact identity `create_backend(&BackendKind::Llama)` would
+    /// produce for its embed model — used by the stale-fingerprint check
+    /// (`rqmd doctor`) to avoid loading a real backend just to compare.
+    #[test]
+    fn default_embed_model_name_matches_llama_config_defaults() {
+        let cfg = LlamaCppConfig::default();
+        assert_eq!(
+            BackendKind::Llama.default_embed_model_name(),
+            format!("{}/{}", cfg.embed_repo, cfg.embed_file)
+        );
+    }
 
     // Built by forward addition from a fixed base Instant, never by subtracting
     // from `Instant::now()` — a freshly-booted CI container can have too little

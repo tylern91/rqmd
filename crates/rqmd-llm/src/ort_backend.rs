@@ -93,9 +93,11 @@ impl OrtBackend {
     pub fn new(config: OrtConfig) -> Result<Self> {
         use hf_hub::api::tokio::Api;
 
-        // Download model and tokenizer via hf-hub (async, but new() is sync)
-        let rt = tokio::runtime::Runtime::new().context("tokio runtime")?;
-        let (model_path, tokenizer_path) = rt.block_on(async {
+        // Download model and tokenizer via hf-hub (async, but new() is sync).
+        // Spawning a new Runtime inside an existing tokio context (e.g. `rqmd mcp`
+        // over HTTP) panics; detect and use block_in_place (which yields the
+        // thread to the scheduler) instead. Mirrors LlamaCppBackend::new().
+        let download = || async {
             let api = Api::new().context("hf-hub API")?;
             let repo = api.model(config.embed_repo.clone());
             let model = repo
@@ -107,7 +109,13 @@ impl OrtBackend {
                 .await
                 .context("tokenizer download")?;
             Ok::<_, anyhow::Error>((model, tok))
-        })?;
+        };
+        let (model_path, tokenizer_path) = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(download()))?,
+            Err(_) => tokio::runtime::Runtime::new()
+                .context("tokio runtime")?
+                .block_on(download())?,
+        };
 
         let ep = resolve_ep(config.ep);
 
@@ -285,6 +293,14 @@ impl OrtBackend {
 }
 
 impl InferenceBackend for OrtBackend {
+    fn capabilities(&self) -> crate::BackendCapabilities {
+        crate::BackendCapabilities {
+            embed: true,
+            rerank: false,
+            generate: false,
+        }
+    }
+
     fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
         Ok(self.run_batch(&[text])?.remove(0))
     }
