@@ -124,10 +124,6 @@ install -m 0755 rqmd ~/.local/bin/rqmd
 
 Requirements: Rust stable (≥1.78), cmake ≥3.14 (cmake 4.x supported), Xcode Command Line Tools (macOS) or `build-essential` (Linux).
 
-> **Git LFS note:** binary assets (images in `assets/`) are stored in Git LFS.
-> Run `brew install git-lfs && git lfs install` once before cloning if you need those files.
-> A normal `git clone` without LFS still works — the PNG will be an LFS pointer file rather than the full image.
-
 ```sh
 # Clone the repo
 git clone https://github.com/tylern91/rqmd
@@ -578,7 +574,7 @@ rqmd/                    # repo root = Cargo workspace
 │   ├── rqmd-cli/        # CLI entry point (clap)
 │   └── rqmd-mcp/        # MCP server (rmcp, stdio + HTTP)
 ├── docs/                # SYNTAX.md and other reference docs
-└── assets/              # architecture diagram
+└── assets/              # rqmd-architecture.svg
 ```
 
 ### Build profiles
@@ -732,6 +728,8 @@ a query with generally weak recall.
 ---
 
 ## How it works
+
+![rqmd architecture](assets/rqmd-architecture.svg)
 
 **Indexing** (`rqmd collection add` / `rqmd update`): each matched file is
 read, hashed (SHA-256 of its content — the resulting hash's first 6 hex
