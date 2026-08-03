@@ -156,7 +156,7 @@ pub fn run_ls(index_dir: &Path, path: Option<&str>) -> Result<()> {
         // List all collections
         let cols = db::list_collections(&s.db)?;
         if cols.is_empty() {
-            println!("No collections. Run `qmd collection add <path>` to add one.");
+            println!("No collections. Run `rqmd collection add <path>` to add one.");
             return Ok(());
         }
         for col in &cols {

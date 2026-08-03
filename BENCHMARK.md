@@ -90,7 +90,7 @@ Result: ✅ **PASS** — clear discrimination; gap sufficient for reliable top-k
 
 Grammar: `lex:/vec:/hyde:` prefix-based expansion grammar matching qmd's TypeScript GBNF.
 
-Result: ✅ **PASS** — grammar compiles via `LlamaSampler::grammar`; constrained sampling produces valid `lex:`, `vec:`, and `hyde:` prefixed expansions. JSON-schema-to-GBNF utility in `qmd_llm` wired correctly.
+Result: ✅ **PASS** — grammar compiles via `LlamaSampler::grammar`; constrained sampling produces valid `lex:`, `vec:`, and `hyde:` prefixed expansions. JSON-schema-to-GBNF utility in `rqmd_llm` wired correctly.
 
 ### ORT CoreML baseline (Spike A secondary)
 
@@ -106,7 +106,7 @@ EP: CoreML (Apple GPU/ANE)
 | Model size | ~568 MB | 415 MB |
 | Model format | GGUF (native llama.cpp kernels) | ONNX |
 
-Note: models differ (embeddinggemma vs bge-base), so throughput is directional only. The llama-cpp-2 Metal path is faster for single-text latency because Metal's GPU path is highly optimized for GGUF kernels. ORT CoreML throughput (93 texts/sec at batch) is production-viable for the embed indexing workload; its advantage would show under sustained ANE batch load with smaller models (<100M). The `Context leak detected` messages in the ORT run are macOS CoreML msgtracer noise, not a qmd issue.
+Note: models differ (embeddinggemma vs bge-base), so throughput is directional only. The llama-cpp-2 Metal path is faster for single-text latency because Metal's GPU path is highly optimized for GGUF kernels. ORT CoreML throughput (93 texts/sec at batch) is production-viable for the embed indexing workload; its advantage would show under sustained ANE batch load with smaller models (<100M). The `Context leak detected` messages in the ORT run are macOS CoreML msgtracer noise, not an rqmd issue.
 
 **Backend decision: llama-cpp-2 as default.** ORT available via `--features ort-backend` as an optional NPU path.
 
@@ -147,9 +147,9 @@ Both candidates indexed the same corpus of ~500 markdown chunks (28 documents, a
 2. **Synchronous API** — Tantivy's sync reader + writer maps naturally to qmd's synchronous store trait. No `tokio` runtime required in the search hot path.
 3. **Preserves exact RRF tuning** — app-side RRF means qmd's tested `k=60`, `weight=2.0`, and top-rank bonus parameters carry over verbatim with no mapping layer.
 4. **Smaller API surface** — ~35 lines vs ~55 lines; easier to audit and maintain.
-5. **Re-index accepted** — the user explicitly preferred SOTA-over-compat; a one-time re-index from `~/.cache/qmd/index.sqlite` to `~/.cache/qmd-rs/` is acceptable.
+5. **Re-index accepted** — the user explicitly preferred SOTA-over-compat; a one-time re-index from `~/.cache/qmd/index.sqlite` to `~/.cache/rqmd/index.sqlite` is acceptable.
 
-`rusqlite` is retained for document/collection metadata storage (not search) — it maps cleanly to the existing `.qmd/index.yaml` + metadata schema without the LanceDB columnar overhead.
+`rusqlite` is retained for document/collection metadata storage (not search) — it maps cleanly to the existing `.rqmd/index.sqlite` schema (documents, collections, and context metadata) without the LanceDB columnar overhead.
 
 ---
 

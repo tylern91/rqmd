@@ -392,7 +392,7 @@ fn score_all(search_fn: &mut impl FnMut(&str) -> Vec<String>) -> EvalResults {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn run_eval(_index_dir: &Path, mode: &str, verbose: bool) -> Result<()> {
-    println!("qmd eval — search quality harness");
+    println!("rqmd eval — search quality harness");
     println!(
         "Corpus: {} documents, {} queries",
         EVAL_DOCS.len(),
