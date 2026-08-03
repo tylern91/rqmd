@@ -167,7 +167,7 @@ fn db_upsert_and_retrieve() {
 
 #[test]
 fn context_check_key_matches_add_key() {
-    // Regression guard: `qmd context add rqmd://vault/ "..."` stores under the
+    // Regression guard: `rqmd context add rqmd://vault/ "..."` stores under the
     // key `context:rqmd://vault/`.  `context check` MUST query the same key or
     // it reports false MISSING (the rrqmd:// double-r typo, context.rs:71).
     let tmp = TempDir::new().unwrap();

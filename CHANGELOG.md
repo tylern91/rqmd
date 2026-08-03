@@ -4,6 +4,22 @@
 
 ---
 
+## [0.10.3] - 2026-08-03
+### Fixed
+- Several user-facing strings (status/doctor output, error messages, help
+  text, query-syntax doc comments) still referred to `qmd`, the project
+  this was ported from, instead of `rqmd`. Notably, `init --help` described
+  the directory it creates as `.qmd index` when the command actually
+  creates `.rqmd/` — a genuine correctness bug in the help text, not just
+  cosmetic drift.
+### Documentation
+- `BENCHMARK.md` corrected to reference the actual crate name (`rqmd_llm`),
+  cache path (`~/.cache/rqmd/`), and index file (`.rqmd/index.sqlite`) used
+  by this project, and to stop misattributing an ORT/CoreML noise message
+  as a "qmd issue" when it's about this project's own code.
+
+---
+
 ## [0.10.2] - 2026-08-03
 ### Fixed
 - `update-homebrew-formula.sh` no longer overwrites its own template when

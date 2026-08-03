@@ -8,7 +8,7 @@ mod exclusions;
 mod format;
 mod store;
 
-/// qmd — hybrid local document search
+/// rqmd — hybrid local document search
 #[derive(Parser)]
 #[command(name = "rqmd", version, about, long_about = None)]
 struct Cli {
@@ -122,7 +122,7 @@ enum Commands {
     /// Context management
     #[command(subcommand)]
     Context(ContextCommand),
-    /// Create a project-local .qmd index
+    /// Create a project-local .rqmd/ index
     Init,
     /// Show index status and collections
     Status,

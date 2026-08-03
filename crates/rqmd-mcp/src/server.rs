@@ -104,7 +104,7 @@ fn make_config(index_dir: &Path) -> StoreConfig {
 pub struct QueryInput {
     /// Search query. Supports plain text (auto-expanded via generation model),
     /// `expand: text`, or a multi-line typed document with `lex:`, `vec:`,
-    /// `hyde:`, and optional `intent:` lines per the QMD query syntax.
+    /// `hyde:`, and optional `intent:` lines per the rqmd query syntax.
     pub query: String,
     /// Optional context or intent to steer query expansion, reranking, and
     /// snippet selection. Equivalent to an `intent:` line inside the query.

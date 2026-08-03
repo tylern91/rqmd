@@ -41,7 +41,7 @@ fn list(index_dir: &Path) -> Result<()> {
         .collect();
 
     if rows.is_empty() {
-        println!("No contexts set. Run `qmd context add [path] \"description\"` to add one.");
+        println!("No contexts set. Run `rqmd context add [path] \"description\"` to add one.");
         return Ok(());
     }
     for (key, value) in &rows {
@@ -72,7 +72,7 @@ fn check(index_dir: &Path) -> Result<()> {
         if db::get_config(&s.db, &key)?.is_none() {
             println!("MISSING context for collection '{}'", col.name);
             println!(
-                "  Run: qmd context add rqmd://{}/ \"<description>\"",
+                "  Run: rqmd context add rqmd://{}/ \"<description>\"",
                 col.name
             );
             missing += 1;

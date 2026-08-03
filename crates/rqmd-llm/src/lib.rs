@@ -844,7 +844,7 @@ pub struct NoBackend;
 
 impl InferenceBackend for NoBackend {
     fn embed(&mut self, _text: &str) -> Result<Vec<f32>> {
-        anyhow::bail!("embed called without inference backend — run `qmd embed` first")
+        anyhow::bail!("embed called without inference backend — run `rqmd embed` first")
     }
     fn rerank(&mut self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>> {
         anyhow::bail!("rerank called without inference backend")

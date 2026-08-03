@@ -1,7 +1,7 @@
 //! Phase 1 parity gate — hybrid_query eval on eval-deep-research corpus.
 //!
 //! Usage:
-//!   cargo run --example eval -p qmd-core
+//!   cargo run --example eval -p rqmd-core
 //!
 //! Downloads embeddinggemma-300M + qwen3-reranker-0.6B on first run (~500 MB combined).
 //! Expected top-1 accuracy: ≥40% on these "hard" queries (no keyword overlap).
@@ -32,7 +32,7 @@ fn eval_docs_dir() -> PathBuf {
     PathBuf::from(manifest)
         .join("../../test/eval-docs")
         .canonicalize()
-        .expect("eval-docs directory not found — run from the qmd workspace root")
+        .expect("eval-docs directory not found — run from the rqmd workspace root")
 }
 
 fn eval_jsonl_path() -> PathBuf {
@@ -62,13 +62,13 @@ fn main() -> Result<()> {
     let docs_dir = eval_docs_dir();
     let jsonl_path = eval_jsonl_path();
 
-    println!("=== qmd-core Phase 1 Eval ===");
+    println!("=== rqmd-core Phase 1 Eval ===");
     println!("Docs: {}", docs_dir.display());
     println!("Queries: {}", jsonl_path.display());
     println!();
 
     // ── Set up a temporary store directory ───────────────────────────────────
-    let store_dir = std::env::temp_dir().join("qmd-eval-store");
+    let store_dir = std::env::temp_dir().join("rqmd-eval-store");
     if store_dir.exists() {
         fs::remove_dir_all(&store_dir)?;
     }

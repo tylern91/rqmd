@@ -811,7 +811,7 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
 
 /// Build the `store_config` key under which a collection's context is stored.
 ///
-/// This is the canonical format used by `qmd context add rqmd://<collection>/`.
+/// This is the canonical format used by `rqmd context add rqmd://<collection>/`.
 /// Both `context check` and `get_context_for_collection` must use this function
 /// to guarantee they query the same key that `context add` writes.
 pub fn collection_context_key(collection: &str) -> String {
@@ -820,7 +820,7 @@ pub fn collection_context_key(collection: &str) -> String {
 
 /// Look up a collection's context string from the store_config table.
 ///
-/// Context is stored by the `qmd context add` command with the key
+/// Context is stored by the `rqmd context add` command with the key
 /// `context:rqmd://<collection>/`. Returns `None` if no context has been set.
 pub fn get_context_for_collection(conn: &Connection, collection: &str) -> Result<Option<String>> {
     // Try the canonical `context:rqmd://<collection>/` key first, then the
