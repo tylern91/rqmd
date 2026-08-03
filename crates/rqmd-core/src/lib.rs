@@ -8,6 +8,6 @@ pub mod rrf;
 pub mod store;
 pub mod types;
 
-pub use chunking::{extract_snippet, SnippetResult};
+pub use chunking::{extract_snippet, snap_char_boundary_backward, SnippetResult};
 pub use store::{IndexOutcome, PendingVectorMeta, Store, StoreConfig};
 pub use types::{Collection, Document, SearchResult};
