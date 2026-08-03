@@ -4,6 +4,20 @@
 
 ---
 
+## [0.10.2] - 2026-08-03
+### Fixed
+- `update-homebrew-formula.sh` no longer overwrites its own template when
+  rendering the formula, which previously destroyed the `RQMD_*` placeholders
+  and caused a second run to silently ship stale version/SHA values.
+- `build-release-notes.sh` no longer aborts under `set -Eeuo pipefail` when
+  `## [Unreleased]` is empty, which is the expected steady state between
+  releases.
+- `stamp-changelog-refs.sh` no longer crashes with `unbound variable` under
+  bash 3.2 (macOS's default `/bin/bash`) when a commit range contains zero
+  commits.
+
+---
+
 ## [0.10.1] - 2026-08-03
 ### Fixed
 - `rqmd mcp` no longer leaves an orphaned daemon child process running when

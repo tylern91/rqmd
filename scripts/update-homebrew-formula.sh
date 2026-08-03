@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # update-homebrew-formula.sh <version>
 #
-# Fetches the release SHA-256 checksums from GitHub and updates the Homebrew
-# formula template at packaging/homebrew/rqmd.rb.
+# Fetches the release SHA-256 checksums from GitHub, renders the Homebrew
+# formula template at packaging/homebrew/rqmd.rb.template, and writes the
+# result to packaging/homebrew/rqmd.rb (the template itself is never
+# modified, so re-running this script always starts from the same
+# placeholders).
 #
 # When HOMEBREW_TAP_TOKEN is set, also clones github.com/tylern91/homebrew-rqmd
 # and pushes the updated Formula/rqmd.rb.
@@ -27,7 +30,9 @@ BARE="${VERSION}"               # bare: 0.3.0
 
 REPO="tylern91/rqmd"
 BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
-TEMPLATE="$(cd "$(dirname "$0")/.." && pwd)/packaging/homebrew/rqmd.rb"
+HOMEBREW_DIR="$(cd "$(dirname "$0")/.." && pwd)/packaging/homebrew"
+TEMPLATE="${HOMEBREW_DIR}/rqmd.rb.template"
+RENDERED="${HOMEBREW_DIR}/rqmd.rb"
 
 if [[ ! -f "$TEMPLATE" ]]; then
   echo "Template not found: $TEMPLATE" >&2
@@ -58,9 +63,11 @@ UPDATED="$(sed \
   -e "s|RQMD_SHA256_LINUX_X86|${SHA256_LINUX_X86}|g" \
   "$TEMPLATE")"
 
-# Always write the updated formula back to the template path.
-printf '%s\n' "$UPDATED" > "$TEMPLATE"
-echo "Updated ${TEMPLATE}" >&2
+# Write the rendered formula to its own path — never back over the template,
+# or a second run would find no placeholders left to substitute and silently
+# re-ship the previous run's (now stale) version/SHA values.
+printf '%s\n' "$UPDATED" > "$RENDERED"
+echo "Updated ${RENDERED}" >&2
 
 # Optionally push to the Homebrew tap repo.
 if [[ -n "${HOMEBREW_TAP_TOKEN:-}" ]]; then
@@ -74,7 +81,7 @@ if [[ -n "${HOMEBREW_TAP_TOKEN:-}" ]]; then
     "$TAP_DIR"
 
   mkdir -p "${TAP_DIR}/Formula"
-  cp "$TEMPLATE" "${TAP_DIR}/Formula/rqmd.rb"
+  cp "$RENDERED" "${TAP_DIR}/Formula/rqmd.rb"
 
   git -C "$TAP_DIR" config user.name  "github-actions[bot]"
   git -C "$TAP_DIR" config user.email "tylern91@users.noreply.github.com"
