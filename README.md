@@ -31,6 +31,7 @@ Built on the search pipeline and ideas of **[tobi/qmd](https://github.com/tobi/q
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
 - [Acknowledgements](#acknowledgements)
+- [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [DISCLAIMER.md](DISCLAIMER.md)
 
 ---
 
@@ -896,13 +897,12 @@ automatically as a fallback.
 
 ## Contributing
 
-Before sending a PR:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide — GPG-signing
+requirement, commit/branch conventions, the CHANGELOG + semver-label
+convention, and what not to rely on yet.
 
-1. Run `cargo fmt --all` and `cargo clippy --workspace -- -D warnings`
-2. Run `cargo test --workspace --lib`
-3. Check that `cargo build --workspace` and `cargo build -p rqmd-cli --features ort-backend` both pass
-
-The search quality gate is `rqmd eval`:
+The non-obvious part is the search-quality gate, `rqmd eval` — run it before
+any change that touches the search path:
 
 ```sh
 # BM25 quality (no model, fast — run this always)
@@ -916,6 +916,10 @@ cargo run -p rqmd-cli -- bench -n 5
 ```
 
 The BM25 eval also runs in CI on every push.
+
+See also: [SECURITY.md](SECURITY.md) for vulnerability reporting and the
+known MCP-listener authentication boundary, and
+[DISCLAIMER.md](DISCLAIMER.md) for license, warranty, and no-telemetry terms.
 
 ---
 
