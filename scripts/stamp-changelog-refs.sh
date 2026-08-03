@@ -90,7 +90,12 @@ done < <(git log --reverse --pretty='%h%x09%s' "$range")
 # a release that otherwise has a clean single-commit or scope-matched attribution.
 re_chore_release='^chore\(release\):'
 commit_lines=()
-for entry in "${all_commit_lines[@]}"; do
+# bash 3.2 (macOS system /bin/bash) throws "unbound variable" under `set -u`
+# when expanding "${arr[@]}" on a declared-but-empty array — the
+# "${arr[@]+"${arr[@]}"}" idiom expands to nothing instead of erroring in
+# that case (e.g. a commit range with zero commits, such as the very first
+# release), and is a no-op for non-empty arrays on any bash version.
+for entry in "${all_commit_lines[@]+"${all_commit_lines[@]}"}"; do
   subject="${entry#*$'\t'}"
   if [[ "$subject" =~ $re_chore_release ]]; then
     continue

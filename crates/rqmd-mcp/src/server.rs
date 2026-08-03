@@ -11,8 +11,14 @@ use rmcp::{
     schemars, serde, tool, tool_handler, tool_router, ServerHandler,
 };
 
-use rqmd_core::{db, resolve, Store, StoreConfig};
+use rqmd_core::{db, resolve, Document, Store, StoreConfig};
 use rqmd_llm::{no_backend, LlamaCppBackend, LlamaCppConfig};
+
+/// Hard cap on documents returned by a single `multi_get` call. Without this,
+/// an unauthenticated caller could pass a bare `*` glob with no collection
+/// filter and pull the entire corpus in one request — this bounds that to a
+/// generous but finite batch size.
+const MULTI_GET_MAX_DOCS: usize = 200;
 
 // ── Server struct ─────────────────────────────────────────────────────────────
 
@@ -354,6 +360,16 @@ fn get_document(
     )
 }
 
+/// Truncate `docs` to at most `max` entries, reporting the original count and
+/// whether truncation happened — split out from `multi_get_documents` so the
+/// capping logic is testable without a real `Store`.
+fn cap_multi_get_docs(mut docs: Vec<Document>, max: usize) -> (Vec<Document>, usize, bool) {
+    let total = docs.len();
+    let truncated = total > max;
+    docs.truncate(max);
+    (docs, total, truncated)
+}
+
 fn multi_get_documents(
     store: &Store,
     pattern: &str,
@@ -364,6 +380,8 @@ fn multi_get_documents(
         Ok(d) => d,
         Err(e) => return format!("DB error: {e:#}"),
     };
+    let (docs, total, truncated) = cap_multi_get_docs(docs, MULTI_GET_MAX_DOCS);
+
     let mut out = String::new();
     let mut count = 0usize;
 
@@ -389,10 +407,15 @@ fn multi_get_documents(
     }
 
     if count == 0 {
-        format!("No documents matched: {pattern}")
-    } else {
-        out
+        return format!("No documents matched: {pattern}");
     }
+    if truncated {
+        out.push_str(&format!(
+            "\n[Showing {count} of {total} matched documents — multi_get is capped at \
+             {MULTI_GET_MAX_DOCS} per call.]\n"
+        ));
+    }
+    out
 }
 
 fn build_status(store: &Store, index_dir: &Path) -> String {
@@ -426,4 +449,49 @@ fn build_status(store: &Store, index_dir: &Path) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc(id: i64) -> Document {
+        Document {
+            id,
+            collection: "col".to_string(),
+            path: format!("doc{id}.md"),
+            title: format!("Doc {id}"),
+            hash: format!("hash{id}"),
+            active: true,
+        }
+    }
+
+    #[test]
+    fn cap_multi_get_docs_under_limit_is_unchanged() {
+        let docs = vec![doc(1), doc(2), doc(3)];
+        let (capped, total, truncated) = cap_multi_get_docs(docs, MULTI_GET_MAX_DOCS);
+        assert_eq!(capped.len(), 3);
+        assert_eq!(total, 3);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn cap_multi_get_docs_over_limit_truncates_and_reports_original_total() {
+        let docs: Vec<Document> = (0..10).map(doc).collect();
+        let (capped, total, truncated) = cap_multi_get_docs(docs, 4);
+        assert_eq!(capped.len(), 4);
+        assert_eq!(total, 10);
+        assert!(truncated);
+        assert_eq!(capped[0].id, 0);
+        assert_eq!(capped[3].id, 3);
+    }
+
+    #[test]
+    fn cap_multi_get_docs_exactly_at_limit_is_not_truncated() {
+        let docs: Vec<Document> = (0..5).map(doc).collect();
+        let (capped, total, truncated) = cap_multi_get_docs(docs, 5);
+        assert_eq!(capped.len(), 5);
+        assert_eq!(total, 5);
+        assert!(!truncated);
+    }
 }

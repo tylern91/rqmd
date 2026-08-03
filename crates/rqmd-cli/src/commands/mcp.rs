@@ -6,18 +6,26 @@ use std::time::Duration;
 use crate::daemon;
 
 #[allow(clippy::too_many_arguments)]
-pub fn run_mcp(index_dir: &Path, http: bool, host: &str, port: u16, is_daemon: bool) -> Result<()> {
-    if http && !daemon::is_loopback(host) {
-        eprintln!(
-            "\x1b[33mWARNING: binding to {host} exposes this index's full-text and semantic \
-             search — including `get`, which returns arbitrary indexed file content — with no \
-             authentication to anything that can reach {host}:{port}. Only do this on a \
-             trusted network or container.\x1b[0m"
+pub fn run_mcp(
+    index_dir: &Path,
+    http: bool,
+    host: &str,
+    port: u16,
+    is_daemon: bool,
+    allow_non_loopback: bool,
+) -> Result<()> {
+    if http && !daemon::is_loopback(host) && !allow_non_loopback {
+        bail!(
+            "refusing to bind the MCP server to non-loopback host {host}: this exposes the \
+             index's full-text and semantic search — including `get`, which returns arbitrary \
+             indexed file content — with no authentication to anything that can reach \
+             {host}:{port}.\n\nIf this is intentional (e.g. a trusted network or container), \
+             pass --allow-non-loopback (or set RRQMD_MCP_ALLOW_NON_LOOPBACK=1)."
         );
     }
 
     if is_daemon {
-        return spawn_daemon(index_dir, host, port);
+        return spawn_daemon(index_dir, host, port, allow_non_loopback);
     }
 
     if !http {
@@ -39,8 +47,12 @@ pub fn run_mcp(index_dir: &Path, http: bool, host: &str, port: u16, is_daemon: b
         .enable_all()
         .build()?;
 
-    daemon::write_pidfile(index_dir, std::process::id(), host, port)?;
-    let result = rt.block_on(rqmd_mcp::run_http(server, host, port));
+    let index_dir_owned = index_dir.to_path_buf();
+    let host_owned = host.to_string();
+    let pid = std::process::id();
+    let result = rt.block_on(rqmd_mcp::run_http(server, host, port, || {
+        daemon::write_pidfile(&index_dir_owned, pid, &host_owned, port)
+    }));
     daemon::remove_pidfile(index_dir);
     result
 }
@@ -53,7 +65,7 @@ pub fn run_mcp_stop(index_dir: &Path) -> Result<()> {
     daemon::stop_daemon(index_dir)
 }
 
-fn spawn_daemon(index_dir: &Path, host: &str, port: u16) -> Result<()> {
+fn spawn_daemon(index_dir: &Path, host: &str, port: u16, allow_non_loopback: bool) -> Result<()> {
     std::fs::create_dir_all(index_dir)
         .with_context(|| format!("failed to create index dir at {}", index_dir.display()))?;
 
@@ -94,10 +106,13 @@ fn spawn_daemon(index_dir: &Path, host: &str, port: u16) -> Result<()> {
         host,
         "--port",
         &port.to_string(),
-    ])
-    .stdin(std::process::Stdio::null())
-    .stdout(log_out)
-    .stderr(log_err);
+    ]);
+    if allow_non_loopback {
+        cmd.arg("--allow-non-loopback");
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(log_out)
+        .stderr(log_err);
 
     #[cfg(unix)]
     {
@@ -113,18 +128,28 @@ fn spawn_daemon(index_dir: &Path, host: &str, port: u16) -> Result<()> {
         }
     }
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .context("failed to start background MCP server")?;
     let pid = child.id();
 
     match daemon::wait_for_health(host, port, pid, Duration::from_secs(5)) {
         Ok(()) => {
-            daemon::write_pidfile(index_dir, pid, host, port)?;
+            // The daemon writes its own pidfile once its listener is bound
+            // (see run_http's `on_bound` hook) — we only read/report here,
+            // so there is a single writer for the file's whole lifecycle.
             eprintln!("rqmd MCP daemon started (pid {pid}) on http://{host}:{port}");
             Ok(())
         }
         Err(e) => {
+            // Health check timed out — the child may still be alive (e.g.
+            // stuck loading a large model past the check budget). Leaving it
+            // running here would orphan it: we already told the user launch
+            // failed, but the child would keep going, bind the port, and
+            // write a pidfile with nothing tracking it. Kill and reap it
+            // before reporting failure.
+            let _ = child.kill();
+            let _ = child.wait();
             let tail = daemon::tail_log(index_dir, 20);
             bail!(
                 "daemon failed to become healthy within 5s: {e}\n\n--- last 20 lines of {} ---\n{tail}",

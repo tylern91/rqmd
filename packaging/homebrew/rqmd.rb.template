@@ -1,8 +1,11 @@
-# Homebrew formula for rqmd.
+# Homebrew formula template for rqmd.
 #
-# This file lives in the rqmd source repo at packaging/homebrew/rqmd.rb.
-# The Homebrew tap (github.com/tylern91/homebrew-rqmd) receives an updated
-# copy automatically on each release via scripts/update-homebrew-formula.sh.
+# This file lives in the rqmd source repo at packaging/homebrew/rqmd.rb.template.
+# scripts/update-homebrew-formula.sh renders it (substituting the RQMD_*
+# placeholders below) into packaging/homebrew/rqmd.rb, then pushes that
+# rendered copy to the Homebrew tap (github.com/tylern91/homebrew-rqmd) on
+# each release. Never edit packaging/homebrew/rqmd.rb directly — it's a
+# generated file, not the template.
 #
 # Install:
 #   brew tap tylern91/rqmd
