@@ -85,7 +85,7 @@ pub fn fetch_health(host: &str, port: u16) -> Option<HealthResponse> {
         .timeout(Duration::from_millis(500))
         .build()
         .ok()?
-        .get(format!("http://{host}:{port}/health"))
+        .get(format!("http://{host}:{port}/health/daemon"))
         .send()
         .ok()?;
     if !resp.status().is_success() {

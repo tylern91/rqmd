@@ -4,7 +4,7 @@
 
 ---
 
-## [0.8.2] - 2026-08-03
+## [0.10.2] - 2026-08-03
 ### Fixed
 - `update-homebrew-formula.sh` no longer overwrites its own template when
   rendering the formula, which previously destroyed the `RQMD_*` placeholders
@@ -15,6 +15,70 @@
 - `stamp-changelog-refs.sh` no longer crashes with `unbound variable` under
   bash 3.2 (macOS's default `/bin/bash`) when a commit range contains zero
   commits.
+
+---
+
+## [0.10.1] - 2026-08-03
+### Fixed
+- `rqmd mcp` no longer leaves an orphaned daemon child process running when
+  the parent's health-check times out (e.g. while a large model is still
+  loading) — the child is now killed and reaped instead of abandoned.
+- Pidfile ownership is now single-writer (the daemon process itself, once
+  its listener is bound) instead of being written by both the parent and
+  child, closing a race that could leave a stale or missing pidfile.
+
+---
+
+## [0.10.0] - 2026-08-03
+### Security
+- GGUF model downloads (`rqmd-llm`) now pin an explicit revision per model
+  repo and verify the downloaded file's SHA-256 against a known-good hash
+  before first use, closing a gap where in-transit tampering, a
+  compromised mirror, or a corrupted download could silently swap in a
+  different model with no verification. Verification runs on a fresh
+  download only (trust-on-first-use), not on every cache hit.
+- `HF_ENDPOINT` is now validated to require `https://`; a non-HTTPS or
+  malformed value is rejected with an error instead of silently allowing
+  model downloads to be redirected over an unencrypted or unexpected
+  transport. The download path was also switched to a client that
+  actually reads `HF_ENDPOINT`/`HF_HOME` (the previous one silently
+  ignored both), so this check now has real effect and cache-directory
+  reporting stays consistent with where models are actually downloaded.
+- Third-party GitHub Actions (`dtolnay/rust-toolchain`, `Swatinem/rust-cache`,
+  `cachix/install-nix-action`, `aquasecurity/trivy-action`) and
+  GitHub-authored actions (`actions/checkout`, `actions/upload-artifact`,
+  `actions/create-github-app-token`, `github/codeql-action/upload-sarif`)
+  are now pinned to a full commit SHA (version tag kept as a trailing
+  comment) instead of a mutable tag, closing a gap where a compromised or
+  re-tagged upstream release could substitute malicious action code —
+  most notably in `upload-assets`, which holds `contents: write` and a
+  `GH_TOKEN`.
+- `release.yml` checkouts that don't push back to the repository
+  (`upload-assets`, `finalize-notes`, `sync-homebrew`) now set
+  `persist-credentials: false`, matching the other workflows; the
+  `release` job's own checkout keeps the default since it performs the
+  actual `git push` of the release tag.
+- `release.yml` no longer degrades to publishing an unsigned release tag
+  when GPG signing isn't configured or fails — it now fails the job with
+  an explicit error instead of a warning.
+- Escaped `%`/`_` LIKE metacharacters (and the escape character itself)
+  in the docid-prefix lookup (`rqmd-core::db::get_document_by_docid_prefix`),
+  fixing non-deterministic document resolution for docids containing
+  those characters. Not an injection risk (the query was already
+  parameterized) — this was a match-semantics correctness bug.
+
+---
+
+## [0.9.0] - 2026-08-03
+### Added
+- MCP server now enforces an `Origin` allowlist (previously unset, which
+  disabled the underlying library's Origin validation entirely), a request
+  body size cap, and a hard cap on `multi_get` result counts.
+### Changed
+- `/health` now sits behind the same Host-header validation as `/mcp` and no
+  longer leaks the daemon PID or index path in its response.
+- Binding the MCP server to a non-loopback host now requires an explicit
+  opt-in instead of a stderr warning plus automatic self-authorization.
 
 ---
 

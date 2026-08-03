@@ -239,16 +239,28 @@ pub fn get_document_by_id(conn: &Connection, id: i64) -> Result<Option<Document>
     .context("get document by id")
 }
 
+/// Escape `LIKE` metacharacters (`\`, `%`, `_`) so a caller-supplied prefix is
+/// matched literally rather than as a wildcard pattern. Must escape `\` first
+/// since it becomes the escape character for the other two.
+fn escape_like_pattern(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Look up a document by the first 6 hex chars of its content hash (the docid).
 ///
 /// Ordered by `(collection, path)` before `LIMIT 1` so a hash-prefix collision
 /// resolves to the same document every time, rather than an arbitrary one
-/// depending on SQLite's row order.
+/// depending on SQLite's row order. `docid` is not validated as hex before
+/// reaching this function (see `PathSpec::docid_hex` in rqmd-cli), so `%`/`_`
+/// are escaped rather than trusted — otherwise a docid containing either
+/// would silently widen the prefix match into a wildcard one.
 pub fn get_document_by_docid_prefix(conn: &Connection, docid: &str) -> Result<Option<Document>> {
-    let pattern = format!("{docid}%");
+    let pattern = format!("{}%", escape_like_pattern(docid));
     conn.query_row(
         "SELECT id, collection, path, title, hash, active FROM documents \
-         WHERE hash LIKE ?1 AND active=1 ORDER BY collection, path LIMIT 1",
+         WHERE hash LIKE ?1 ESCAPE '\\' AND active=1 ORDER BY collection, path LIMIT 1",
         params![pattern],
         |row| {
             Ok(Document {
@@ -848,4 +860,61 @@ pub fn get_context_for_path(
     }
 
     get_context_for_collection(conn, collection)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn
+    }
+
+    fn insert_doc(conn: &Connection, hash: &str, path: &str) {
+        upsert_content(conn, hash, "body", "2026-01-01T00:00:00Z").unwrap();
+        upsert_document(conn, "col", path, "title", hash, "2026-01-01T00:00:00Z").unwrap();
+    }
+
+    /// A docid containing a literal `_` must only match a hash with a literal
+    /// `_` at that position, not (pre-fix) any single character — otherwise
+    /// `rqmd get "#ab_cd"` could resolve to an unrelated document.
+    #[test]
+    fn docid_prefix_escapes_underscore_metacharacter() {
+        let conn = test_conn();
+        insert_doc(&conn, "ab_cd0000", "literal.md");
+        insert_doc(&conn, "abXcd0000", "wildcard-victim.md");
+
+        let found = get_document_by_docid_prefix(&conn, "ab_cd")
+            .unwrap()
+            .expect("literal underscore match");
+        assert_eq!(found.path, "literal.md");
+    }
+
+    /// Same, but for `%` — pre-fix, `LIKE 'ab%cd%'` would match any hash
+    /// starting with "ab" and containing "cd" anywhere after, not just a hash
+    /// with a literal `%` character.
+    #[test]
+    fn docid_prefix_escapes_percent_metacharacter() {
+        let conn = test_conn();
+        insert_doc(&conn, "ab%cd0000", "literal.md");
+        insert_doc(&conn, "abZZZcd00", "wildcard-victim.md");
+
+        let found = get_document_by_docid_prefix(&conn, "ab%cd")
+            .unwrap()
+            .expect("literal percent match");
+        assert_eq!(found.path, "literal.md");
+    }
+
+    #[test]
+    fn docid_prefix_still_matches_plain_hex_prefix() {
+        let conn = test_conn();
+        insert_doc(&conn, "abc123deadbeef", "plain.md");
+
+        let found = get_document_by_docid_prefix(&conn, "abc123")
+            .unwrap()
+            .expect("plain prefix still matches");
+        assert_eq!(found.path, "plain.md");
+    }
 }

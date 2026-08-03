@@ -36,7 +36,12 @@ jobs:
       PR_BODY: ${{ github.event.pull_request.body }}
       PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
     steps:
-      - uses: actions/checkout@v7
+      # persist-credentials intentionally left at its default (true): the
+      # "Create and push tag" step below does a raw `git push origin "$tag"`
+      # which needs the credential actions/checkout wires into .git/config.
+      # Disabling it here (unlike the read-only checkouts in this file) would
+      # break tag publishing.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -119,13 +124,17 @@ jobs:
           fi
       - name: Import GPG key
         id: gpg
-        if: steps.guard.outputs.skip == 'false' && env.GPG_PRIVATE_KEY != ''
+        if: steps.guard.outputs.skip == 'false'
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
         run: |
           set -euo pipefail
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "::error::GPG_PRIVATE_KEY secret is not set — refusing to publish an unsigned release tag"
+            exit 1
+          fi
           printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
           printf 'default-cache-ttl 7200\n' >> ~/.gnupg/gpg-agent.conf
           printf 'allow-loopback-pinentry\n' >> ~/.gnupg/gpg-agent.conf
@@ -156,8 +165,8 @@ jobs:
           if [ "${{ steps.gpg.outputs.signed }}" = "true" ]; then
             git tag -s "$tag" -F /tmp/RELEASE_BODY.md
           else
-            echo "::warning::GPG_PRIVATE_KEY secret not set — creating unsigned annotated tag"
-            git tag -a "$tag" -F /tmp/RELEASE_BODY.md
+            echo "::error::GPG signing was not established — refusing to publish an unsigned release tag"
+            exit 1
           fi
           git push origin "$tag"
 
@@ -213,13 +222,14 @@ jobs:
       VERSION: ${{ needs.release.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release.outputs.version }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -228,7 +238,7 @@ jobs:
           sudo apt-get install -y cmake build-essential
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.os }}-dist
           cache-on-failure: true
@@ -278,9 +288,10 @@ jobs:
       PR_BODY: ${{ github.event.pull_request.body }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Read real asset digests from the Release API
         # This is a separate job (not a step inside the upload-assets matrix) because the
@@ -338,14 +349,15 @@ jobs:
       VERSION: ${{ needs.release.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release.outputs.version }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Mint tap token from GitHub App
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
           app-id: ${{ secrets.HOMEBREW_APP_ID }}
           private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
