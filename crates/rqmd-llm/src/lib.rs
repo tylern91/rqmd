@@ -25,7 +25,10 @@
 //! triggered it once.
 
 use anyhow::{Context, Result};
-use hf_hub::{api::tokio::Api, Cache};
+use hf_hub::{
+    api::tokio::{Api, ApiBuilder},
+    Cache, Repo, RepoType,
+};
 use llama_cpp_2::{
     context::params::{LlamaContextParams, LlamaPoolingType},
     llama_backend::LlamaBackend,
@@ -34,20 +37,45 @@ use llama_cpp_2::{
     sampling::LlamaSampler,
     send_logs_to_tracing, LogOptions,
 };
+use sha2::{Digest, Sha256};
 use std::{
     num::NonZeroU32,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 // ── Default model repos (mirrors qmd's llm.ts defaults) ──────────────────────
+//
+// Each repo is pinned to an explicit commit (not the mutable "main" branch)
+// and each file carries the SHA-256 that Hugging Face's own git-lfs tracking
+// reports for that pinned commit, so a compromised upstream revision or a
+// tampered/corrupted download is caught before a multi-gigabyte binary blob
+// reaches llama.cpp's GGUF parser.
+//
+// Revisions resolved via `GET https://huggingface.co/api/models/<repo>`
+// (`sha` field); file hashes via `GET .../models/<repo>?blobs=true`
+// (`siblings[].lfs.sha256` — the same hash git-lfs itself verifies blobs
+// against), both on 2026-08-03. If `ggml-org` publishes a new quantization
+// under these filenames, bump the revision/hash together deliberately rather
+// than silently trusting whatever "main" resolves to at download time.
 
 pub const DEFAULT_EMBED_REPO: &str = "ggml-org/embeddinggemma-300M-GGUF";
 pub const DEFAULT_EMBED_FILE: &str = "embeddinggemma-300M-Q8_0.gguf";
+pub const DEFAULT_EMBED_REVISION: &str = "0f741b5a6585bd53aeb15cd1372c56f2a0f65e12";
+pub const DEFAULT_EMBED_SHA256: &str =
+    "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63";
+
 pub const DEFAULT_RERANK_REPO: &str = "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF";
 pub const DEFAULT_RERANK_FILE: &str = "qwen3-reranker-0.6b-q8_0.gguf";
+pub const DEFAULT_RERANK_REVISION: &str = "a02f48bb4f057028298c21fa033da2b30d7742d5";
+pub const DEFAULT_RERANK_SHA256: &str =
+    "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48";
+
 pub const DEFAULT_GENERATE_REPO: &str = "ggml-org/Qwen3-1.7B-GGUF";
 pub const DEFAULT_GENERATE_FILE: &str = "Qwen3-1.7B-Q8_0.gguf";
+pub const DEFAULT_GENERATE_REVISION: &str = "daeb8e2d528a760970442092f6bf1e55c3b659eb";
+pub const DEFAULT_GENERATE_SHA256: &str =
+    "9860780f3a1fab1f8f909a1b549ea3e62c22d19ab1a492b3a1026b38c5bd3ec3";
 
 // Embedding dimension for embeddinggemma-300M (confirmed in spike: dim=768)
 pub const EMBED_DIM: usize = 768;
@@ -176,17 +204,40 @@ pub struct ModelCacheReport {
 }
 
 /// Return the cache status for all three models without loading any weights.
-/// All repos come from `config` so they match what the downloader uses exactly.
+/// All repos/revisions come from `config` so they match what the downloader
+/// uses exactly — `cache.model(repo)` (implicit "main" revision) would
+/// under-report once downloads are pinned to a specific commit, since the
+/// cache stores each revision under its own `refs/<revision>` entry.
 pub fn model_cache_report(config: &LlamaCppConfig) -> ModelCacheReport {
     // from_env() honours HF_HOME; falls back to ~/.cache/huggingface/hub.
     let cache = Cache::from_env();
-    let cached =
-        |repo: &str, file: &str| -> bool { cache.model(repo.to_string()).get(file).is_some() };
+    let cached = |repo: &str, revision: &str, file: &str| -> bool {
+        cache
+            .repo(Repo::with_revision(
+                repo.to_string(),
+                RepoType::Model,
+                revision.to_string(),
+            ))
+            .get(file)
+            .is_some()
+    };
     ModelCacheReport {
         cache_root: cache.path().clone(),
-        embed_cached: cached(&config.embed_repo, &config.embed_file),
-        rerank_cached: cached(&config.rerank_repo, &config.rerank_file),
-        generate_cached: cached(&config.generate_repo, &config.generate_file),
+        embed_cached: cached(
+            &config.embed_repo,
+            &config.embed_revision,
+            &config.embed_file,
+        ),
+        rerank_cached: cached(
+            &config.rerank_repo,
+            &config.rerank_revision,
+            &config.rerank_file,
+        ),
+        generate_cached: cached(
+            &config.generate_repo,
+            &config.generate_revision,
+            &config.generate_file,
+        ),
     }
 }
 
@@ -196,10 +247,19 @@ pub struct LlamaCppConfig {
     /// HF repo ID (e.g. "ggml-org/embeddinggemma-300M-GGUF") or local path.
     pub embed_repo: String,
     pub embed_file: String,
+    /// Commit hash to pin the embed repo to — see the `DEFAULT_*_REVISION`
+    /// doc comment for how these are resolved and why "main" is not used.
+    pub embed_revision: String,
+    /// Expected SHA-256 of `embed_file` at `embed_revision`.
+    pub embed_sha256: String,
     pub rerank_repo: String,
     pub rerank_file: String,
+    pub rerank_revision: String,
+    pub rerank_sha256: String,
     pub generate_repo: String,
     pub generate_file: String,
+    pub generate_revision: String,
+    pub generate_sha256: String,
     /// GPU layers for embed model. 99 = all layers on Metal/CUDA.
     pub embed_n_gpu_layers: u32,
     /// GPU layers for reranker. Keep ≤14 on Apple Silicon (448 MiB KV budget).
@@ -218,10 +278,16 @@ impl Default for LlamaCppConfig {
         Self {
             embed_repo: DEFAULT_EMBED_REPO.to_string(),
             embed_file: DEFAULT_EMBED_FILE.to_string(),
+            embed_revision: DEFAULT_EMBED_REVISION.to_string(),
+            embed_sha256: DEFAULT_EMBED_SHA256.to_string(),
             rerank_repo: DEFAULT_RERANK_REPO.to_string(),
             rerank_file: DEFAULT_RERANK_FILE.to_string(),
+            rerank_revision: DEFAULT_RERANK_REVISION.to_string(),
+            rerank_sha256: DEFAULT_RERANK_SHA256.to_string(),
             generate_repo: DEFAULT_GENERATE_REPO.to_string(),
             generate_file: DEFAULT_GENERATE_FILE.to_string(),
+            generate_revision: DEFAULT_GENERATE_REVISION.to_string(),
+            generate_sha256: DEFAULT_GENERATE_SHA256.to_string(),
             embed_n_gpu_layers: 99,
             rerank_n_gpu_layers: 14,
             rerank_n_ctx: 2048,
@@ -230,6 +296,148 @@ impl Default for LlamaCppConfig {
             hf_cache_dir: None,
         }
     }
+}
+
+/// Validate an `HF_ENDPOINT` value uses `https://`. Split out as a pure
+/// function (rather than inlined in `validate_hf_endpoint`) so it's
+/// unit-testable without mutating the process environment — env vars are
+/// process-global and would race under `cargo test`'s parallel execution.
+fn check_hf_endpoint_scheme(endpoint: &str) -> Result<()> {
+    if !endpoint.starts_with("https://") {
+        anyhow::bail!(
+            "HF_ENDPOINT={endpoint:?} is not an https:// URL — refusing to allow \
+             unencrypted model downloads. Set HF_ENDPOINT to an https:// mirror \
+             or unset it to use the default https://huggingface.co."
+        );
+    }
+    Ok(())
+}
+
+/// Reject a plaintext `HF_ENDPOINT`. `hf-hub`'s downloader reads this env var
+/// with no scheme check, so left unvalidated it lets anyone with control of
+/// the process environment silently redirect every model download to an
+/// arbitrary `http://` host — no TLS, no certificate, no warning.
+fn validate_hf_endpoint() -> Result<()> {
+    if let Ok(endpoint) = std::env::var("HF_ENDPOINT") {
+        check_hf_endpoint_scheme(&endpoint)?;
+    }
+    Ok(())
+}
+
+/// Compute the SHA-256 of a file, reading in fixed-size chunks so a
+/// multi-gigabyte GGUF is never loaded into memory whole just to hash it.
+fn sha256_file(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("open {} to hash", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 1 << 20];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .with_context(|| format!("read {} to hash", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Verify `path`'s SHA-256 matches `expected` (case-insensitive lowercase hex).
+fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
+    let actual = sha256_file(path)?;
+    if !actual.eq_ignore_ascii_case(expected) {
+        anyhow::bail!(
+            "integrity check failed for {}: expected sha256 {expected}, got {actual} — \
+             the download may be corrupted or tampered with",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Fetch `filename` from `repo_id` pinned at `revision`, from cache if
+/// present, otherwise downloading it. SHA-256 is verified only when the file
+/// was not already cached: a cached file was already verified the run it was
+/// first downloaded, and re-hashing a multi-gigabyte GGUF on every process
+/// start would be a real latency cost (this is the same trust-on-first-use
+/// model `git-lfs` itself uses — it checks the blob hash on checkout, not on
+/// every subsequent read).
+async fn get_verified(
+    api: &Api,
+    cache: &Cache,
+    repo_id: &str,
+    revision: &str,
+    filename: &str,
+    expected_sha256: &str,
+) -> Result<PathBuf> {
+    let repo = Repo::with_revision(repo_id.to_string(), RepoType::Model, revision.to_string());
+    let already_cached = cache.repo(repo.clone()).get(filename).is_some();
+    let path = api
+        .repo(repo)
+        .get(filename)
+        .await
+        .with_context(|| format!("download {repo_id}/{filename}@{revision}"))?;
+    if !already_cached {
+        verify_sha256(&path, expected_sha256)
+            .with_context(|| format!("{repo_id}/{filename}@{revision}"))?;
+    }
+    Ok(path)
+}
+
+/// Download (or resolve from cache) all three GGUF models. Shared between the
+/// two runtime contexts in `LlamaCppBackend::new` (already inside a tokio
+/// runtime vs. not) so revision pinning and SHA-256 verification are
+/// implemented exactly once instead of duplicated per branch.
+async fn download_models(config: &LlamaCppConfig) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    validate_hf_endpoint()?;
+    // `from_env()` (not `Api::new()`) so HF_HOME/HF_ENDPOINT are actually
+    // honoured here — `Api::new()` silently ignores both and always talks to
+    // the default https://huggingface.co using the default cache directory,
+    // which previously left `validate_hf_endpoint` checking an env var the
+    // downloader itself never read, and left `model_cache_report` (which does
+    // use `Cache::from_env()`) checking a different directory than downloads
+    // actually landed in whenever HF_HOME was set.
+    let api = ApiBuilder::from_env().build().context("hf-hub API init")?;
+    let cache = Cache::from_env();
+
+    let ep = get_verified(
+        &api,
+        &cache,
+        &config.embed_repo,
+        &config.embed_revision,
+        &config.embed_file,
+        &config.embed_sha256,
+    )
+    .await
+    .context("embed model download")?;
+    let rp = get_verified(
+        &api,
+        &cache,
+        &config.rerank_repo,
+        &config.rerank_revision,
+        &config.rerank_file,
+        &config.rerank_sha256,
+    )
+    .await
+    .context("rerank model download")?;
+    let gp = get_verified(
+        &api,
+        &cache,
+        &config.generate_repo,
+        &config.generate_revision,
+        &config.generate_file,
+        &config.generate_sha256,
+    )
+    .await
+    .context("generate model download")?;
+
+    Ok((ep, rp, gp))
 }
 
 pub struct LlamaCppBackend {
@@ -277,48 +485,12 @@ impl LlamaCppBackend {
         // Spawning a new Runtime inside an existing tokio context panics; detect and
         // use block_in_place (which yields the thread to the scheduler) instead.
         let (embed_path, rerank_path, generate_path) = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| {
-                handle.block_on(async {
-                    let api = Api::new().context("hf-hub API init")?;
-                    let ep = api
-                        .model(config.embed_repo.clone())
-                        .get(&config.embed_file)
-                        .await
-                        .context("embed model download")?;
-                    let rp = api
-                        .model(config.rerank_repo.clone())
-                        .get(&config.rerank_file)
-                        .await
-                        .context("rerank model download")?;
-                    let gp = api
-                        .model(config.generate_repo.clone())
-                        .get(&config.generate_file)
-                        .await
-                        .context("generate model download")?;
-                    Ok::<_, anyhow::Error>((ep, rp, gp))
-                })
-            })?,
+            Ok(handle) => {
+                tokio::task::block_in_place(|| handle.block_on(download_models(&config)))?
+            }
             Err(_) => tokio::runtime::Runtime::new()
                 .context("tokio runtime init")?
-                .block_on(async {
-                    let api = Api::new().context("hf-hub API init")?;
-                    let ep = api
-                        .model(config.embed_repo.clone())
-                        .get(&config.embed_file)
-                        .await
-                        .context("embed model download")?;
-                    let rp = api
-                        .model(config.rerank_repo.clone())
-                        .get(&config.rerank_file)
-                        .await
-                        .context("rerank model download")?;
-                    let gp = api
-                        .model(config.generate_repo.clone())
-                        .get(&config.generate_file)
-                        .await
-                        .context("generate model download")?;
-                    Ok::<_, anyhow::Error>((ep, rp, gp))
-                })?,
+                .block_on(download_models(&config))?,
         };
 
         // Install the tracing→log bridge BEFORE LlamaBackend::init() so that
@@ -703,7 +875,7 @@ impl InferenceBackend for NoBackend {
     }
 
     fn embed(&mut self, _text: &str) -> Result<Vec<f32>> {
-        anyhow::bail!("embed called without inference backend — run `qmd embed` first")
+        anyhow::bail!("embed called without inference backend — run `rqmd embed` first")
     }
     fn rerank(&mut self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>> {
         anyhow::bail!("rerank called without inference backend")
@@ -860,6 +1032,37 @@ mod tests {
         let last_used = Some(base);
         let now = base + Duration::from_secs(100);
         assert!(!is_idle(last_used, now, Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn hf_endpoint_https_accepted() {
+        assert!(check_hf_endpoint_scheme("https://huggingface.co").is_ok());
+        assert!(check_hf_endpoint_scheme("https://internal-mirror.example.com").is_ok());
+    }
+
+    #[test]
+    fn hf_endpoint_http_rejected() {
+        assert!(check_hf_endpoint_scheme("http://huggingface.co").is_err());
+        assert!(check_hf_endpoint_scheme("http://evil.example.com").is_err());
+    }
+
+    #[test]
+    fn hf_endpoint_other_schemes_rejected() {
+        assert!(check_hf_endpoint_scheme("ftp://huggingface.co").is_err());
+        assert!(check_hf_endpoint_scheme("huggingface.co").is_err());
+    }
+
+    #[test]
+    fn sha256_file_matches_known_vector() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sample.txt");
+        std::fs::write(&path, b"abc").unwrap();
+        // echo -n abc | sha256sum
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(sha256_file(&path).unwrap(), expected);
+        assert!(verify_sha256(&path, expected).is_ok());
+        let wrong = "0".repeat(64);
+        assert!(verify_sha256(&path, &wrong).is_err());
     }
 
     #[test]

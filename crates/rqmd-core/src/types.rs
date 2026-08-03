@@ -85,6 +85,6 @@ pub struct SearchResult {
     pub docid: String,
     pub collection: String,
     pub path: String,
-    /// Collection-level context string (from `qmd context add`), if set.
+    /// Collection-level context string (from `rqmd context add`), if set.
     pub context: Option<String>,
 }

@@ -8,7 +8,7 @@ mod exclusions;
 mod format;
 mod store;
 
-/// qmd — hybrid local document search
+/// rqmd — hybrid local document search
 #[derive(Parser)]
 #[command(name = "rqmd", version, about, long_about = None)]
 struct Cli {
@@ -122,7 +122,7 @@ enum Commands {
     /// Context management
     #[command(subcommand)]
     Context(ContextCommand),
-    /// Create a project-local .qmd index
+    /// Create a project-local .rqmd/ index
     Init,
     /// Show index status and collections
     Status,
@@ -170,6 +170,12 @@ enum Commands {
         /// trusted network or container.
         #[arg(long, default_value = "127.0.0.1", env = "RRQMD_MCP_HOST")]
         host: String,
+        /// Required alongside a non-loopback --host: confirms you understand
+        /// this exposes the index with no authentication to anything that can
+        /// reach that host/port. Loopback hosts (127.0.0.1/localhost/::1)
+        /// never need this.
+        #[arg(long, env = "RRQMD_MCP_ALLOW_NON_LOOPBACK")]
+        allow_non_loopback: bool,
         /// Run as a background daemon (implies --http); daemonize and exit
         #[arg(long)]
         daemon: bool,
@@ -385,12 +391,20 @@ fn main() -> Result<()> {
             http,
             port,
             host,
+            allow_non_loopback,
             daemon,
             action,
         } => match action {
             Some(McpAction::Status) => commands::mcp::run_mcp_status(&index_dir),
             Some(McpAction::Stop) => commands::mcp::run_mcp_stop(&index_dir),
-            None => commands::mcp::run_mcp(&index_dir, http || daemon, &host, port, daemon),
+            None => commands::mcp::run_mcp(
+                &index_dir,
+                http || daemon,
+                &host,
+                port,
+                daemon,
+                allow_non_loopback,
+            ),
         },
     }
 }

@@ -1,6 +1,6 @@
-//! Query syntax parser — implements the QMD query language (docs/SYNTAX.md).
+//! Query syntax parser — implements the rqmd query language (docs/SYNTAX.md).
 //!
-//! A QMD query is either:
+//! A rqmd query is either:
 //!   - An **expand query**: a single line (or `expand: text`) passed to the
 //!     generation model, which emits `lex:`/`vec:`/`hyde:` expansions.
 //!   - A **query document**: one or more typed lines (`lex:`, `vec:`, `hyde:`,
@@ -29,7 +29,7 @@ pub struct ParsedQuery {
     pub expand_text: Option<String>,
 }
 
-/// Parse a raw query string per the QMD query syntax.
+/// Parse a raw query string per the rqmd query syntax.
 ///
 /// Rules:
 /// - Blank lines are ignored.

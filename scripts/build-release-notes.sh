@@ -62,12 +62,15 @@ if [ "$from_existing" = "true" ]; then
     | grep -v '^---$' \
     | sed '/^[[:space:]]*$/{ N; /^\n$/d; }')
 else
+  # An empty "## [Unreleased]" section is the expected steady state between
+  # releases, not an error — grep exits 1 when it has zero lines to filter,
+  # which would otherwise abort the whole script under `pipefail`.
   body=$(awk '
     /^## \[Unreleased\]/ { found=1; next }
     /^## \[/ && found { exit }
     found { print }
   ' "$CHANGELOG" \
-    | grep -v '^---$' \
+    | { grep -v '^---$' || true; } \
     | awk 'NF{p=1} p')
 fi
 
