@@ -4,6 +4,46 @@
 
 ---
 
+## [0.9.0] - 2026-08-03
+### Security
+- GGUF model downloads (`rqmd-llm`) now pin an explicit revision per model
+  repo and verify the downloaded file's SHA-256 against a known-good hash
+  before first use, closing a gap where in-transit tampering, a
+  compromised mirror, or a corrupted download could silently swap in a
+  different model with no verification. Verification runs on a fresh
+  download only (trust-on-first-use), not on every cache hit.
+- `HF_ENDPOINT` is now validated to require `https://`; a non-HTTPS or
+  malformed value is rejected with an error instead of silently allowing
+  model downloads to be redirected over an unencrypted or unexpected
+  transport. The download path was also switched to a client that
+  actually reads `HF_ENDPOINT`/`HF_HOME` (the previous one silently
+  ignored both), so this check now has real effect and cache-directory
+  reporting stays consistent with where models are actually downloaded.
+- Third-party GitHub Actions (`dtolnay/rust-toolchain`, `Swatinem/rust-cache`,
+  `cachix/install-nix-action`, `aquasecurity/trivy-action`) and
+  GitHub-authored actions (`actions/checkout`, `actions/upload-artifact`,
+  `actions/create-github-app-token`, `github/codeql-action/upload-sarif`)
+  are now pinned to a full commit SHA (version tag kept as a trailing
+  comment) instead of a mutable tag, closing a gap where a compromised or
+  re-tagged upstream release could substitute malicious action code —
+  most notably in `upload-assets`, which holds `contents: write` and a
+  `GH_TOKEN`.
+- `release.yml` checkouts that don't push back to the repository
+  (`upload-assets`, `finalize-notes`, `sync-homebrew`) now set
+  `persist-credentials: false`, matching the other workflows; the
+  `release` job's own checkout keeps the default since it performs the
+  actual `git push` of the release tag.
+- `release.yml` no longer degrades to publishing an unsigned release tag
+  when GPG signing isn't configured or fails — it now fails the job with
+  an explicit error instead of a warning.
+- Escaped `%`/`_` LIKE metacharacters (and the escape character itself)
+  in the docid-prefix lookup (`rqmd-core::db::get_document_by_docid_prefix`),
+  fixing non-deterministic document resolution for docids containing
+  those characters. Not an injection risk (the query was already
+  parameterized) — this was a match-semantics correctness bug.
+
+---
+
 ## [0.8.1] - 2026-08-02
 ### Fixed
 - `release.yml`: every future release body now gets commit/PR provenance
