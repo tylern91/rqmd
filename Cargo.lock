@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-cli"
-version = "0.8.2"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2652,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-core"
-version = "0.8.2"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "hex",
@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-llm"
-version = "0.8.2"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -2678,6 +2678,8 @@ dependencies = [
  "llama-cpp-2",
  "ndarray",
  "ort",
+ "sha2",
+ "tempfile",
  "tokenizers",
  "tokio",
  "tracing",
@@ -2685,7 +2687,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-mcp"
-version = "0.8.2"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2695,7 +2697,11 @@ dependencies = [
  "rqmd-core",
  "rqmd-llm",
  "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "tower",
+ "tower-http",
 ]
 
 [[package]]
@@ -3527,6 +3533,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
  "tower",
  "tower-layer",

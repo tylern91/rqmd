@@ -24,6 +24,7 @@ anyhow = "1"
 encoding_rs = "0.8"
 hf-hub = { version = "0.5", features = ["tokio"] }
 llama-cpp-2 = { version = "0.1.150", features = ["sampler"] }
+sha2 = { version = "0.10", features = ["std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 
@@ -31,3 +32,6 @@ tracing = "0.1"
 ort        = { version = "=2.0.0-rc.12", optional = true, features = ["coreml"] }
 tokenizers = { version = "0.23", optional = true, default-features = false, features = ["http", "fancy-regex"] }
 ndarray    = { version = "0.17", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

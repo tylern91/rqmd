@@ -6,18 +6,26 @@ use std::time::Duration;
 use crate::daemon;
 
 #[allow(clippy::too_many_arguments)]
-pub fn run_mcp(index_dir: &Path, http: bool, host: &str, port: u16, is_daemon: bool) -> Result<()> {
-    if http && !daemon::is_loopback(host) {
-        eprintln!(
-            "\x1b[33mWARNING: binding to {host} exposes this index's full-text and semantic \
-             search — including `get`, which returns arbitrary indexed file content — with no \
-             authentication to anything that can reach {host}:{port}. Only do this on a \
-             trusted network or container.\x1b[0m"
+pub fn run_mcp(
+    index_dir: &Path,
+    http: bool,
+    host: &str,
+    port: u16,
+    is_daemon: bool,
+    allow_non_loopback: bool,
+) -> Result<()> {
+    if http && !daemon::is_loopback(host) && !allow_non_loopback {
+        bail!(
+            "refusing to bind the MCP server to non-loopback host {host}: this exposes the \
+             index's full-text and semantic search — including `get`, which returns arbitrary \
+             indexed file content — with no authentication to anything that can reach \
+             {host}:{port}.\n\nIf this is intentional (e.g. a trusted network or container), \
+             pass --allow-non-loopback (or set RRQMD_MCP_ALLOW_NON_LOOPBACK=1)."
         );
     }
 
     if is_daemon {
-        return spawn_daemon(index_dir, host, port);
+        return spawn_daemon(index_dir, host, port, allow_non_loopback);
     }
 
     if !http {
@@ -57,7 +65,7 @@ pub fn run_mcp_stop(index_dir: &Path) -> Result<()> {
     daemon::stop_daemon(index_dir)
 }
 
-fn spawn_daemon(index_dir: &Path, host: &str, port: u16) -> Result<()> {
+fn spawn_daemon(index_dir: &Path, host: &str, port: u16, allow_non_loopback: bool) -> Result<()> {
     std::fs::create_dir_all(index_dir)
         .with_context(|| format!("failed to create index dir at {}", index_dir.display()))?;
 
@@ -98,10 +106,13 @@ fn spawn_daemon(index_dir: &Path, host: &str, port: u16) -> Result<()> {
         host,
         "--port",
         &port.to_string(),
-    ])
-    .stdin(std::process::Stdio::null())
-    .stdout(log_out)
-    .stderr(log_err);
+    ]);
+    if allow_non_loopback {
+        cmd.arg("--allow-non-loopback");
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(log_out)
+        .stderr(log_err);
 
     #[cfg(unix)]
     {
