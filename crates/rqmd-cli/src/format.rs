@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
-use rqmd_core::{extract_snippet, SearchResult};
+use rqmd_core::{extract_snippet, snap_char_boundary_backward, SearchResult};
 
 /// Output format shared by every `--format` flag in the CLI. Not every
 /// variant makes sense for every command — `print_document` rejects the
@@ -315,6 +315,13 @@ pub fn highlight_terms(text: &str, query: &str) -> String {
     if !ansi_enabled() {
         return text.to_string();
     }
+    highlight_terms_unconditional(text, query)
+}
+
+/// Core of [`highlight_terms`], factored out so it can be unit-tested
+/// without depending on `ansi_enabled()`'s TTY check (stdout isn't a TTY
+/// under `cargo test`, which would otherwise make this a no-op in tests).
+fn highlight_terms_unconditional(text: &str, query: &str) -> String {
     let terms: Vec<&str> = query
         .split_whitespace()
         .filter(|t| t.chars().count() >= 3)
@@ -332,14 +339,22 @@ pub fn highlight_terms(text: &str, query: &str) -> String {
         let mut pos = 0;
         while pos < lower_result.len() {
             if let Some(idx) = lower_result[pos..].find(lower_term.as_str()) {
-                let abs = pos + idx;
-                out.push_str(&result[last..abs]);
-                out.push_str(&format!(
-                    "{YELLOW}{BOLD}{}{RESET}",
-                    &result[abs..abs + term.len()]
-                ));
-                last = abs + term.len();
-                pos = last;
+                let raw_start = pos + idx;
+                // `raw_start` is a byte offset found in `lower_result`, which
+                // can diverge in byte length from `result` under case
+                // folding (e.g. Turkish İ is 2 bytes but lowercases to 3;
+                // Kelvin sign K is 3 bytes but lowercases to 1) — snap onto
+                // real char boundaries in `result` before slicing it.
+                let start = snap_char_boundary_backward(&result, raw_start.min(result.len()));
+                let end = snap_char_boundary_backward(
+                    &result,
+                    (raw_start + term.len()).min(result.len()),
+                )
+                .max(start);
+                out.push_str(&result[last..start]);
+                out.push_str(&format!("{YELLOW}{BOLD}{}{RESET}", &result[start..end]));
+                last = end;
+                pos = (raw_start + lower_term.len()).max(pos + 1);
             } else {
                 break;
             }
@@ -683,4 +698,35 @@ pub fn print_document(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn highlight_terms_handles_turkish_capital_i_growing_under_lowercasing() {
+        // 'İ' (U+0130, LATIN CAPITAL LETTER I WITH DOT ABOVE) is 2 bytes but
+        // lowercases to 3 bytes ("i" + combining dot above). A naive byte
+        // offset found in `text.to_lowercase()` then lands one byte inside
+        // the following 2-byte 'é' when sliced against the original
+        // (unlowered) string — this must snap to a char boundary instead
+        // of panicking with "byte index N is not a char boundary".
+        let text = "\u{0130}ééé";
+        let result = highlight_terms_unconditional(text, "ééé");
+        let expected = format!("\u{0130}{YELLOW}{BOLD}ééé{RESET}");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn highlight_terms_handles_kelvin_sign_shrinking_under_lowercasing() {
+        // Kelvin sign 'K' (U+212A) is 3 bytes but lowercases to plain 'k'
+        // (1 byte). The resulting offset shift lands inside the original
+        // 3-byte 'K' itself when sliced — this must snap to a char boundary
+        // instead of panicking.
+        let text = "\u{212A}ééé";
+        let result = highlight_terms_unconditional(text, "ééé");
+        let expected = format!("{YELLOW}{BOLD}\u{212A}éé{RESET}é");
+        assert_eq!(result, expected);
+    }
 }

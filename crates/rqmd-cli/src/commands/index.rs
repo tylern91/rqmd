@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Instant;
 use walkdir::WalkDir;
 
-use rqmd_core::{db, IndexOutcome, PendingVectorMeta};
+use rqmd_core::{db, snap_char_boundary_backward, IndexOutcome, PendingVectorMeta};
 
 use crate::{document, exclusions, format as fmt, store};
 
@@ -83,11 +83,7 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
             println!("    \x1b[2mPattern:\x1b[0m  {}", col.pattern);
             println!("    \x1b[2mFiles:\x1b[0m    {count} (updated {last_mod_str})");
             if let Ok(Some(ctx)) = db::get_context_for_collection(&s.db, &col.name) {
-                let preview = if ctx.len() > 60 {
-                    format!("{}...", &ctx[..57])
-                } else {
-                    ctx.clone()
-                };
+                let preview = truncate_context_preview(&ctx);
                 println!("    \x1b[2mContexts:\x1b[0m 1");
                 println!("      \x1b[2m/:\x1b[0m {preview}");
             }
@@ -768,4 +764,40 @@ fn dir_size(dir: &Path) -> u64 {
         .filter(|m| m.is_file())
         .map(|m| m.len())
         .sum()
+}
+
+/// Truncate a collection-context string for the status display's one-line
+/// preview. `ctx.len() > 60` is a *byte* length check, not a char count, so
+/// the fixed cut point is snapped to a valid char boundary before slicing —
+/// otherwise multi-byte UTF-8 straddling byte 57 panics.
+fn truncate_context_preview(ctx: &str) -> String {
+    if ctx.len() > 60 {
+        let cut = snap_char_boundary_backward(ctx, 57);
+        format!("{}...", &ctx[..cut])
+    } else {
+        ctx.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_context_preview_snaps_multibyte_boundary() {
+        // 56 ASCII bytes followed by a 2-byte 'é' straddling the fixed
+        // byte-57 cut point. Total length (61) exceeds the 60-byte
+        // threshold, but the naive `&ctx[..57]` would slice mid-character
+        // (byte 57 is the second byte of 'é') and panic.
+        let ctx = format!("{}éxyz", "a".repeat(56));
+        assert_eq!(ctx.len(), 61);
+        let preview = truncate_context_preview(&ctx);
+        assert_eq!(preview, format!("{}...", "a".repeat(56)));
+    }
+
+    #[test]
+    fn truncate_context_preview_leaves_short_context_untouched() {
+        let ctx = "short context";
+        assert_eq!(truncate_context_preview(ctx), ctx);
+    }
 }

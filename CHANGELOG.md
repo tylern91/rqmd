@@ -4,6 +4,19 @@
 
 ---
 
+## [0.8.2] - 2026-08-03
+### Fixed
+- `highlight_terms` computed match offsets against a lowercased copy of the
+  search result but sliced the original string with them — characters whose
+  byte length changes under case folding (e.g. Turkish `İ`, Kelvin sign `K`)
+  could shift the slice off a char boundary and panic, or silently highlight
+  the wrong span.
+- Collection-context truncation in `index.rs` byte-sliced at a fixed offset
+  using a byte-length guard that looked like a char-count guard, causing the
+  same class of panic on multi-byte UTF-8 input.
+
+---
+
 ## [0.8.1] - 2026-08-02
 ### Fixed
 - `release.yml`: every future release body now gets commit/PR provenance

@@ -208,7 +208,7 @@ fn snap_char_boundary_forward(text: &str, pos: usize) -> usize {
 }
 
 /// Retreat `pos` to the previous UTF-8 char boundary (or 0).
-fn snap_char_boundary_backward(text: &str, pos: usize) -> usize {
+pub fn snap_char_boundary_backward(text: &str, pos: usize) -> usize {
     let mut p = pos.min(text.len());
     while p > 0 && !text.is_char_boundary(p) {
         p -= 1;
