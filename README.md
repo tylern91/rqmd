@@ -432,9 +432,9 @@ rqmd --backend ort --ort-ep coreml embed
 | Embeddings | ORT (`ort-backend` feature) | `BAAI/bge-base-en-v1.5` (ONNX) | ~440 MB |
 | Query expansion | LlamaCpp | `ggml-org/Qwen3-1.7B-GGUF` (`Qwen3-1.7B-Q8_0.gguf`) | ~1.7 GB |
 
-Models download automatically from HuggingFace on first use (~900 MB for embed + rerank; ~2.6 GB with query expansion) and are cached at `~/.cache/huggingface/hub/`.
+Models download automatically from HuggingFace on first use (~900 MB for embed + rerank; ~2.6 GB with query expansion) and are cached at `~/.cache/huggingface/hub/`. All three model repos are public — no token is required for a normal download.
 
-Set `HF_ENDPOINT` to use a mirror, or `HF_HUB_OFFLINE=1` to disable downloads entirely (models must be pre-staged in the cache).
+Set `HF_ENDPOINT` to use a mirror, or `HF_HUB_OFFLINE=1` to disable downloads entirely and require every model to already be cached — rqmd fails with an actionable error naming the missing file instead of attempting a request. If `~/.cache/huggingface/token` holds an expired or invalid token, rqmd retries anonymously rather than failing outright; set `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` to use a specific token instead (checked in that order, ahead of the cached token file).
 
 ---
 
@@ -884,7 +884,18 @@ RUSTFLAGS="-C target-cpu=native" cargo build --profile dist -p rqmd-cli
 
 Models are fetched from HuggingFace on first `rqmd embed` and cached at
 `~/.cache/huggingface/hub/`. Set `HF_ENDPOINT` for a mirror, or
-`HF_HUB_OFFLINE=1` with pre-downloaded models.
+`HF_HUB_OFFLINE=1` to require every model to already be cached (fails fast
+with the expected file path instead of trying the network).
+
+`rqmd doctor` reports which models are cached without downloading anything —
+run it first if `rqmd embed` reports a model as missing unexpectedly.
+
+**401 Unauthorized**: these model repos are public, so a 401 almost always
+means a stale token, not a permissions problem. rqmd retries anonymously if
+the token in `~/.cache/huggingface/token` is rejected; if the retry also
+fails, run `huggingface-cli login` to refresh it, or delete that file to
+download anonymously. Set `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` to use a
+specific token instead of the cached one.
 
 ### "OrtBackend: reranking not supported"
 
