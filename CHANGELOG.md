@@ -4,6 +4,20 @@
 
 ---
 
+## [0.10.6] - 2026-08-04
+### Fixed
+- `rqmd-llm`: model downloads could fail with a 401 even on public repos, and
+  a cache populated before revision pinning existed forced a network round
+  trip on every run — cache lookups now fall back to the legacy
+  `snapshots/<revision>/<file>` layout (verifying the hash once and healing
+  `refs/<revision>` so `doctor` and later runs see it directly), a rejected
+  credentialed request now retries anonymously instead of hard-failing, and
+  `HF_TOKEN`/`HUGGING_FACE_HUB_TOKEN` are now honored ahead of the cached
+  token file. `HF_HUB_OFFLINE`, previously documented but not implemented by
+  the underlying `hf-hub` crate, now actually disables downloads.
+
+---
+
 ## [0.10.5] - 2026-08-03
 ### Fixed
 - `highlight_terms` computed match offsets against a lowercased copy of the

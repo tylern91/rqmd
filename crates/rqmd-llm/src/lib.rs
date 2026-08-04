@@ -203,6 +203,22 @@ pub struct ModelCacheReport {
     pub generate_cached: bool,
 }
 
+/// Existence-only check for whether `file` is present for `repo`/`revision`
+/// in `cache`. Mirrors `resolve_cached`'s two lookup paths (hf-hub's own
+/// `refs/<revision>` fast path, then the legacy `snapshots/<revision>/<file>`
+/// layout) but never hashes or heals — `doctor` must stay instant and must
+/// not mutate the cache as a side effect of a status check. Takes `cache`
+/// explicitly (rather than reading `Cache::from_env()` itself) so it is
+/// unit-testable against a temporary cache directory.
+fn cache_has_file(cache: &Cache, repo: &str, revision: &str, file: &str) -> bool {
+    let cache_repo = cache.repo(Repo::with_revision(
+        repo.to_string(),
+        RepoType::Model,
+        revision.to_string(),
+    ));
+    cache_repo.get(file).is_some() || cache_repo.pointer_path(revision).join(file).exists()
+}
+
 /// Return the cache status for all three models without loading any weights.
 /// All repos/revisions come from `config` so they match what the downloader
 /// uses exactly — `cache.model(repo)` (implicit "main" revision) would
@@ -211,29 +227,22 @@ pub struct ModelCacheReport {
 pub fn model_cache_report(config: &LlamaCppConfig) -> ModelCacheReport {
     // from_env() honours HF_HOME; falls back to ~/.cache/huggingface/hub.
     let cache = Cache::from_env();
-    let cached = |repo: &str, revision: &str, file: &str| -> bool {
-        cache
-            .repo(Repo::with_revision(
-                repo.to_string(),
-                RepoType::Model,
-                revision.to_string(),
-            ))
-            .get(file)
-            .is_some()
-    };
     ModelCacheReport {
         cache_root: cache.path().clone(),
-        embed_cached: cached(
+        embed_cached: cache_has_file(
+            &cache,
             &config.embed_repo,
             &config.embed_revision,
             &config.embed_file,
         ),
-        rerank_cached: cached(
+        rerank_cached: cache_has_file(
+            &cache,
             &config.rerank_repo,
             &config.rerank_revision,
             &config.rerank_file,
         ),
-        generate_cached: cached(
+        generate_cached: cache_has_file(
+            &cache,
             &config.generate_repo,
             &config.generate_revision,
             &config.generate_file,
@@ -361,15 +370,155 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
+/// Resolve `filename` from the local cache, tolerating caches populated
+/// before revision pinning existed. hf-hub's own `CacheRepo::get` only
+/// consults `refs/<revision>` (a file containing a commit hash), so a
+/// snapshot that was downloaded under `refs/main` is invisible to it once we
+/// pin to a specific commit SHA — even though the exact same bytes already
+/// sit at `snapshots/<revision>/<file>`. When we find bytes there with no
+/// matching ref, we hash them once and write `refs/<revision>` ourselves so
+/// every later run takes hf-hub's fast (network-free) path.
+fn resolve_cached(
+    cache: &Cache,
+    repo: &Repo,
+    filename: &str,
+    expected_sha256: &str,
+) -> Result<Option<PathBuf>> {
+    let cache_repo = cache.repo(repo.clone());
+
+    // Fast path: refs/<revision> already exists. That file was written either
+    // by a prior download (verified then — see `get_verified`'s trust-on-
+    // first-use note) or by a previous run of this healing step, so it is
+    // never re-hashed here.
+    if let Some(path) = cache_repo.get(filename) {
+        return Ok(Some(path));
+    }
+
+    // Legacy-layout path: the pinned snapshot exists on disk, but nothing
+    // ever wrote refs/<revision> for it (pre-pinning cache, or a ref that got
+    // lost). Verify before trusting it, then heal the ref so this check is
+    // paid only once per model per machine.
+    let pointer = cache_repo.pointer_path(repo.revision()).join(filename);
+    if !pointer.exists() {
+        return Ok(None);
+    }
+    verify_sha256(&pointer, expected_sha256)?;
+    cache_repo
+        .create_ref(repo.revision())
+        .with_context(|| format!("heal cache ref for {}", pointer.display()))?;
+    Ok(Some(pointer))
+}
+
+/// Parse an `HF_HUB_OFFLINE` value the way the official `huggingface_hub`
+/// Python client does: any value other than empty/"0"/"false"/"no"
+/// (case-insensitive) means offline. Split out as a pure function for the
+/// same unit-testability reason as `check_hf_endpoint_scheme`.
+fn offline_from_env_value(v: &str) -> bool {
+    !matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no"
+    )
+}
+
+/// True when `HF_HUB_OFFLINE` is set to a value that means "never touch the
+/// network". hf-hub 0.5.0 has no built-in support for this var — despite the
+/// README advertising it — so it is enforced entirely here, and only after
+/// `resolve_cached` has had a chance to serve the file from a local cache.
+fn hf_hub_offline() -> bool {
+    std::env::var("HF_HUB_OFFLINE")
+        .map(|v| offline_from_env_value(&v))
+        .unwrap_or(false)
+}
+
+/// Read an override token from the environment, in the same precedence order
+/// the official `huggingface_hub` Python client uses: `HF_TOKEN` first, then
+/// `HUGGING_FACE_HUB_TOKEN`. hf-hub 0.5.0 reads neither on its own — only the
+/// on-disk `~/.cache/huggingface/token` file — so without this an env var
+/// override would silently do nothing.
+fn env_hf_token() -> Option<String> {
+    std::env::var("HF_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("HUGGING_FACE_HUB_TOKEN").ok())
+        .filter(|t| !t.trim().is_empty())
+}
+
+/// True for HTTP statuses that mean "the credential was rejected" rather
+/// than "the resource doesn't exist" or "the server is unhappy" — split out
+/// as a pure function (same reasoning as `check_hf_endpoint_scheme`) so it is
+/// unit-testable without constructing a real `ApiError`.
+fn status_is_auth_failure(status: u16) -> bool {
+    status == 401 || status == 403
+}
+
+/// Walk an `ApiError`, including a `TooManyRetries`-boxed inner error, looking
+/// for an HTTP response whose status means the credential was rejected.
+fn is_auth_failure(err: &hf_hub::api::tokio::ApiError) -> bool {
+    use hf_hub::api::tokio::ApiError;
+    match err {
+        ApiError::RequestError(e) => e
+            .status()
+            .map(|s| status_is_auth_failure(s.as_u16()))
+            .unwrap_or(false),
+        ApiError::TooManyRetries(inner) => is_auth_failure(inner),
+        _ => false,
+    }
+}
+
+/// Download `filename` from `repo` via `api`, retrying anonymously via
+/// `anon_api` if the credentialed attempt is rejected as an auth failure.
+/// rqmd's pinned model repos are public, so a stale or revoked token —
+/// whether from `HF_TOKEN`/`HUGGING_FACE_HUB_TOKEN` or the cache's token
+/// file — turns a request that would otherwise succeed into a 401/403;
+/// dropping the token is the fix, not a privilege escalation. Integrity is
+/// unaffected either way: the caller still verifies SHA-256 against the
+/// pinned hash regardless of which client answered.
+async fn get_with_auth_fallback(
+    api: &Api,
+    anon_api: Option<&Api>,
+    cache: &Cache,
+    repo_id: &str,
+    repo: &Repo,
+    filename: &str,
+) -> Result<PathBuf> {
+    let err = match api.repo(repo.clone()).get(filename).await {
+        Ok(path) => return Ok(path),
+        Err(e) => e,
+    };
+    if !is_auth_failure(&err) {
+        return Err(err.into());
+    }
+    let Some(anon_api) = anon_api else {
+        return Err(err.into());
+    };
+
+    tracing::warn!(
+        "HuggingFace rejected the credentialed request for {repo_id}/{filename} \
+         ({err}); retrying anonymously — the cached or configured token may be \
+         expired or invalid"
+    );
+    match anon_api.repo(repo.clone()).get(filename).await {
+        Ok(path) => Ok(path),
+        Err(anon_err) => anyhow::bail!(
+            "HuggingFace rejected both the authenticated ({err}) and anonymous \
+             ({anon_err}) download of {repo_id}/{filename}. The token at {} may \
+             be expired — run `huggingface-cli login` to refresh it, or remove \
+             that file to download anonymously.",
+            cache.token_path().display(),
+        ),
+    }
+}
+
 /// Fetch `filename` from `repo_id` pinned at `revision`, from cache if
-/// present, otherwise downloading it. SHA-256 is verified only when the file
-/// was not already cached: a cached file was already verified the run it was
-/// first downloaded, and re-hashing a multi-gigabyte GGUF on every process
-/// start would be a real latency cost (this is the same trust-on-first-use
-/// model `git-lfs` itself uses — it checks the blob hash on checkout, not on
-/// every subsequent read).
+/// present (see `resolve_cached`), otherwise downloading it via
+/// `get_with_auth_fallback`. SHA-256 is verified only on the network path: a
+/// cached file was already verified either when first downloaded or by
+/// `resolve_cached`'s healing check, and re-hashing a multi-gigabyte GGUF on
+/// every process start would be a real latency cost (this is the same
+/// trust-on-first-use model `git-lfs` itself uses — it checks the blob hash
+/// on checkout, not on every subsequent read).
 async fn get_verified(
     api: &Api,
+    anon_api: Option<&Api>,
     cache: &Cache,
     repo_id: &str,
     revision: &str,
@@ -377,16 +526,30 @@ async fn get_verified(
     expected_sha256: &str,
 ) -> Result<PathBuf> {
     let repo = Repo::with_revision(repo_id.to_string(), RepoType::Model, revision.to_string());
-    let already_cached = cache.repo(repo.clone()).get(filename).is_some();
-    let path = api
-        .repo(repo)
-        .get(filename)
+    if let Some(path) = resolve_cached(cache, &repo, filename, expected_sha256)
+        .with_context(|| format!("{repo_id}/{filename}@{revision}"))?
+    {
+        return Ok(path);
+    }
+
+    if hf_hub_offline() {
+        let expected_path = cache
+            .repo(repo.clone())
+            .pointer_path(revision)
+            .join(filename);
+        anyhow::bail!(
+            "{repo_id}/{filename}@{revision} is not in the local cache and \
+             HF_HUB_OFFLINE is set — unset it to allow the download, or \
+             pre-stage the file at {}",
+            expected_path.display(),
+        );
+    }
+
+    let path = get_with_auth_fallback(api, anon_api, cache, repo_id, &repo, filename)
         .await
         .with_context(|| format!("download {repo_id}/{filename}@{revision}"))?;
-    if !already_cached {
-        verify_sha256(&path, expected_sha256)
-            .with_context(|| format!("{repo_id}/{filename}@{revision}"))?;
-    }
+    verify_sha256(&path, expected_sha256)
+        .with_context(|| format!("{repo_id}/{filename}@{revision}"))?;
     Ok(path)
 }
 
@@ -403,11 +566,35 @@ async fn download_models(config: &LlamaCppConfig) -> Result<(PathBuf, PathBuf, P
     // downloader itself never read, and left `model_cache_report` (which does
     // use `Cache::from_env()`) checking a different directory than downloads
     // actually landed in whenever HF_HOME was set.
-    let api = ApiBuilder::from_env().build().context("hf-hub API init")?;
     let cache = Cache::from_env();
+
+    // Token precedence: HF_TOKEN / HUGGING_FACE_HUB_TOKEN env vars override
+    // hf-hub's own cache-file token (which `ApiBuilder::from_env` already
+    // picks up via `Cache::token()`); with neither, no token is sent.
+    let env_token = env_hf_token();
+    let mut builder = ApiBuilder::from_env();
+    if let Some(tok) = env_token.clone() {
+        builder = builder.with_token(Some(tok));
+    }
+    let api = builder.build().context("hf-hub API init")?;
+
+    // Build the anonymous fallback client only when a credential is actually
+    // in play — env override or cache file — since it exists purely to retry
+    // without one on a 401/403 (see `get_with_auth_fallback`).
+    let anon_api = if env_token.is_some() || cache.token().is_some() {
+        Some(
+            ApiBuilder::from_env()
+                .with_token(None)
+                .build()
+                .context("hf-hub anonymous API init")?,
+        )
+    } else {
+        None
+    };
 
     let ep = get_verified(
         &api,
+        anon_api.as_ref(),
         &cache,
         &config.embed_repo,
         &config.embed_revision,
@@ -418,6 +605,7 @@ async fn download_models(config: &LlamaCppConfig) -> Result<(PathBuf, PathBuf, P
     .context("embed model download")?;
     let rp = get_verified(
         &api,
+        anon_api.as_ref(),
         &cache,
         &config.rerank_repo,
         &config.rerank_revision,
@@ -428,6 +616,7 @@ async fn download_models(config: &LlamaCppConfig) -> Result<(PathBuf, PathBuf, P
     .context("rerank model download")?;
     let gp = get_verified(
         &api,
+        anon_api.as_ref(),
         &cache,
         &config.generate_repo,
         &config.generate_revision,
@@ -1071,5 +1260,140 @@ mod tests {
         let last_used = Some(base);
         let now = base + Duration::from_secs(300);
         assert!(is_idle(last_used, now, Duration::from_secs(300)));
+    }
+
+    // ── resolve_cached / cache_has_file ─────────────────────────────────────
+    //
+    // Every test below builds its own `Cache::new(<tmpdir>/hub)` rather than
+    // `Cache::from_env()`, so none of them read or depend on the developer's
+    // real `~/.cache/huggingface` — the same reproduction environment this
+    // fix was diagnosed against had a live cache with real multi-GB GGUFs in
+    // it, and these tests must pass identically on a machine with no cache
+    // at all.
+
+    // sha256("abc") — reuses the same known vector as `sha256_file_matches_known_vector`.
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    fn test_repo(revision: &str) -> Repo {
+        Repo::with_revision(
+            "some/repo".to_string(),
+            RepoType::Model,
+            revision.to_string(),
+        )
+    }
+
+    /// Regression test for the actual bug: a snapshot downloaded before
+    /// revision pinning existed (bytes at `snapshots/<rev>/<file>`, no
+    /// `refs/<rev>`) must be adopted without a network call, and the ref must
+    /// be healed so hf-hub's own fast path finds it on every later run.
+    #[test]
+    fn resolve_cached_adopts_legacy_snapshot_and_heals_ref() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = Cache::new(dir.path().join("hub"));
+        let repo = test_repo("deadbeef");
+        let pointer = cache.repo(repo.clone()).pointer_path(repo.revision());
+        std::fs::create_dir_all(&pointer).unwrap();
+        std::fs::write(pointer.join("model.gguf"), b"abc").unwrap();
+
+        // Before healing, hf-hub's own `CacheRepo::get` sees nothing — it
+        // only ever consults refs/<rev>, which doesn't exist yet.
+        assert!(cache.repo(repo.clone()).get("model.gguf").is_none());
+
+        let resolved = resolve_cached(&cache, &repo, "model.gguf", ABC_SHA256).unwrap();
+        assert!(resolved.is_some());
+
+        // Healed: hf-hub's own fast path now finds it directly, with no help
+        // from `resolve_cached`.
+        assert!(cache.repo(repo.clone()).get("model.gguf").is_some());
+    }
+
+    /// A ref that already exists must short-circuit before any hashing —
+    /// proven here by planting content that does *not* match the expected
+    /// hash and asserting `resolve_cached` still succeeds (trust-on-first-use
+    /// for content that hf-hub itself already considers cached).
+    #[test]
+    fn resolve_cached_fast_path_does_not_rehash() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = Cache::new(dir.path().join("hub"));
+        let repo = test_repo("deadbeef");
+        let pointer = cache.repo(repo.clone()).pointer_path(repo.revision());
+        std::fs::create_dir_all(&pointer).unwrap();
+        std::fs::write(pointer.join("model.gguf"), b"not-abc-at-all").unwrap();
+        cache
+            .repo(repo.clone())
+            .create_ref(repo.revision())
+            .unwrap();
+
+        let resolved = resolve_cached(&cache, &repo, "model.gguf", ABC_SHA256).unwrap();
+        assert!(resolved.is_some());
+    }
+
+    /// A legacy-layout snapshot with the wrong bytes (corruption/tampering)
+    /// must fail loudly and must NOT heal the ref — healing a bad file would
+    /// make every later run trust it via the fast path forever.
+    #[test]
+    fn resolve_cached_rejects_legacy_snapshot_with_wrong_hash() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = Cache::new(dir.path().join("hub"));
+        let repo = test_repo("deadbeef");
+        let pointer = cache.repo(repo.clone()).pointer_path(repo.revision());
+        std::fs::create_dir_all(&pointer).unwrap();
+        std::fs::write(pointer.join("model.gguf"), b"tampered").unwrap();
+
+        assert!(resolve_cached(&cache, &repo, "model.gguf", ABC_SHA256).is_err());
+        assert!(cache.repo(repo.clone()).get("model.gguf").is_none());
+    }
+
+    #[test]
+    fn resolve_cached_returns_none_when_absent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = Cache::new(dir.path().join("hub"));
+        let repo = test_repo("deadbeef");
+        assert!(resolve_cached(&cache, &repo, "model.gguf", ABC_SHA256)
+            .unwrap()
+            .is_none());
+    }
+
+    /// `doctor`'s status check must see the same legacy layout `resolve_cached`
+    /// adopts, but must never mutate the cache doing so.
+    #[test]
+    fn cache_has_file_sees_legacy_snapshot_without_mutating_cache() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = Cache::new(dir.path().join("hub"));
+        let repo = test_repo("deadbeef");
+        let pointer = cache.repo(repo.clone()).pointer_path(repo.revision());
+        std::fs::create_dir_all(&pointer).unwrap();
+        std::fs::write(pointer.join("model.gguf"), b"abc").unwrap();
+
+        assert!(cache_has_file(
+            &cache,
+            "some/repo",
+            "deadbeef",
+            "model.gguf"
+        ));
+        assert!(cache.repo(repo.clone()).get("model.gguf").is_none());
+    }
+
+    // ── auth fallback / offline predicates ──────────────────────────────────
+
+    #[test]
+    fn status_is_auth_failure_matches_401_and_403_only() {
+        assert!(status_is_auth_failure(401));
+        assert!(status_is_auth_failure(403));
+        assert!(!status_is_auth_failure(404));
+        assert!(!status_is_auth_failure(500));
+        assert!(!status_is_auth_failure(200));
+    }
+
+    #[test]
+    fn offline_from_env_value_parses_common_forms() {
+        assert!(offline_from_env_value("1"));
+        assert!(offline_from_env_value("true"));
+        assert!(offline_from_env_value("TRUE"));
+        assert!(offline_from_env_value("yes"));
+        assert!(!offline_from_env_value(""));
+        assert!(!offline_from_env_value("0"));
+        assert!(!offline_from_env_value("false"));
+        assert!(!offline_from_env_value("no"));
     }
 }
