@@ -53,7 +53,7 @@ code. Know them before proposing a change that cuts against one:
 | Fix a bug | See the local gate below, then open a PR |
 | Add a feature | Consider opening an issue first for anything touching retrieval, fusion, or the CLI surface |
 | Review a PR | Check it against the design principles above, not just style |
-| Improve docs | README, `docs/SYNTAX.md`, and this file all welcome fixes |
+| Improve docs | README, `docs/`, and this file all welcome fixes |
 
 ## Commit convention
 
