@@ -1,0 +1,211 @@
+<svg width="1680" height="670" viewBox="0 0 1680 670" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#94A3B8"/>
+  </marker>
+  <marker id="arrowAmber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#D97706"/>
+  </marker>
+  <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+    <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0F172A" flood-opacity="0.10"/>
+  </filter>
+
+  <symbol id="ic-doc" viewBox="0 0 24 24">
+    <path d="M6 3h8l4 4v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/>
+    <path d="M14 3v4h4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/>
+    <path d="M8 12h8M8 16h8M8 8h3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="ic-tree" viewBox="0 0 24 24">
+    <circle cx="12" cy="5" r="2.2" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <circle cx="6" cy="19" r="2.2" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <circle cx="18" cy="19" r="2.2" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <path d="M12 7v5M12 12 6 17M12 12l6 5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="ic-db" viewBox="0 0 24 24">
+    <ellipse cx="12" cy="6" rx="8" ry="3" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" stroke="currentColor" stroke-width="1.6" fill="none"/>
+  </symbol>
+  <symbol id="ic-vector" viewBox="0 0 24 24">
+    <circle cx="6" cy="6" r="1.6" fill="currentColor"/><circle cx="12" cy="6" r="1.6" fill="currentColor"/><circle cx="18" cy="6" r="1.6" fill="currentColor"/>
+    <circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/>
+    <circle cx="6" cy="18" r="1.6" fill="currentColor"/><circle cx="12" cy="18" r="1.6" fill="currentColor"/><circle cx="18" cy="18" r="1.6" fill="currentColor"/>
+  </symbol>
+  <symbol id="ic-chip" viewBox="0 0 24 24">
+    <rect x="7" y="7" width="10" height="10" rx="1.5" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <path d="M9 7V4M15 7V4M9 20v-3M15 20v-3M7 9H4M7 15H4M20 9h-3M20 15h-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="ic-merge" viewBox="0 0 24 24">
+    <path d="M4 6 11 12 4 18M20 6l-7 6 7 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M11 12h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="ic-hub" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="2.4" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <circle cx="12" cy="4" r="1.6" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <circle cx="12" cy="20" r="1.6" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <circle cx="4" cy="12" r="1.6" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <circle cx="20" cy="12" r="1.6" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <path d="M12 6.4V9.6M12 14.4v3.2M6.4 12H9.6M14.4 12h3.2" stroke="currentColor" stroke-width="1.6"/>
+  </symbol>
+  <symbol id="ic-brain" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <path d="M9 6q3 3 0 6q-3 3 0 6" stroke="currentColor" stroke-width="1.4" fill="none"/>
+    <path d="M15 6q-3 3 0 6q3 3 0 6" stroke="currentColor" stroke-width="1.4" fill="none"/>
+  </symbol>
+  <symbol id="ic-list" viewBox="0 0 24 24">
+    <circle cx="5" cy="6" r="1.4" fill="currentColor"/><path d="M9 6h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    <circle cx="5" cy="12" r="1.4" fill="currentColor"/><path d="M9 12h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    <circle cx="5" cy="18" r="1.4" fill="currentColor"/><path d="M9 18h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="ic-terminal" viewBox="0 0 24 24">
+    <rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/>
+    <path d="M7 9l4 3-4 3" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M13 15h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  </symbol>
+</defs>
+
+<rect x="0" y="0" width="1680" height="670" fill="#FAFAF9"/>
+
+<text x="840" y="45" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="30" font-weight="700" fill="#18181B">rqmd — Local Hybrid Search Architecture</text>
+<text x="840" y="72" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="14" fill="#71717A">Rust-native pipeline · hybrid lexical + semantic search · local LLM re-ranking, zero external calls</text>
+
+<!-- ===================== CONTAINER 1: INGESTION ===================== -->
+<rect x="40" y="100" width="320" height="430" rx="18" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1.5"/>
+<circle cx="74" cy="118" r="15" fill="#2563EB"/>
+<text x="74" y="123" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" font-weight="700" fill="#fff">01</text>
+<text x="98" y="123" font-family="system-ui,sans-serif" font-size="14.5" font-weight="700" fill="#1E3A8A" letter-spacing="0.4">INGESTION &amp; STORAGE</text>
+
+<rect x="60" y="170" width="280" height="90" rx="12" fill="#fff" stroke="#E2E8F0" filter="url(#shadow)"/>
+<circle cx="90" cy="194" r="15" fill="#DBEAFE"/><use href="#ic-doc" x="80" y="184" width="20" height="20" color="#2563EB"/>
+<text x="112" y="199" font-family="system-ui,sans-serif" font-size="13.5" font-weight="700" fill="#18181B">Workspace Documents</text>
+<text x="80" y="220" font-family="system-ui,sans-serif" font-size="10.8" fill="#64748B">Source files scanned</text>
+<text x="80" y="233" font-family="system-ui,sans-serif" font-size="10.8" fill="#64748B">from the project tree</text>
+
+<rect x="60" y="280" width="280" height="90" rx="12" fill="#fff" stroke="#E2E8F0" filter="url(#shadow)"/>
+<circle cx="90" cy="304" r="15" fill="#DBEAFE"/><use href="#ic-tree" x="80" y="294" width="20" height="20" color="#2563EB"/>
+<text x="112" y="309" font-family="system-ui,sans-serif" font-size="13.5" font-weight="700" fill="#18181B">Markdown-aware Chunker</text>
+<text x="80" y="330" font-family="system-ui,sans-serif" font-size="10.8" fill="#64748B">Heading-split chunks; never</text>
+<text x="80" y="343" font-family="system-ui,sans-serif" font-size="10.8" fill="#64748B">inside fenced code blocks</text>
+
+<rect x="60" y="390" width="280" height="90" rx="12" fill="#fff" stroke="#E2E8F0" filter="url(#shadow)"/>
+<circle cx="90" cy="414" r="15" fill="#DBEAFE"/><use href="#ic-db" x="80" y="404" width="20" height="20" color="#2563EB"/>
+<text x="112" y="419" font-family="system-ui,sans-serif" font-size="13.5" font-weight="700" fill="#18181B">Tantivy BM25 + SQLite</text>
+<text x="80" y="440" font-family="system-ui,sans-serif" font-size="10.8" fill="#64748B">BM25 index (field boosts) +</text>
+<text x="80" y="453" font-family="system-ui,sans-serif" font-size="10.8" fill="#64748B">index.sqlite content store</text>
+
+<line x1="200" y1="260" x2="200" y2="280" stroke="#94A3B8" stroke-width="2" marker-end="url(#arrow)"/>
+<line x1="200" y1="370" x2="200" y2="390" stroke="#94A3B8" stroke-width="2" marker-end="url(#arrow)"/>
+
+<text x="200" y="505" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10.5" font-style="italic" fill="#94A3B8">Runs incrementally as files change</text>
+
+<path d="M340,435 H600 V345 H640" fill="none" stroke="#94A3B8" stroke-width="2" marker-end="url(#arrow)"/>
+
+<!-- ===================== CONTAINER 2: SEARCH & RE-RANK ===================== -->
+<rect x="400" y="100" width="880" height="430" rx="18" fill="#EEF2FF" stroke="#C7D2FE" stroke-width="1.5"/>
+<circle cx="434" cy="118" r="15" fill="#4F46E5"/>
+<text x="434" y="123" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" font-weight="700" fill="#fff">02</text>
+<text x="458" y="123" font-family="system-ui,sans-serif" font-size="14.5" font-weight="700" fill="#312E81" letter-spacing="0.4">SEARCH &amp; RE-RANKING ENGINE</text>
+
+<rect x="430" y="134" width="190" height="22" rx="11" fill="none" stroke="#818CF8" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="525" y="149" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10.5" font-weight="600" fill="#4338CA">User Query</text>
+<line x1="525" y1="156" x2="525" y2="170" stroke="#94A3B8" stroke-width="2" marker-end="url(#arrow)"/>
+
+<rect x="430" y="170" width="190" height="90" rx="12" fill="#fff" stroke="#E2E8F0" filter="url(#shadow)"/>
+<circle cx="525" cy="194" r="14" fill="#E0E7FF"/><use href="#ic-vector" x="516" y="185" width="18" height="18" color="#4F46E5"/>
+<circle cx="602" cy="182" r="10" fill="#4F46E5"/><text x="602" y="186" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fff">A</text>
+<text x="450" y="220" font-family="system-ui,sans-serif" font-size="12.5" font-weight="700" fill="#18181B">Vector (Embeddings)</text>
+<text x="450" y="238" font-family="system-ui,sans-serif" font-size="10.3" fill="#64748B">embeddinggemma-300M,</text>
+<text x="450" y="250" font-family="system-ui,sans-serif" font-size="10.3" fill="#64748B">768-dim, cosine</text>
+
+<rect x="640" y="170" width="190" height="90" rx="12" fill="#fff" stroke="#E2E8F0" filter="url(#shadow)"/>
+<circle cx="735" cy="194" r="14" fill="#E0E7FF"/><use href="#ic-chip" x="726" y="185" width="18" height="18" color="#4F46E5"/>
+<circle cx="812" cy="182" r="10" fill="#4F46E5"/><text x="812" y="186" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fff">B</text>
+<text x="660" y="220" font-family="system-ui,sans-serif" font-size="12.5" font-weight="700" fill="#18181B">Query Expansion</text>
+<text x="660" y="238" font-family="system-ui,sans-serif" font-size="10.3" fill="#64748B">Qwen3-1.7B &#8594; lex /</text>
+<text x="660" y="250" font-family="system-ui,sans-serif" font-size="10.3" fill="#64748B">vec / hyde sub-queries</text>
+
+<rect x="850" y="170" width="190" height="90" rx="12" fill="#fff" stroke="#E2E8F0" filter="url(#shadow)"/>
+<circle cx="945" cy="194" r="14" fill="#E0E7FF"/><use href="#ic-merge" x="936" y="185" width="18" height="18" color="#4F46E5"/>
+<circle cx="1022" cy="182" r="10" fill="#4F46E5"/><text x="1022" y="186" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fff">C</text>
+<text x="870" y="220" font-family="system-ui,sans-serif" font-size="12.5" font-weight="700" fill="#18181B">Rank Fusion (RRF)</text>
+<text x="870" y="238" font-family="system-ui,sans-serif" font-size="10.3" fill="#64748B">Combines BM25 +</text>
+<text x="870" y="250" font-family="system-ui,sans-serif" font-size="10.3" fill="#64748B">semantic scores</text>
+
+<rect x="1060" y="170" width="190" height="90" rx="12" fill="#fff" stroke="#E2E8F0" filter="url(#shadow)"/>
+<circle cx="1155" cy="194" r="14" fill="#E0E7FF"/><use href="#ic-hub" x="1146" y="185" width="18" height="18" color="#4F46E5"/>
+<text x="1080" y="220" font-family="system-ui,sans-serif" font-size="12.5" font-weight="700" fill="#18181B">Retrieval Coordinator</text>
+<text x="1080" y="238" font-family="system-ui,sans-serif" font-size="10.3" fill="#64748B">rqmd-core</text>
+<text x="1080" y="250" font-family="system-ui,sans-serif" font-size="10.3" fill="#64748B">orchestration</text>
+
+<line x1="620" y1="215" x2="640" y2="215" stroke="#94A3B8" stroke-width="2" marker-end="url(#arrow)"/>
+<line x1="830" y1="215" x2="850" y2="215" stroke="#94A3B8" stroke-width="2" marker-end="url(#arrow)"/>
+<line x1="1040" y1="215" x2="1060" y2="215" stroke="#94A3B8" stroke-width="2" marker-end="url(#arrow)"/>
+
+<rect x="640" y="300" width="190" height="90" rx="12" fill="#fff" stroke="#E2E8F0" filter="url(#shadow)"/>
+<circle cx="735" cy="324" r="14" fill="#E0E7FF"/><use href="#ic-db" x="726" y="315" width="18" height="18" color="#4F46E5"/>
+<text x="660" y="350" font-family="system-ui,sans-serif" font-size="12.5" font-weight="700" fill="#18181B">usearch HNSW</text>
+<text x="660" y="368" font-family="system-ui,sans-serif" font-size="10.3" fill="#64748B">768-dim vectors, cosine</text>
+<text x="660" y="380" font-family="system-ui,sans-serif" font-size="10.3" fill="#64748B">written by rqmd embed</text>
+
+<line x1="735" y1="300" x2="735" y2="260" stroke="#94A3B8" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="742" y="273" width="60" height="14" fill="#EEF2FF"/>
+<text x="772" y="284" text-anchor="middle" font-family="system-ui,sans-serif" font-size="9" fill="#4338CA">index data</text>
+
+<!-- hero: LLM re-ranking -->
+<rect x="850" y="300" width="400" height="200" rx="14" fill="#1C1917" stroke="#D97706" stroke-width="2.5" filter="url(#shadow)"/>
+<circle cx="892" cy="332" r="17" fill="#292524"/><use href="#ic-brain" x="881" y="321" width="22" height="22" color="#F59E0B"/>
+<circle cx="1222" cy="318" r="11" fill="#D97706"/><text x="1222" y="322" text-anchor="middle" font-size="10" font-weight="700" fill="#1C1917">D</text>
+<text x="922" y="326" font-family="system-ui,sans-serif" font-size="10" font-weight="700" fill="#FBBF24" letter-spacing="1">LOCAL INFERENCE</text>
+<text x="922" y="350" font-family="system-ui,sans-serif" font-size="17" font-weight="700" fill="#fff">LLM Re-ranking</text>
+<text x="880" y="378" font-family="system-ui,sans-serif" font-size="11.5" fill="#D6D3D1">Reranks the fused top-K results for relevance</text>
+<text x="880" y="396" font-family="system-ui,sans-serif" font-size="11.5" fill="#D6D3D1">using a locally-hosted model — no network call.</text>
+<rect x="880" y="452" width="210" height="26" rx="13" fill="#292524"/>
+<text x="985" y="469" text-anchor="middle" font-family="'SFMono-Regular',Menlo,monospace" font-size="11" fill="#F59E0B">Qwen3-Reranker-0.6B · GGUF</text>
+
+<line x1="1155" y1="260" x2="1155" y2="300" stroke="#D97706" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrowAmber)"/>
+<rect x="1163" y="273" width="86" height="14" fill="#EEF2FF"/>
+<text x="1206" y="284" text-anchor="middle" font-family="system-ui,sans-serif" font-size="9" fill="#B45309">invoke rerank</text>
+
+<path d="M1250,400 H1290 V345 H1340" fill="none" stroke="#D97706" stroke-width="2" marker-end="url(#arrowAmber)"/>
+
+<!-- ===================== CONTAINER 3: OUTPUT ===================== -->
+<rect x="1320" y="100" width="320" height="430" rx="18" fill="#ECFDF5" stroke="#A7F3D0" stroke-width="1.5"/>
+<circle cx="1354" cy="118" r="15" fill="#059669"/>
+<text x="1354" y="123" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" font-weight="700" fill="#fff">03</text>
+<text x="1378" y="123" font-family="system-ui,sans-serif" font-size="14.5" font-weight="700" fill="#065F46" letter-spacing="0.4">RESULT OUTPUT</text>
+
+<rect x="1340" y="300" width="280" height="90" rx="12" fill="#fff" stroke="#E2E8F0" filter="url(#shadow)"/>
+<circle cx="1370" cy="324" r="14" fill="#D1FAE5"/><use href="#ic-list" x="1361" y="315" width="18" height="18" color="#059669"/>
+<circle cx="1596" cy="312" r="10" fill="#059669"/><text x="1596" y="316" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fff">E</text>
+<text x="1392" y="349" font-family="system-ui,sans-serif" font-size="13" font-weight="700" fill="#18181B">Re-ranked Results</text>
+<text x="1360" y="370" font-family="system-ui,sans-serif" font-size="10.6" fill="#64748B">Final ordered result</text>
+<text x="1360" y="383" font-family="system-ui,sans-serif" font-size="10.6" fill="#64748B">set, relevance-sorted</text>
+
+<rect x="1340" y="410" width="280" height="90" rx="12" fill="#fff" stroke="#E2E8F0" filter="url(#shadow)"/>
+<circle cx="1370" cy="434" r="14" fill="#D1FAE5"/><use href="#ic-terminal" x="1361" y="425" width="18" height="18" color="#059669"/>
+<text x="1392" y="459" font-family="system-ui,sans-serif" font-size="13" font-weight="700" fill="#18181B">Result</text>
+<text x="1360" y="480" font-family="system-ui,sans-serif" font-size="10.6" fill="#64748B">CLI output</text>
+<text x="1360" y="493" font-family="system-ui,sans-serif" font-size="10.6" fill="#64748B">or JSON</text>
+
+<line x1="1480" y1="390" x2="1480" y2="410" stroke="#94A3B8" stroke-width="2" marker-end="url(#arrow)"/>
+
+<!-- ===================== LEGEND STRIP ===================== -->
+<text x="840" y="552" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" font-weight="700" fill="#71717A" letter-spacing="1.5">PIPELINE AT A GLANCE</text>
+<rect x="40" y="565" width="1600" height="85" rx="16" fill="#fff" stroke="#E2E8F0" filter="url(#shadow)"/>
+<line x1="100" y1="605" x2="1580" y2="605" stroke="#E2E8F0" stroke-width="2"/>
+
+<circle cx="100" cy="605" r="15" fill="#4F46E5"/><text x="100" y="610" text-anchor="middle" font-size="12" font-weight="700" fill="#fff">A</text>
+<text x="100" y="638" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#18181B">vector results</text>
+
+<circle cx="470" cy="605" r="15" fill="#4F46E5"/><text x="470" y="610" text-anchor="middle" font-size="12" font-weight="700" fill="#fff">B</text>
+<text x="470" y="638" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#18181B">query processing</text>
+
+<circle cx="840" cy="605" r="15" fill="#4F46E5"/><text x="840" y="610" text-anchor="middle" font-size="12" font-weight="700" fill="#fff">C</text>
+<text x="840" y="638" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#18181B">fusion</text>
+
+<circle cx="1210" cy="605" r="15" fill="#D97706"/><text x="1210" y="610" text-anchor="middle" font-size="12" font-weight="700" fill="#fff">D</text>
+<text x="1210" y="638" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#18181B">re-ranked results</text>
+
+<circle cx="1580" cy="605" r="15" fill="#059669"/><text x="1580" y="610" text-anchor="middle" font-size="12" font-weight="700" fill="#fff">E</text>
+<text x="1580" y="638" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#18181B">output results</text>
+</svg>

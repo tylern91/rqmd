@@ -34,8 +34,8 @@ document.
 The listener binds to `127.0.0.1` by default. Binding to any non-loopback
 address (`--host 0.0.0.0`, or any other address) prints a warning to stderr
 and should be treated as exposing the corpus to that network, not as a
-convenience flag — see the [MCP server](README.md#mcp-server) section of the
-README for the exact warning text and the full list of exposed tools.
+convenience flag — see [docs/MCP.md](docs/MCP.md) for the exact warning
+text and the full list of exposed tools.
 
 If you need authenticated or multi-tenant access to an rqmd index, that isn't
 implemented today; a proposal is welcome as an issue.
