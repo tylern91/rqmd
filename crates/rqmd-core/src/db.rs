@@ -809,6 +809,23 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn delete_config(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM store_config WHERE key=?1", params![key])?;
+    Ok(())
+}
+
+/// List all `store_config` rows whose key starts with `prefix`, ordered by key.
+pub fn list_config_by_prefix(conn: &Connection, prefix: &str) -> Result<Vec<(String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT key, value FROM store_config WHERE key LIKE ?1 ORDER BY key")?;
+    let like_pattern = format!("{prefix}%");
+    let rows = stmt
+        .query_map(params![like_pattern], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("list config by prefix")?;
+    Ok(rows)
+}
+
 /// Build the `store_config` key under which a collection's context is stored.
 ///
 /// This is the canonical format used by `rqmd context add rqmd://<collection>/`.

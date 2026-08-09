@@ -232,8 +232,16 @@ pub enum CollectionCommand {
 
 #[derive(Subcommand)]
 pub enum ContextCommand {
-    /// Add context for a path
-    Add { path: Option<String>, text: String },
+    /// Add context for a path: `context add [path] <text>`.
+    ///
+    /// clap forbids an optional positional before a required one (an
+    /// ambiguous shape it rejects with a debug-assert panic), so the two
+    /// forms are captured as a bounded Vec and split in `context::run`:
+    /// one arg is `<text>` (path defaults to `/`), two are `<path> <text>`.
+    Add {
+        #[arg(num_args = 1..=2, value_names = ["PATH_OR_TEXT", "TEXT"])]
+        args: Vec<String>,
+    },
     /// List all contexts
     List,
     /// Remove context for a path

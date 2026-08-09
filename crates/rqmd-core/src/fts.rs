@@ -261,13 +261,36 @@ impl FtsIndex {
             }
         }
 
-        let collector = TopDocs::with_limit(limit).order_by_score();
+        // The pushdown clause above is best-effort (it can over-match, e.g. a
+        // collection named "notes" also matching "other/my-notes.md"), so the
+        // exact-prefix filter below is still the authority. That means
+        // `TopDocs::with_limit(limit)` can cut off the candidate set before the
+        // filter ever sees enough in-scope hits, under-returning even when more
+        // matches exist further down the global ranking. Over-fetch when a
+        // collection filter is active so the filter has a large enough pool to
+        // draw `limit` results from; uncapped (all-collections) queries need no
+        // overscan since every candidate already counts.
+        const FETCH_OVERSCAN_FACTOR: usize = 20;
+        const FETCH_OVERSCAN_CAP: usize = 5000;
+        let scoped = collections.is_some_and(|c| !c.is_empty());
+        let fetch_limit = if scoped {
+            limit
+                .saturating_mul(FETCH_OVERSCAN_FACTOR)
+                .clamp(limit, FETCH_OVERSCAN_CAP)
+        } else {
+            limit
+        };
+
+        let collector = TopDocs::with_limit(fetch_limit).order_by_score();
         let top_docs = searcher
             .search(&query, &collector)
             .context("tantivy search")?;
 
         let mut results = Vec::new();
         for (score, addr) in top_docs {
+            if results.len() >= limit {
+                break;
+            }
             let retrieved: TantivyDocument = searcher.doc(addr).context("retrieve tantivy doc")?;
 
             let filepath = retrieved
@@ -408,5 +431,55 @@ mod tests {
         idx.delete_by_filepath("never/indexed.md").unwrap();
         idx.commit().unwrap();
         assert_eq!(idx.reader.searcher().num_docs(), 0);
+    }
+
+    /// A collection-scoped query must not under-return: if more than `limit`
+    /// in-scope documents match, the post-filter (which runs after
+    /// `TopDocs::with_limit`) must not be starved of candidates by
+    /// higher-scoring out-of-scope hits crowding the top of the global
+    /// ranking.
+    ///
+    /// The out-of-scope docs live at `other/my-notes-N.md` — the default
+    /// tokenizer splits that path into tokens including "notes", so they
+    /// satisfy `collection_pushdown_clause("notes")`'s MUST-match-token
+    /// requirement (the documented over-match: "a collection named 'notes'
+    /// could also match 'other/my-notes.md'") and reach `TopDocs` alongside
+    /// the genuine `notes/docN.md` hits. Only the exact-prefix post-filter
+    /// tells them apart. Without the overscan fix, `TopDocs::with_limit`
+    /// picks its top `limit` from the combined pool by score alone; since
+    /// the out-of-scope docs repeat "shared" and score higher, they can fill
+    /// the entire collector and leave zero in-scope survivors even though 15
+    /// genuine in-scope matches exist.
+    #[test]
+    fn search_fts_multi_scoped_query_does_not_under_return() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+
+        for i in 0..30 {
+            idx.add_document(
+                &format!("other/my-notes-{i}.md"),
+                "Title",
+                "shared shared shared shared shared",
+                1000 + i,
+            )
+            .unwrap();
+        }
+        for i in 0..15 {
+            idx.add_document(&format!("notes/doc{i}.md"), "Title", "shared", i)
+                .unwrap();
+        }
+        idx.commit().unwrap();
+
+        let results = idx
+            .search_fts_multi("shared", 10, Some(&["notes".to_string()]))
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            10,
+            "expected the full requested limit of in-scope hits, got {results:?}"
+        );
+        assert!(results
+            .iter()
+            .all(|(path, _, _)| path.starts_with("notes/")));
     }
 }
