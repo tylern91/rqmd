@@ -729,4 +729,141 @@ mod tests {
         let expected = format!("{YELLOW}{BOLD}\u{212A}éé{RESET}é");
         assert_eq!(result, expected);
     }
+
+    // ── CSV escaping contract ───────────────────────────────────────────────
+    // `print_csv` is the only caller, and it never gets its own regression
+    // test since it just prints — this is the actual contract.
+
+    #[test]
+    fn csv_field_leaves_plain_text_unquoted() {
+        assert_eq!(csv_field("plain text"), "plain text");
+    }
+
+    #[test]
+    fn csv_field_quotes_a_value_containing_a_comma() {
+        assert_eq!(csv_field("a,b"), "\"a,b\"");
+    }
+
+    #[test]
+    fn csv_field_quotes_a_value_containing_a_newline() {
+        assert_eq!(csv_field("line1\nline2"), "\"line1\nline2\"");
+    }
+
+    #[test]
+    fn csv_field_quotes_and_doubles_embedded_quotes() {
+        let input = "say \"hi\"";
+        let expected = "\"say \"\"hi\"\"\"";
+        assert_eq!(csv_field(input), expected);
+    }
+
+    #[test]
+    fn csv_field_quotes_and_escapes_comma_and_quote_together() {
+        let input = "a,\"b";
+        let expected = "\"a,\"\"b\"";
+        assert_eq!(csv_field(input), expected);
+    }
+
+    // ── fit_to_width ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn fit_to_width_pads_shorter_strings_after_the_reset_code() {
+        assert_eq!(fit_to_width("ab", 5), format!("ab{RESET}{}", " ".repeat(3)));
+    }
+
+    #[test]
+    fn fit_to_width_leaves_an_exact_width_string_unpadded() {
+        assert_eq!(fit_to_width("abc", 3), format!("abc{RESET}"));
+    }
+
+    #[test]
+    fn fit_to_width_truncates_longer_strings() {
+        assert_eq!(fit_to_width("abcdef", 3), format!("abc{RESET}"));
+    }
+
+    #[test]
+    fn fit_to_width_counts_multi_byte_chars_not_bytes() {
+        // 'é' is 2 bytes in UTF-8 — width is a *character* count, so one
+        // 'é' fills a width of 1, and a second one gets truncated rather
+        // than the first being cut mid-byte.
+        assert_eq!(fit_to_width("é", 1), format!("é{RESET}"));
+        assert_eq!(fit_to_width("éé", 1), format!("é{RESET}"));
+    }
+
+    // ── format_eta ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn format_eta_formats_seconds_minutes_and_hours() {
+        assert_eq!(format_eta(45.0), "45s");
+        assert_eq!(format_eta(90.0), "1m 30s");
+        assert_eq!(format_eta(3661.0), "1h 1m");
+    }
+
+    #[test]
+    fn format_eta_rounds_before_bucketing_so_59_point_6_becomes_a_minute() {
+        // `secs.round()` happens before the `< 60` check, so 59.6 rounds up
+        // to 60 and falls into the minutes branch rather than "60s".
+        assert_eq!(format_eta(59.6), "1m 0s");
+    }
+
+    // ── render_progress_bar ────────────────────────────────────────────────
+
+    #[test]
+    fn render_progress_bar_fills_proportionally_to_percent() {
+        assert_eq!(render_progress_bar(0.0, 10), "░".repeat(10));
+        assert_eq!(render_progress_bar(100.0, 10), "█".repeat(10));
+        assert_eq!(
+            render_progress_bar(50.0, 10),
+            format!("{}{}", "█".repeat(5), "░".repeat(5))
+        );
+    }
+
+    // ── xml_escape ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn xml_escape_escapes_all_five_special_characters() {
+        assert_eq!(
+            xml_escape("<a & b> \"c\" 'd'"),
+            "&lt;a &amp; b&gt; &quot;c&quot; &apos;d&apos;"
+        );
+    }
+
+    // ── resolve_absolute_path ──────────────────────────────────────────────
+
+    #[test]
+    fn resolve_absolute_path_joins_collection_root_and_relative_path() {
+        assert_eq!(
+            resolve_absolute_path("/repo/notes", "sub/doc.md"),
+            "/repo/notes/sub/doc.md"
+        );
+    }
+
+    // ── format_score ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn format_score_right_aligns_and_rounds_to_a_percentage() {
+        // Under `cargo test`, stdout is captured (not a TTY), so
+        // `ansi_enabled()` is false and only the plain, right-aligned
+        // percentage string is reachable — the color branches are gated on
+        // a TTY check this test environment can never satisfy.
+        assert_eq!(format_score(0.0), "  0%");
+        assert_eq!(format_score(0.5), " 50%");
+        assert_eq!(format_score(1.0), "100%");
+    }
+
+    // ── format_time_ago ──────────────────────────────────────────────────────
+
+    #[test]
+    fn format_time_ago_falls_back_to_the_date_after_a_week() {
+        assert_eq!(format_time_ago("2020-01-01T00:00:00Z"), "2020-01-01");
+    }
+
+    #[test]
+    fn format_time_ago_reports_just_now_for_a_future_timestamp() {
+        assert_eq!(format_time_ago("2099-01-01T00:00:00Z"), "just now");
+    }
+
+    #[test]
+    fn format_time_ago_returns_the_input_unchanged_on_unparseable_timestamps() {
+        assert_eq!(format_time_ago("not-a-timestamp"), "not-a-timestamp");
+    }
 }

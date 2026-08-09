@@ -105,3 +105,76 @@ pub fn collection_roots(s: &Store, format: Format) -> Result<HashMap<String, Str
         .map(|c| (c.name, c.path))
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rqmd_core::Collection;
+    use tempfile::TempDir;
+
+    #[test]
+    fn resolve_index_dir_prefers_override_over_any_default() {
+        // The override branch must return immediately — it must never touch
+        // the current directory or the environment, both of which are
+        // process-global state shared with every other test in the binary.
+        let resolved = resolve_index_dir(Some("/tmp/some/explicit/dir")).unwrap();
+        assert_eq!(resolved, PathBuf::from("/tmp/some/explicit/dir"));
+    }
+
+    #[test]
+    fn store_config_joins_paths_under_index_dir_and_threads_read_only() {
+        let tmp = TempDir::new().unwrap();
+        let index_dir = tmp.path().join("idx");
+
+        let cfg = store_config(&index_dir, true);
+
+        assert_eq!(cfg.db_path, index_dir.join("index.sqlite"));
+        assert_eq!(cfg.tantivy_dir, index_dir.join("tantivy"));
+        assert_eq!(cfg.hnsw_path, index_dir.join("hnsw.usearch"));
+        assert!(cfg.read_only);
+        // Callers open the Store immediately afterward and expect the
+        // directory to already exist.
+        assert!(index_dir.is_dir());
+    }
+
+    #[test]
+    fn store_config_threads_read_only_false() {
+        let tmp = TempDir::new().unwrap();
+        assert!(!store_config(tmp.path(), false).read_only);
+    }
+
+    #[test]
+    fn collection_roots_short_circuits_for_non_files_formats() {
+        let tmp = TempDir::new().unwrap();
+        let store = open_store_no_backend(tmp.path(), false).unwrap();
+        // Every format other than `Files` must skip the db round-trip
+        // entirely — asserting emptiness here on a store with zero
+        // collections wouldn't distinguish "short-circuited" from "queried
+        // and found nothing", so the meaningful case is 4b below.
+        let roots = collection_roots(&store, Format::Json).unwrap();
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn collection_roots_maps_name_to_path_for_files_format() {
+        let tmp = TempDir::new().unwrap();
+        let store = open_store_no_backend(tmp.path(), false).unwrap();
+        db::upsert_collection(
+            &store.db,
+            &Collection {
+                name: "notes".to_string(),
+                path: "/repo/notes".to_string(),
+                pattern: "**/*.md".to_string(),
+                ignore: vec![],
+                include_by_default: true,
+                update_command: None,
+                allow_hidden: false,
+            },
+        )
+        .unwrap();
+
+        let roots = collection_roots(&store, Format::Files).unwrap();
+
+        assert_eq!(roots.get("notes").map(String::as_str), Some("/repo/notes"));
+    }
+}

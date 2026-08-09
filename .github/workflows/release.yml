@@ -246,7 +246,7 @@ jobs:
       - name: Build dist binary
         env:
           LLAMA_METAL: ${{ matrix.llama_metal }}
-        run: cargo build --profile dist -p rqmd-cli
+        run: cargo build --profile dist -p rqmd-cli --locked
 
       - name: Assert binary version matches tag
         # Guards against the class of bug where Cargo.toml's version drifts

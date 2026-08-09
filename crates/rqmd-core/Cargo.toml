@@ -8,6 +8,9 @@ keywords = ["search", "tantivy", "bm25", "vector-search", "rag"]
 categories = ["text-processing", "database"]
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = "1"
 rqmd-llm = { path = "../rqmd-llm" }

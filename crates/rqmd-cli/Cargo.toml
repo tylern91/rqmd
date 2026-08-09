@@ -8,6 +8,9 @@ keywords = ["search", "markdown", "rag", "mcp", "cli"]
 categories = ["command-line-utilities", "text-processing"]
 publish = false  # crate name 'rqmd' is taken on crates.io — resolve before publishing
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "rqmd"
 path = "src/main.rs"

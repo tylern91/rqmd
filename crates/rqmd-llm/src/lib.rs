@@ -1177,21 +1177,54 @@ pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
-    // Mutates the shared RRQMD_INFERENCE_BACKEND env var — safe here since no
-    // other test in this crate reads it, but keep any future env-based test
-    // in this same block so ordering stays obvious.
+    // `cargo test` runs tests concurrently on a thread pool within one process,
+    // so being adjacent in this file gives no ordering guarantee by itself.
+    // `#[serial(inference_backend_env)]` is what actually prevents two tests
+    // from racing on the shared RRQMD_INFERENCE_BACKEND env var; `EnvVarGuard`
+    // restores the prior value on drop (including on panic) so a failing
+    // assertion can't leak state into whichever test runs next.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
+    #[serial(inference_backend_env)]
     fn backend_kind_from_env_defaults_to_llama_when_unset() {
-        std::env::remove_var("RRQMD_INFERENCE_BACKEND");
+        let _guard = EnvVarGuard::unset("RRQMD_INFERENCE_BACKEND");
         assert!(matches!(BackendKind::from_env(), BackendKind::Llama));
     }
 
     #[test]
+    #[serial(inference_backend_env)]
     fn backend_kind_from_env_parses_llama_case_insensitively() {
-        std::env::set_var("RRQMD_INFERENCE_BACKEND", "LLAMA");
+        let _guard = EnvVarGuard::set("RRQMD_INFERENCE_BACKEND", "LLAMA");
         assert!(matches!(BackendKind::from_env(), BackendKind::Llama));
-        std::env::remove_var("RRQMD_INFERENCE_BACKEND");
     }
 
     /// This is the exact identity `create_backend(&BackendKind::Llama)` would
