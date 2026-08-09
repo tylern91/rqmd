@@ -22,8 +22,6 @@ pub const CHUNK_WINDOW_CHARS: usize = 800;
 struct BreakPattern {
     pattern: &'static str,
     score: i32,
-    #[allow(dead_code)]
-    kind: &'static str,
 }
 
 // Rust's regex crate doesn't support lookahead. The heading patterns use
@@ -34,62 +32,50 @@ static BREAK_PATTERNS: &[BreakPattern] = &[
     BreakPattern {
         pattern: r"\n#[^#]",
         score: 100,
-        kind: "h1",
     },
     BreakPattern {
         pattern: r"\n##[^#]",
         score: 90,
-        kind: "h2",
     },
     BreakPattern {
         pattern: r"\n###[^#]",
         score: 80,
-        kind: "h3",
     },
     BreakPattern {
         pattern: r"\n####[^#]",
         score: 70,
-        kind: "h4",
     },
     BreakPattern {
         pattern: r"\n#####[^#]",
         score: 60,
-        kind: "h5",
     },
     BreakPattern {
         pattern: r"\n######[^#]",
         score: 50,
-        kind: "h6",
     },
     BreakPattern {
         pattern: r"\n```",
         score: 80,
-        kind: "codeblock",
     },
     BreakPattern {
         pattern: r"\n(?:---|\*\*\*|___)\s*\n",
         score: 60,
-        kind: "hr",
     },
     BreakPattern {
         pattern: r"\n\n+",
         score: 20,
-        kind: "blank",
     },
     BreakPattern {
         pattern: r"\n[-*]\s",
         score: 5,
-        kind: "list",
     },
     BreakPattern {
         pattern: r"\n\d+\.\s",
         score: 5,
-        kind: "numlist",
     },
     BreakPattern {
         pattern: r"\n",
         score: 1,
-        kind: "newline",
     },
 ];
 
@@ -295,14 +281,12 @@ pub struct SnippetResult {
 /// - `max_len`    — maximum character length of the snippet text (default 500)
 /// - `chunk_pos`  — byte offset of the best chunk in `body` (0 = unknown / first chunk)
 /// - `chunk_len`  — character length of the best chunk (0 = unknown)
-/// - `intent`     — optional domain intent string (ignored in this port; reserved for future)
 pub fn extract_snippet(
     body: &str,
     query: &str,
     max_len: usize,
     chunk_pos: usize,
     chunk_len: usize,
-    _intent: Option<&str>,
 ) -> SnippetResult {
     let total_lines = body.lines().count();
 
@@ -351,12 +335,8 @@ pub fn extract_snippet(
 
     // If we focused on a chunk window but found no match, fall back to the full body.
     if chunk_pos > 0 && best_score <= 0 {
-        if chunk_pos == 0 {
-            return extract_snippet(body, query, max_len, 0, 0, None);
-        }
         // The reranker picked this chunk — anchor on the chunk start.
         let ctx_start_byte = snap_char_boundary_backward(body, chunk_pos.saturating_sub(100));
-        let lines_before_ctx = body[..ctx_start_byte].lines().count().saturating_sub(1);
         best_line = if chunk_pos > ctx_start_byte {
             body[ctx_start_byte..chunk_pos]
                 .lines()
@@ -365,38 +345,16 @@ pub fn extract_snippet(
         } else {
             0
         };
-        return build_snippet_result(
-            body,
-            search_body,
-            &lines,
-            best_line,
-            line_offset,
-            lines_before_ctx,
-            total_lines,
-            max_len,
-        );
+        return build_snippet_result(&lines, best_line, line_offset, total_lines, max_len);
     }
 
-    build_snippet_result(
-        body,
-        search_body,
-        &lines,
-        best_line,
-        line_offset,
-        0,
-        total_lines,
-        max_len,
-    )
+    build_snippet_result(&lines, best_line, line_offset, total_lines, max_len)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_snippet_result(
-    _full_body: &str,
-    _search_body: &str,
     lines: &[&str],
     best_line: usize,
     line_offset: usize,
-    _extra_offset: usize,
     total_lines: usize,
     max_len: usize,
 ) -> SnippetResult {
@@ -466,7 +424,7 @@ mod tests {
         // max_len = 100 → naive cut at byte 97 (odd) lands mid-'é' and panicked
         // before the fix. chunk_pos = 0 passes body straight to build_snippet_result.
         let body = "é".repeat(200);
-        let result = extract_snippet(&body, "é", 100, 0, 0, None);
+        let result = extract_snippet(&body, "é", 100, 0, 0);
         assert!(
             result.snippet.ends_with("..."),
             "snippet should be truncated with ellipsis"

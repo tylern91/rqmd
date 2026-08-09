@@ -49,7 +49,6 @@ pub fn resolve_absolute_path(collection_root: &str, rel_path: &str) -> String {
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
-#[allow(dead_code)]
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RESET: &str = "\x1b[0m";
@@ -185,23 +184,6 @@ fn cyan(s: &str) -> String {
         s.to_string()
     }
 }
-#[allow(dead_code)]
-fn yellow(s: &str) -> String {
-    if ansi_enabled() {
-        format!("{YELLOW}{s}{RESET}")
-    } else {
-        s.to_string()
-    }
-}
-#[allow(dead_code)]
-fn green(s: &str) -> String {
-    if ansi_enabled() {
-        format!("{GREEN}{s}{RESET}")
-    } else {
-        s.to_string()
-    }
-}
-
 // ── Score formatting (mirrors qmd's formatScore) ──────────────────────────────
 
 /// Format a score as a right-aligned percentage with color coding.
@@ -400,7 +382,6 @@ fn print_cli(results: &[SearchResult], show_full: bool, query: &str) {
             500,
             r.best_chunk_pos,
             r.best_chunk.chars().count(),
-            None,
         );
 
         // Only show :line if a query term matches the snippet body (after the header line).
@@ -475,7 +456,6 @@ fn print_json(results: &[SearchResult], show_full: bool, query: &str) {
                 300,
                 r.best_chunk_pos,
                 r.best_chunk.chars().count(),
-                None,
             );
             let score_rounded = (r.score * 100.0).round() / 100.0;
             let mut obj = serde_json::json!({
@@ -519,7 +499,6 @@ fn print_csv(results: &[SearchResult], show_full: bool, query: &str) {
             500,
             r.best_chunk_pos,
             r.best_chunk.chars().count(),
-            None,
         );
         let content = if show_full {
             &r.body
@@ -556,7 +535,6 @@ fn print_markdown(results: &[SearchResult], show_full: bool, query: &str) {
             500,
             r.best_chunk_pos,
             r.best_chunk.chars().count(),
-            None,
         );
         let content = if show_full {
             r.body.trim()
@@ -599,7 +577,6 @@ fn print_xml(results: &[SearchResult], show_full: bool, query: &str) {
             500,
             r.best_chunk_pos,
             r.best_chunk.chars().count(),
-            None,
         );
         let content = if show_full {
             r.body.as_str()
