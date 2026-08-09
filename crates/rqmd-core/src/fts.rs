@@ -160,26 +160,7 @@ impl FtsIndex {
     /// not for a destructive delete. Returns `None` when tokenization yields
     /// no usable terms (matches nothing).
     fn exact_filepath_query(&self, filepath: &str) -> Result<Option<Box<dyn Query>>> {
-        let mut analyzer = self
-            .index
-            .tokenizer_for_field(self.schema.filepath)
-            .context("tokenizer for filepath field")?;
-
-        let mut terms = Vec::new();
-        {
-            let mut stream = analyzer.token_stream(filepath);
-            stream.process(&mut |token| {
-                // Defensive — RemoveLongFilter(40) already drops tokens over
-                // 40 chars before indexing, so this token could never be in
-                // the index; including it would guarantee zero matches.
-                if token.text.len() <= 40 {
-                    terms.push((
-                        token.position,
-                        Term::from_field_text(self.schema.filepath, &token.text),
-                    ));
-                }
-            });
-        }
+        let terms = self.path_terms(filepath)?;
 
         match terms.len() {
             0 => Ok(None),
@@ -336,34 +317,45 @@ impl FtsIndex {
     /// case there is no clause that could ever match and callers should skip
     /// pushdown for it, relying on the exact-prefix post-filter alone.
     fn collection_pushdown_clause(&self, collection: &str) -> Result<Option<Box<dyn Query>>> {
-        let mut analyzer = self
-            .index
-            .tokenizer_for_field(self.schema.filepath)
-            .context("tokenizer for filepath field")?;
-
-        let mut terms = Vec::new();
-        {
-            let mut stream = analyzer.token_stream(collection);
-            stream.process(&mut |token| {
-                // Defensive — the "default" tokenizer's RemoveLongFilter(40) already
-                // drops tokens over 40 chars before indexing, so this is normally a
-                // no-op. But a token that long can never appear in the index, so a
-                // MUST clause requiring one would guarantee zero matches; skip it.
-                if token.text.len() <= 40 {
-                    terms.push(Term::from_field_text(self.schema.filepath, &token.text));
-                }
-            });
-        }
-
+        let terms = self.path_terms(collection)?;
         if terms.is_empty() {
             return Ok(None);
         }
 
         let must_all: Vec<Box<dyn Query>> = terms
             .into_iter()
-            .map(|t| Box::new(TermQuery::new(t, IndexRecordOption::Basic)) as Box<dyn Query>)
+            .map(|(_, t)| Box::new(TermQuery::new(t, IndexRecordOption::Basic)) as Box<dyn Query>)
             .collect();
         Ok(Some(Box::new(BooleanQuery::intersection(must_all))))
+    }
+
+    /// Tokenize `value` the same way indexing tokenized the `filepath` field,
+    /// returning each surviving token's real position alongside its `Term`.
+    /// Shared by `exact_filepath_query` (needs positions for an exact
+    /// `PhraseQuery` — a >40-char token dropped by `RemoveLongFilter` must not
+    /// shift a later position onto the wrong index) and
+    /// `collection_pushdown_clause` (positions unused, but the same
+    /// tokenize-and-length-filter logic applies).
+    fn path_terms(&self, value: &str) -> Result<Vec<(usize, Term)>> {
+        let mut analyzer = self
+            .index
+            .tokenizer_for_field(self.schema.filepath)
+            .context("tokenizer for filepath field")?;
+
+        let mut terms = Vec::new();
+        let mut stream = analyzer.token_stream(value);
+        stream.process(&mut |token| {
+            // Defensive — RemoveLongFilter(40) already drops tokens over 40
+            // chars before indexing, so this token could never be in the
+            // index; including it would guarantee zero matches.
+            if token.text.len() <= 40 {
+                terms.push((
+                    token.position,
+                    Term::from_field_text(self.schema.filepath, &token.text),
+                ));
+            }
+        });
+        Ok(terms)
     }
 }
 

@@ -2655,6 +2655,7 @@ name = "rqmd-core"
 version = "0.10.6"
 dependencies = [
  "anyhow",
+ "globset",
  "hex",
  "regex",
  "rqmd-llm",

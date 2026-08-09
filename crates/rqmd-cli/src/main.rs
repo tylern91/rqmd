@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 
 mod commands;
 mod daemon;
@@ -32,22 +32,31 @@ struct Cli {
     command: Commands,
 }
 
+/// Shared `-c/--collection`, `-n`, `--format`, `--full` quartet for the three
+/// search commands (`Query`, `Search`, `Vsearch`) — flattened rather than
+/// repeated on each variant.
+#[derive(Args)]
+struct SearchScopeArgs {
+    /// Scope to a collection (repeatable, OR-matched): -c docs -c notes
+    #[arg(short = 'c', long, action = ArgAction::Append)]
+    collection: Vec<String>,
+    #[arg(short = 'n', default_value = "10")]
+    num: usize,
+    #[arg(long, value_enum, default_value = "cli")]
+    format: format::Format,
+    #[arg(long)]
+    full: bool,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Hybrid search: BM25 + vector + rerank (recommended)
     Query {
         query: String,
-        /// Scope to a collection (repeatable, OR-matched): -c docs -c notes
-        #[arg(short = 'c', long, action = ArgAction::Append)]
-        collection: Vec<String>,
-        #[arg(short = 'n', default_value = "10")]
-        num: usize,
-        #[arg(long, value_enum, default_value = "cli")]
-        format: format::Format,
+        #[command(flatten)]
+        scope: SearchScopeArgs,
         #[arg(long)]
         no_rerank: bool,
-        #[arg(long)]
-        full: bool,
         /// Optional context/intent to steer query expansion and reranking.
         #[arg(long)]
         intent: Option<String>,
@@ -58,28 +67,14 @@ enum Commands {
     /// Full-text keyword search (BM25 only, no LLM)
     Search {
         query: String,
-        /// Scope to a collection (repeatable, OR-matched): -c docs -c notes
-        #[arg(short = 'c', long, action = ArgAction::Append)]
-        collection: Vec<String>,
-        #[arg(short = 'n', default_value = "10")]
-        num: usize,
-        #[arg(long, value_enum, default_value = "cli")]
-        format: format::Format,
-        #[arg(long)]
-        full: bool,
+        #[command(flatten)]
+        scope: SearchScopeArgs,
     },
     /// Vector similarity search (no rerank)
     Vsearch {
         query: String,
-        /// Scope to a collection (repeatable, OR-matched): -c docs -c notes
-        #[arg(short = 'c', long, action = ArgAction::Append)]
-        collection: Vec<String>,
-        #[arg(short = 'n', default_value = "10")]
-        num: usize,
-        #[arg(long, value_enum, default_value = "cli")]
-        format: format::Format,
-        #[arg(long)]
-        full: bool,
+        #[command(flatten)]
+        scope: SearchScopeArgs,
     },
     /// Find documents most similar to an already-indexed one (by path or #docid)
     Similar {
@@ -313,51 +308,38 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Query {
             query,
-            collection,
-            num,
-            format,
+            scope,
             no_rerank,
-            full,
             intent,
             no_expand,
         } => commands::query::run_query(
             &index_dir,
             &query,
-            intent.as_deref(),
-            collections_filter(&collection),
-            num,
-            format,
-            no_rerank,
-            full,
-            no_expand,
+            commands::query::QueryOptions {
+                intent: intent.as_deref(),
+                collections: collections_filter(&scope.collection),
+                num: scope.num,
+                fmt: scope.format,
+                no_rerank,
+                full: scope.full,
+                no_expand,
+            },
         ),
-        Commands::Search {
-            query,
-            collection,
-            num,
-            format,
-            full,
-        } => commands::query::run_search(
+        Commands::Search { query, scope } => commands::query::run_search(
             &index_dir,
             &query,
-            collections_filter(&collection),
-            num,
-            format,
-            full,
+            collections_filter(&scope.collection),
+            scope.num,
+            scope.format,
+            scope.full,
         ),
-        Commands::Vsearch {
-            query,
-            collection,
-            num,
-            format,
-            full,
-        } => commands::query::run_vsearch(
+        Commands::Vsearch { query, scope } => commands::query::run_vsearch(
             &index_dir,
             &query,
-            collections_filter(&collection),
-            num,
-            format,
-            full,
+            collections_filter(&scope.collection),
+            scope.num,
+            scope.format,
+            scope.full,
         ),
         Commands::Similar { path, num, format } => {
             commands::similar::run_similar(&index_dir, &path, num, format)

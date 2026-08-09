@@ -1,34 +1,21 @@
 //! Shared document-resolution logic for `get`/`multi-get`, used by both the
 //! CLI and the MCP server so path matching has a single implementation.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use globset::{Glob, GlobMatcher};
 use rusqlite::Connection;
 
 use crate::db;
 use crate::types::Document;
 
-/// Simple glob: only `*` as wildcard (matches any chars, including `/`).
-pub fn glob_match(pattern: &str, target: &str) -> bool {
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() == 1 {
-        return target == pattern;
-    }
-    let mut rest = target;
-    for (i, part) in parts.iter().enumerate() {
-        if i == 0 {
-            if !rest.starts_with(part) {
-                return false;
-            }
-            rest = &rest[part.len()..];
-        } else if i == parts.len() - 1 {
-            return rest.ends_with(part);
-        } else if let Some(pos) = rest.find(part) {
-            rest = &rest[pos + part.len()..];
-        } else {
-            return false;
-        }
-    }
-    true
+/// Compile a glob pattern. Wildcards match path separators too — globset's
+/// `literal_separator` is off by default, so `docs/*` matches `docs/a/b.md`
+/// as well as `docs/a.md`, preserving the cross-`/` matching of the
+/// hand-rolled `*`-only matcher this replaced.
+fn compile_glob(pattern: &str) -> Result<GlobMatcher> {
+    Ok(Glob::new(pattern)
+        .with_context(|| format!("invalid glob pattern: {pattern}"))?
+        .compile_matcher())
 }
 
 /// Resolve a `multi-get` pattern — a comma-separated list mixing `#docid`,
@@ -73,9 +60,13 @@ pub fn resolve_multi_get(
     }
 
     if !globs.is_empty() {
+        let matchers = globs
+            .iter()
+            .map(|g| compile_glob(g))
+            .collect::<Result<Vec<_>>>()?;
         for doc in db::list_documents_multi(conn, collections)? {
             let filepath = format!("{}/{}", doc.collection, doc.path);
-            if globs.iter().any(|g| glob_match(g, &filepath)) {
+            if matchers.iter().any(|m| m.is_match(&filepath)) {
                 docs.push(doc);
             }
         }
@@ -93,11 +84,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn glob_match_wildcard_and_exact() {
-        assert!(glob_match("docs/*.md", "docs/SYNTAX.md"));
-        assert!(!glob_match("docs/*.md", "other/SYNTAX.md"));
-        assert!(glob_match("*", "anything/at/all.md"));
-        assert!(glob_match("exact", "exact"));
-        assert!(!glob_match("exact", "not-exact"));
+    fn compile_glob_wildcard_and_exact() {
+        assert!(compile_glob("docs/*.md")
+            .unwrap()
+            .is_match("docs/SYNTAX.md"));
+        assert!(!compile_glob("docs/*.md")
+            .unwrap()
+            .is_match("other/SYNTAX.md"));
+        assert!(compile_glob("*").unwrap().is_match("anything/at/all.md"));
+        assert!(compile_glob("exact").unwrap().is_match("exact"));
+        assert!(!compile_glob("exact").unwrap().is_match("not-exact"));
+    }
+
+    #[test]
+    fn compile_glob_invalid_pattern_errors() {
+        assert!(compile_glob("docs/[unterminated").is_err());
     }
 }

@@ -162,6 +162,24 @@ pub fn get_content(conn: &Connection, hash: &str) -> Result<Option<String>> {
 
 // ── Document CRUD ─────────────────────────────────────────────────────────────
 
+/// Column list shared by every query that hydrates a full `Document` — keeps
+/// column order in sync with `map_document`'s field order across call sites.
+const DOC_COLUMNS: &str = "id, collection, path, title, hash, active";
+
+/// Row mapper shared by every query selecting `DOC_COLUMNS` (optionally with
+/// a table alias, and optionally with trailing columns beyond index 5 — extra
+/// columns are simply ignored).
+fn map_document(row: &rusqlite::Row) -> rusqlite::Result<Document> {
+    Ok(Document {
+        id: row.get(0)?,
+        collection: row.get(1)?,
+        path: row.get(2)?,
+        title: row.get(3)?,
+        hash: row.get(4)?,
+        active: row.get::<_, i64>(5)? != 0,
+    })
+}
+
 /// Insert or update a document record. Returns the document's stable row id.
 ///
 /// Uses `RETURNING id` rather than `last_insert_rowid()`: on the `ON CONFLICT
@@ -203,18 +221,9 @@ pub fn get_document_by_filepath(
     path: &str,
 ) -> Result<Option<Document>> {
     conn.query_row(
-        "SELECT id, collection, path, title, hash, active FROM documents WHERE collection=?1 AND path=?2",
+        &format!("SELECT {DOC_COLUMNS} FROM documents WHERE collection=?1 AND path=?2"),
         params![collection, path],
-        |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        },
+        map_document,
     )
     .optional()
     .context("get document")
@@ -222,18 +231,9 @@ pub fn get_document_by_filepath(
 
 pub fn get_document_by_id(conn: &Connection, id: i64) -> Result<Option<Document>> {
     conn.query_row(
-        "SELECT id, collection, path, title, hash, active FROM documents WHERE id=?1",
+        &format!("SELECT {DOC_COLUMNS} FROM documents WHERE id=?1"),
         params![id],
-        |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        },
+        map_document,
     )
     .optional()
     .context("get document by id")
@@ -259,19 +259,12 @@ fn escape_like_pattern(s: &str) -> String {
 pub fn get_document_by_docid_prefix(conn: &Connection, docid: &str) -> Result<Option<Document>> {
     let pattern = format!("{}%", escape_like_pattern(docid));
     conn.query_row(
-        "SELECT id, collection, path, title, hash, active FROM documents \
-         WHERE hash LIKE ?1 ESCAPE '\\' AND active=1 ORDER BY collection, path LIMIT 1",
+        &format!(
+            "SELECT {DOC_COLUMNS} FROM documents \
+             WHERE hash LIKE ?1 ESCAPE '\\' AND active=1 ORDER BY collection, path LIMIT 1"
+        ),
         params![pattern],
-        |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        },
+        map_document,
     )
     .optional()
     .context("get document by docid")
@@ -292,37 +285,26 @@ pub fn list_documents_multi(
     conn: &Connection,
     collections: Option<&[String]>,
 ) -> Result<Vec<Document>> {
-    let map_row = |row: &rusqlite::Row| -> rusqlite::Result<Document> {
-        Ok(Document {
-            id: row.get(0)?,
-            collection: row.get(1)?,
-            path: row.get(2)?,
-            title: row.get(3)?,
-            hash: row.get(4)?,
-            active: row.get::<_, i64>(5)? != 0,
-        })
-    };
-
     match collections {
         Some(cols) if !cols.is_empty() => {
             let placeholders = vec!["?"; cols.len()].join(",");
             let sql = format!(
-                "SELECT id, collection, path, title, hash, active FROM documents \
+                "SELECT {DOC_COLUMNS} FROM documents \
                  WHERE collection IN ({placeholders}) AND active=1 ORDER BY collection, path"
             );
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
-                .query_map(params_from_iter(cols.iter()), map_row)?
+                .query_map(params_from_iter(cols.iter()), map_document)?
                 .collect::<rusqlite::Result<_>>()?;
             Ok(rows)
         }
         _ => {
-            let mut stmt = conn.prepare(
-                "SELECT id, collection, path, title, hash, active FROM documents \
-                 WHERE active=1 ORDER BY collection, path",
-            )?;
+            let sql = format!(
+                "SELECT {DOC_COLUMNS} FROM documents WHERE active=1 ORDER BY collection, path"
+            );
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
-                .query_map([], map_row)?
+                .query_map([], map_document)?
                 .collect::<rusqlite::Result<_>>()?;
             Ok(rows)
         }
@@ -355,10 +337,7 @@ pub fn find_documents_by_needles(
         params.extend(std::iter::repeat_n(needle.to_string(), 4));
     }
 
-    let mut sql = format!(
-        "SELECT id, collection, path, title, hash, active FROM documents \
-         WHERE active=1 AND ({clauses})"
-    );
+    let mut sql = format!("SELECT {DOC_COLUMNS} FROM documents WHERE active=1 AND ({clauses})");
     if let Some(cols) = collections.filter(|c| !c.is_empty()) {
         let placeholders = vec!["?"; cols.len()].join(",");
         sql.push_str(&format!(" AND collection IN ({placeholders})"));
@@ -368,16 +347,7 @@ pub fn find_documents_by_needles(
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(params_from_iter(params.iter()), |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        })?
+        .query_map(params_from_iter(params.iter()), map_document)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
@@ -500,19 +470,7 @@ pub fn doc_for_vid(conn: &Connection, vid: u64) -> Result<Option<(Document, Stri
         LIMIT 1
         "#,
         params![vid as i64],
-        |row| {
-            Ok((
-                Document {
-                    id: row.get(0)?,
-                    collection: row.get(1)?,
-                    path: row.get(2)?,
-                    title: row.get(3)?,
-                    hash: row.get(4)?,
-                    active: row.get::<_, i64>(5)? != 0,
-                },
-                row.get::<_, String>(6)?,
-            ))
-        },
+        |row| Ok((map_document(row)?, row.get::<_, String>(6)?)),
     )
     .optional()
     .context("doc_for_vid")
@@ -533,16 +491,7 @@ pub fn doc_for_vid_meta(conn: &Connection, vid: u64) -> Result<Option<Document>>
         LIMIT 1
         "#,
         params![vid as i64],
-        |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        },
+        map_document,
     )
     .optional()
     .context("doc_for_vid_meta")

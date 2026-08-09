@@ -259,6 +259,30 @@ pub fn chunk_document(text: &str) -> Vec<Chunk> {
     chunks
 }
 
+/// Compute just the first chunk of `text` — byte-identical to
+/// `chunk_document(text)[0]`, but without `chunk_document`'s whole-document
+/// fence/break-point scan. Only the region up to the first chunk's search
+/// window can affect where that chunk ends, so this scans that prefix only.
+/// Callers that only need a fallback snippet (not full chunking) should use
+/// this instead of `chunk_document(text).remove(0)`.
+pub fn first_chunk(text: &str) -> String {
+    if text.len() <= CHUNK_SIZE_CHARS {
+        return text.to_string();
+    }
+
+    let ideal_end = CHUNK_SIZE_CHARS;
+    let window_start = ideal_end.saturating_sub(CHUNK_WINDOW_CHARS / 2);
+    let window_end = (ideal_end + CHUNK_WINDOW_CHARS / 2).min(text.len());
+
+    let scan_end = snap_char_boundary_forward(text, window_end);
+    let fences = scan_code_fences(&text[..scan_end]);
+    let break_points = scan_break_points(&text[..scan_end], &fences);
+    let break_at = best_break_in_window(&break_points, window_start, window_end);
+
+    let end = snap_char_boundary_forward(text, break_at.max(ideal_end).min(text.len()));
+    text[..end].to_string()
+}
+
 // ── Snippet extraction ────────────────────────────────────────────────────────
 
 /// Result of [`extract_snippet`].
@@ -416,6 +440,20 @@ mod tests {
             // Verify chunk content doesn't start mid-fence
             let _ = chunk.pos; // just ensure it compiles
         }
+    }
+
+    #[test]
+    fn first_chunk_matches_chunk_document_short_doc() {
+        let text = "hello world";
+        assert_eq!(first_chunk(text), chunk_document(text)[0].text);
+    }
+
+    #[test]
+    fn first_chunk_matches_chunk_document_long_doc() {
+        let section_a = "# Section A\n".to_string() + &"word ".repeat(700);
+        let section_b = "# Section B\n".to_string() + &"word ".repeat(700);
+        let text = section_a + &section_b;
+        assert_eq!(first_chunk(&text), chunk_document(&text)[0].text);
     }
 
     #[test]

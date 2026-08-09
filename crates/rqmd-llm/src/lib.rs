@@ -96,9 +96,10 @@ const EMBEDDINGGEMMA_QUERY_PREFIX: &str = "task: search result | query: ";
 const EMBEDDINGGEMMA_PASSAGE_PREFIX: &str = "title: none | text: ";
 
 /// L2-normalize a vector in place, matching `InferenceBackend::embed`'s documented
-/// unit-normalized contract. Mirrors `ort_backend::l2_normalize`; duplicated rather
-/// than shared because `ort_backend` is feature-gated and not built by default.
-fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
+/// unit-normalized contract. Shared with the feature-gated `ort_backend` module —
+/// this crate root is compiled unconditionally, so `pub(crate)` here is reachable
+/// regardless of whether the `ort-backend` feature is on.
+pub(crate) fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
     let norm = v.iter().map(|&x| x * x).sum::<f32>().sqrt().max(1e-12);
     for x in &mut v {
         *x /= norm;

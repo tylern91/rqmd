@@ -13,7 +13,7 @@ use rqmd_llm::InferenceBackend;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    chunking::chunk_document,
+    chunking::{chunk_document, first_chunk},
     db::{
         self, content_hash, doc_for_vid, doc_for_vid_meta, docid_from_hash, get_content,
         get_context_for_path, open_db, upsert_content, upsert_document, upsert_vector_meta,
@@ -462,30 +462,7 @@ impl Store {
 
         let mut results = Vec::with_capacity(ranked.len());
         for (sim, doc, body) in ranked {
-            let filepath = format!("{}/{}", doc.collection, doc.path);
-            // Pick the first chunk as the snippet — no re-chunking needed.
-            let chunks = chunk_document(&body);
-            let best = chunks
-                .into_iter()
-                .next()
-                .map(|c| c.text)
-                .unwrap_or_default();
-            let docid = docid_from_hash(&doc.hash).to_string();
-            let ctx = get_context_for_path(&self.db, &doc.collection, &doc.path)
-                .ok()
-                .flatten();
-            results.push(SearchResult {
-                file: format!("rqmd://{filepath}"),
-                title: doc.title.clone(),
-                body,
-                best_chunk: best,
-                best_chunk_pos: 0,
-                score: sim,
-                docid,
-                collection: doc.collection,
-                path: doc.path,
-                context: ctx,
-            });
+            results.push(self.result_from_doc(&doc, body, sim));
         }
         Ok(results)
     }
@@ -555,29 +532,7 @@ impl Store {
 
         let mut results = Vec::with_capacity(ranked.len());
         for (sim, doc, body) in ranked {
-            let filepath = format!("{}/{}", doc.collection, doc.path);
-            let chunks = chunk_document(&body);
-            let best = chunks
-                .into_iter()
-                .next()
-                .map(|c| c.text)
-                .unwrap_or_default();
-            let docid = docid_from_hash(&doc.hash).to_string();
-            let ctx = get_context_for_path(&self.db, &doc.collection, &doc.path)
-                .ok()
-                .flatten();
-            results.push(SearchResult {
-                file: format!("rqmd://{filepath}"),
-                title: doc.title.clone(),
-                body,
-                best_chunk: best,
-                best_chunk_pos: 0,
-                score: sim,
-                docid,
-                collection: doc.collection,
-                path: doc.path,
-                context: ctx,
-            });
+            results.push(self.result_from_doc(&doc, body, sim));
         }
         Ok(results)
     }
@@ -891,40 +846,50 @@ impl Store {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    /// Build a [`SearchResult`] from an already-hydrated document and body,
+    /// using the document's first chunk as the snippet (`best_chunk_pos` is
+    /// always 0). Shared by the result-construction paths that don't need
+    /// term-relevance chunk selection — only [`Self::hybrid_query_multi`]'s
+    /// rerank path needs a real chunk position, via the `best_chunk` helper.
+    fn result_from_doc(
+        &self,
+        doc: &crate::types::Document,
+        body: String,
+        score: f32,
+    ) -> SearchResult {
+        let filepath = format!("{}/{}", doc.collection, doc.path);
+        let best_chunk = first_chunk(&body);
+        let docid = docid_from_hash(&doc.hash).to_string();
+        let context = get_context_for_path(&self.db, &doc.collection, &doc.path)
+            .ok()
+            .flatten();
+        SearchResult {
+            file: format!("rqmd://{filepath}"),
+            title: doc.title.clone(),
+            body,
+            best_chunk,
+            best_chunk_pos: 0,
+            score,
+            docid,
+            collection: doc.collection.clone(),
+            path: doc.path.clone(),
+            context,
+        }
+    }
+
     fn hits_to_results(
         &self,
         hits: Vec<(String, i64, f32)>,
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
         let mut results = Vec::new();
-        for (filepath, doc_id, score) in hits.into_iter().take(limit) {
+        for (_filepath, doc_id, score) in hits.into_iter().take(limit) {
             let doc = match db::get_document_by_id(&self.db, doc_id)? {
                 Some(d) => d,
                 None => continue,
             };
             let body = get_content(&self.db, &doc.hash)?.unwrap_or_default();
-            let docid = docid_from_hash(&doc.hash).to_string();
-            // For BM25-only results, use the first chunk as the snippet.
-            let chunks = chunk_document(&body);
-            let best = chunks
-                .into_iter()
-                .next()
-                .map(|c| c.text)
-                .unwrap_or_default();
-            let (coll, path) = split_filepath(&filepath);
-            let ctx = get_context_for_path(&self.db, coll, path).ok().flatten();
-            results.push(SearchResult {
-                file: format!("rqmd://{filepath}"),
-                title: doc.title.clone(),
-                body,
-                best_chunk: best,
-                best_chunk_pos: 0,
-                score,
-                docid,
-                collection: coll.to_string(),
-                path: path.to_string(),
-                context: ctx,
-            });
+            results.push(self.result_from_doc(&doc, body, score));
         }
         Ok(results)
     }
