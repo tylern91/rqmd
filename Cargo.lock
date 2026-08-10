@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-cli"
-version = "0.10.6"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2652,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-core"
-version = "0.10.6"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "globset",
@@ -2671,7 +2671,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-llm"
-version = "0.10.6"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -2689,7 +2689,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-mcp"
-version = "0.10.6"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "axum",
