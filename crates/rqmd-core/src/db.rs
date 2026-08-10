@@ -629,11 +629,16 @@ pub fn deactivate_missing_documents(
         .filter(|p| !current_paths.contains(p))
         .collect();
 
-    for path in &missing {
-        conn.execute(
-            "UPDATE documents SET active = 0 WHERE collection = ?1 AND path = ?2",
-            params![collection, path],
-        )?;
+    // SQLite caps bound parameters at 999 by default; chunk so the collection
+    // param plus each chunk's paths always stays comfortably under that limit.
+    const CHUNK_SIZE: usize = 500;
+    for chunk in missing.chunks(CHUNK_SIZE) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "UPDATE documents SET active = 0 WHERE collection = ? AND path IN ({placeholders})"
+        );
+        let bind_values = std::iter::once(collection).chain(chunk.iter().map(String::as_str));
+        conn.execute(&sql, params_from_iter(bind_values))?;
     }
 
     Ok(missing)
@@ -650,27 +655,32 @@ pub fn deactivate_missing_documents(
 /// the caller can sweep the matching Tantivy entries — this module has no
 /// Tantivy handle.
 pub fn purge_collection(conn: &Connection, name: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT path, hash FROM documents WHERE collection = ?1")?;
-    let rows: Vec<(String, String)> = stmt
-        .query_map(params![name], |row| Ok((row.get(0)?, row.get(1)?)))?
+    let mut stmt = conn.prepare("SELECT path FROM documents WHERE collection = ?1")?;
+    let filepaths: Vec<String> = stmt
+        .query_map(params![name], |row| {
+            let path: String = row.get(0)?;
+            Ok(format!("{name}/{path}"))
+        })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
-    let filepaths: Vec<String> = rows.iter().map(|(p, _)| format!("{name}/{p}")).collect();
-
     conn.execute("DELETE FROM documents WHERE collection = ?1", params![name])?;
 
-    for (_, hash) in &rows {
-        let still_referenced: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM documents WHERE hash = ?1",
-            params![hash],
-            |row| row.get(0),
-        )?;
-        if still_referenced == 0 {
-            conn.execute("DELETE FROM content_vectors WHERE hash = ?1", params![hash])?;
-            conn.execute("DELETE FROM content WHERE hash = ?1", params![hash])?;
-        }
-    }
+    // Content is deduplicated globally by hash, so a hash only becomes
+    // reclaimable once no document anywhere (any collection, active or not
+    // — soft-deleted rows still count as referencing it) points to it
+    // anymore. Sweeping the whole `NOT IN` set in one statement instead of
+    // re-checking each formerly-owned hash individually is both fewer round
+    // trips and exactly equivalent: a hash this collection didn't touch was
+    // already referenced before and stays referenced now.
+    conn.execute(
+        "DELETE FROM content_vectors WHERE hash NOT IN (SELECT hash FROM documents)",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM content WHERE hash NOT IN (SELECT hash FROM documents)",
+        [],
+    )?;
 
     conn.execute(
         "DELETE FROM store_collections WHERE name = ?1",
