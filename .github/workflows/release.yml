@@ -47,6 +47,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve bump label with breaking-change escalation
+        # An explicit major/minor/patch label (required by the job-level `if:` gate
+        # above) always wins. `breaking-change`/`!`/`BREAKING CHANGE:` are informational
+        # only — per the PR template, they pair with an already-chosen label rather than
+        # overriding it, since pre-1.0 this repo's own convention is that breaking changes
+        # take the minor slot, not major. This flag only controls the release-notes
+        # callout in build-release-notes.sh, never the version bump itself.
         id: bump
         run: |
           set -euo pipefail
@@ -56,7 +62,6 @@ jobs:
               || printf '%s' "$PR_TITLE" | grep -qE '^[a-z]+(\([^)]+\))?!:' \
               || printf '%s' "${PR_BODY:-}" | grep -qE '^BREAKING CHANGE:'; then
             breaking=true
-            label="major"
           fi
           printf 'label=%s\n' "$label" >> "$GITHUB_OUTPUT"
           printf 'breaking=%s\n' "$breaking" >> "$GITHUB_OUTPUT"
