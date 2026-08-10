@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use ndarray::Ix3;
 use std::path::PathBuf;
 
-use crate::InferenceBackend;
+use crate::{l2_normalize, InferenceBackend};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -120,8 +120,8 @@ impl OrtBackend {
         let ep = resolve_ep(config.ep);
 
         // Cap ORT native logging. Default: Warning (suppress Info/Verbose model-loader
-        // noise). With RRQMD_VERBOSE=1 (set by --verbose), allow Verbose output.
-        let ort_log_level = if std::env::var("RRQMD_VERBOSE").is_ok() {
+        // noise). With RQMD_VERBOSE=1 (set by --verbose), allow Verbose output.
+        let ort_log_level = if std::env::var("RQMD_VERBOSE").is_ok() {
             ort::logging::LogLevel::Verbose
         } else {
             ort::logging::LogLevel::Warning
@@ -331,14 +331,6 @@ impl InferenceBackend for OrtBackend {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
-    let norm = v.iter().map(|&x| x * x).sum::<f32>().sqrt().max(1e-12);
-    for x in &mut v {
-        *x /= norm;
-    }
-    v
-}
 
 fn resolve_ep(ep: OrtEp) -> ort::ep::ExecutionProviderDispatch {
     use ort::ep::{DirectML, CPU, CUDA};

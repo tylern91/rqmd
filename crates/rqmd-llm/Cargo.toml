@@ -8,6 +8,9 @@ keywords = ["llama", "onnx", "embedding", "reranking", "inference"]
 categories = ["science", "text-processing"]
 publish = false
 
+[lints]
+workspace = true
+
 [features]
 # Metal (Apple GPU) enabled by default — a no-op on non-Apple platforms.
 default = ["metal"]
@@ -35,3 +38,4 @@ ndarray    = { version = "0.17", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+serial_test = "3"

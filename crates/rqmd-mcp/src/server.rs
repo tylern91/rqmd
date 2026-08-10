@@ -164,74 +164,69 @@ impl RqmdServer {
     #[tool(
         description = "Hybrid search (BM25 + vector + rerank). Best for most queries. Provide a natural-language question or keyword phrase. Set expand:false to skip LLM query-expansion for lower latency."
     )]
-    fn query(&self, Parameters(p): Parameters<QueryInput>) -> String {
+    fn query(&self, Parameters(p): Parameters<QueryInput>) -> Result<String, String> {
         let no_rerank = !p.rerank.unwrap_or(true);
         let no_expand = !p.expand.unwrap_or(true);
         let limit = p.limit.unwrap_or(10);
         let cols = p.collections.as_deref();
         let intent = p.intent.as_deref();
-        match self.ml() {
-            Ok(mut store) => {
-                match store.hybrid_query_multi(&p.query, intent, limit, cols, no_rerank, no_expand)
-                {
-                    Ok(results) => format_results(&results, &p.query),
-                    Err(e) => format!("Error running query: {e:#}"),
-                }
-            }
-            Err(e) => format!("Error loading inference backend: {e:#}"),
-        }
+        let mut store = self
+            .ml()
+            .map_err(|e| format!("Error loading inference backend: {e:#}"))?;
+        let results = store
+            .hybrid_query_multi(&p.query, intent, limit, cols, no_rerank, no_expand)
+            .map_err(|e| format!("Error running query: {e:#}"))?;
+        Ok(format_results(&results, &p.query))
     }
 
     /// BM25 full-text keyword search. No LLM required — instant results.
     #[tool(
         description = "BM25 keyword search. Fast, no model required. Supports \"quoted phrases\" and -negation. Use for known terms or exact phrases."
     )]
-    fn search(&self, Parameters(p): Parameters<SearchInput>) -> String {
+    fn search(&self, Parameters(p): Parameters<SearchInput>) -> Result<String, String> {
         let limit = p.limit.unwrap_or(10);
         let cols = p.collections.as_deref();
-        match self.fts() {
-            Ok(store) => match store.search_fts_multi(&p.query, limit, cols) {
-                Ok(results) => format_results(&results, &p.query),
-                Err(e) => format!("Error running search: {e:#}"),
-            },
-            Err(e) => format!("Error opening store: {e:#}"),
-        }
+        let store = self
+            .fts()
+            .map_err(|e| format!("Error opening store: {e:#}"))?;
+        let results = store
+            .search_fts_multi(&p.query, limit, cols)
+            .map_err(|e| format!("Error running search: {e:#}"))?;
+        Ok(format_results(&results, &p.query))
     }
 
     /// Retrieve full document content by file path or docid.
     #[tool(
         description = "Retrieve a document by file path or docid (#abc123) from search results. Supports line range: 'file.md:100:40' reads 40 lines from line 100."
     )]
-    fn get(&self, Parameters(p): Parameters<GetInput>) -> String {
+    fn get(&self, Parameters(p): Parameters<GetInput>) -> Result<String, String> {
         let (lookup, from_line, max_lines) = parse_file_spec(&p.file, p.from_line, p.max_lines);
-        match self.fts() {
-            Ok(store) => get_document(&store, &lookup, from_line, max_lines),
-            Err(e) => format!("Error opening store: {e:#}"),
-        }
+        let store = self
+            .fts()
+            .map_err(|e| format!("Error opening store: {e:#}"))?;
+        get_document(&store, &lookup, from_line, max_lines)
     }
 
     /// Retrieve multiple documents by glob pattern or comma-separated list.
     #[tool(
         description = "Retrieve multiple documents matching a glob pattern (e.g. 'journals/2025-05*.md') or a comma-separated list of paths/docids."
     )]
-    fn multi_get(&self, Parameters(p): Parameters<MultiGetInput>) -> String {
-        match self.fts() {
-            Ok(store) => {
-                multi_get_documents(&store, &p.pattern, p.collections.as_deref(), p.max_lines)
-            }
-            Err(e) => format!("Error opening store: {e:#}"),
-        }
+    fn multi_get(&self, Parameters(p): Parameters<MultiGetInput>) -> Result<String, String> {
+        let store = self
+            .fts()
+            .map_err(|e| format!("Error opening store: {e:#}"))?;
+        multi_get_documents(&store, &p.pattern, p.collections.as_deref(), p.max_lines)
     }
 
     /// Show index status: collections, document counts, and storage sizes.
     #[tool(
         description = "Show the RQMD index status: collections, document counts, and index health."
     )]
-    fn status(&self) -> String {
-        match self.fts() {
-            Ok(store) => build_status(&store, &self.index_dir),
-            Err(e) => format!("Error opening store: {e:#}"),
-        }
+    fn status(&self) -> Result<String, String> {
+        let store = self
+            .fts()
+            .map_err(|e| format!("Error opening store: {e:#}"))?;
+        Ok(build_status(&store, &self.index_dir))
     }
 }
 
@@ -325,7 +320,7 @@ fn get_document(
     lookup: &str,
     from_line: Option<usize>,
     max_lines: Option<usize>,
-) -> String {
+) -> Result<String, String> {
     let result = if lookup.starts_with('#') {
         let hex = lookup.trim_start_matches('#');
         db::get_document_by_docid_prefix(&store.db, hex)
@@ -333,14 +328,14 @@ fn get_document(
         // Try "collection/path" split
         match lookup.split_once('/') {
             Some((col, path)) => db::get_document_by_filepath(&store.db, col, path),
-            None => return format!("Cannot parse path: {lookup}"),
+            None => return Err(format!("Cannot parse path: {lookup}")),
         }
     };
 
     let doc = match result {
         Ok(Some(d)) => d,
-        Ok(None) => return format!("Document not found: {lookup}"),
-        Err(e) => return format!("DB error: {e:#}"),
+        Ok(None) => return Err(format!("Document not found: {lookup}")),
+        Err(e) => return Err(format!("DB error: {e:#}")),
     };
 
     let body = db::get_content(&store.db, &doc.hash)
@@ -356,10 +351,10 @@ fn get_document(
         .map(|(i, l)| format!("{:>4}: {l}\n", start + i + 1))
         .collect();
 
-    format!(
+    Ok(format!(
         "# {}\n── rqmd://{}/{} ──\n\n{text}",
         doc.title, doc.collection, doc.path
-    )
+    ))
 }
 
 /// Truncate `docs` to at most `max` entries, reporting the original count and
@@ -377,11 +372,9 @@ fn multi_get_documents(
     pattern: &str,
     collections: Option<&[String]>,
     max_lines: Option<usize>,
-) -> String {
-    let docs = match resolve::resolve_multi_get(&store.db, collections, pattern) {
-        Ok(d) => d,
-        Err(e) => return format!("DB error: {e:#}"),
-    };
+) -> Result<String, String> {
+    let docs = resolve::resolve_multi_get(&store.db, collections, pattern)
+        .map_err(|e| format!("DB error: {e:#}"))?;
     let (docs, total, truncated) = cap_multi_get_docs(docs, MULTI_GET_MAX_DOCS);
 
     let mut out = String::new();
@@ -409,7 +402,7 @@ fn multi_get_documents(
     }
 
     if count == 0 {
-        return format!("No documents matched: {pattern}");
+        return Ok(format!("No documents matched: {pattern}"));
     }
     if truncated {
         out.push_str(&format!(
@@ -417,7 +410,7 @@ fn multi_get_documents(
              {MULTI_GET_MAX_DOCS} per call.]\n"
         ));
     }
-    out
+    Ok(out)
 }
 
 fn build_status(store: &Store, index_dir: &Path) -> String {
@@ -495,5 +488,49 @@ mod tests {
         assert_eq!(capped.len(), 5);
         assert_eq!(total, 5);
         assert!(!truncated);
+    }
+
+    fn test_server_with_doc() -> (tempfile::TempDir, RqmdServer) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = RqmdServer::new(dir.path().join("index")).expect("server");
+        {
+            let mut store = server.fts().expect("fts store");
+            store
+                .index_document_fts_only("col", "doc1.md", "Doc 1", "hello world")
+                .expect("index doc");
+        }
+        (dir, server)
+    }
+
+    #[test]
+    fn get_document_not_found_is_err() {
+        let (_dir, server) = test_server_with_doc();
+        let store = server.fts().expect("fts store");
+        let err = get_document(&store, "col/nope.md", None, None).unwrap_err();
+        assert!(err.contains("Document not found"), "got: {err}");
+    }
+
+    #[test]
+    fn get_document_malformed_lookup_is_err() {
+        let (_dir, server) = test_server_with_doc();
+        let store = server.fts().expect("fts store");
+        let err = get_document(&store, "no-slash-no-hash", None, None).unwrap_err();
+        assert!(err.contains("Cannot parse path"), "got: {err}");
+    }
+
+    #[test]
+    fn get_document_found_is_ok() {
+        let (_dir, server) = test_server_with_doc();
+        let store = server.fts().expect("fts store");
+        let text = get_document(&store, "col/doc1.md", None, None).unwrap();
+        assert!(text.contains("hello world"), "got: {text}");
+    }
+
+    #[test]
+    fn multi_get_documents_no_match_is_ok_not_err() {
+        let (_dir, server) = test_server_with_doc();
+        let store = server.fts().expect("fts store");
+        let text = multi_get_documents(&store, "does-not-exist-*", None, None).unwrap();
+        assert!(text.contains("No documents matched"), "got: {text}");
     }
 }

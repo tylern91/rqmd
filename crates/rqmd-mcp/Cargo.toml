@@ -8,6 +8,9 @@ keywords = ["mcp", "search", "rag", "model-context-protocol"]
 categories = ["text-processing", "web-programming"]
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = "1"
 rmcp = { version = "1.8", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }

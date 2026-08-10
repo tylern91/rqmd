@@ -24,7 +24,7 @@ unless CUDA is available.
 ```sh
 rqmd embed                          # uses LlamaCppBackend by default
 rqmd --backend llama embed          # explicit
-RRQMD_INFERENCE_BACKEND=llama rqmd embed
+RQMD_INFERENCE_BACKEND=llama rqmd embed
 ```
 
 ### OrtBackend (`ort-backend` feature)
@@ -37,7 +37,7 @@ Build with `--features ort-backend`.
 | Embeddings | `BAAI/bge-base-en-v1.5` (ONNX) | ~440MB |
 | Reranking | *(not supported — falls back to LlamaCppBackend)* | — |
 
-Execution providers selected by `--ort-ep` or `RRQMD_ORT_EP`:
+Execution providers selected by `--ort-ep` or `RQMD_ORT_EP`:
 
 | EP | Flag | Platform | Hardware |
 |----|------|----------|----------|
@@ -49,7 +49,7 @@ Execution providers selected by `--ort-ep` or `RRQMD_ORT_EP`:
 
 ```sh
 # CoreML (Apple Neural Engine — fastest for embed-sized models on M-series)
-RRQMD_INFERENCE_BACKEND=ort RRQMD_ORT_EP=coreml rqmd embed
+RQMD_INFERENCE_BACKEND=ort RQMD_ORT_EP=coreml rqmd embed
 rqmd --backend ort --ort-ep coreml embed
 ```
 

@@ -162,10 +162,10 @@ For ongoing throughput and quality numbers, run:
 cargo run -p rqmd-cli -- bench --rounds 5
 
 # CPU-only (disables Metal/GPU layers in LlamaCppBackend)
-RRQMD_FORCE_CPU=1 cargo run -p rqmd-cli -- bench --rounds 5
+RQMD_FORCE_CPU=1 cargo run -p rqmd-cli -- bench --rounds 5
 
 # ORT CoreML (requires --features ort-backend)
-RRQMD_INFERENCE_BACKEND=ort RRQMD_ORT_EP=coreml \
+RQMD_INFERENCE_BACKEND=ort RQMD_ORT_EP=coreml \
   cargo run -p rqmd-cli --features ort-backend -- bench --rounds 5
 
 # Search quality (BM25 — runs in CI)
@@ -202,19 +202,19 @@ base with many short atomic notes.
 
 ```sh
 # 1. Add corpus (BM25 metadata — fast)
-RRQMD_INDEX_DIR=<scratch> rqmd collection add <corpus> --name vault
+RQMD_INDEX_DIR=<scratch> rqmd collection add <corpus> --name vault
 
 # 2. Embed (GPU/Metal — slow; captures throughput from progress output)
-RRQMD_INDEX_DIR=<scratch> rqmd embed -c vault
+RQMD_INDEX_DIR=<scratch> rqmd embed -c vault
 
 # 3. Status — capture doc/chunk/vector counts and index size
-RRQMD_INDEX_DIR=<scratch> rqmd status
+RQMD_INDEX_DIR=<scratch> rqmd status
 
 # 4. Embedding throughput benchmark (in-process, warm Metal)
-RRQMD_INDEX_DIR=<scratch> rqmd bench --rounds 5
+RQMD_INDEX_DIR=<scratch> rqmd bench --rounds 5
 
 # 5. CPU-only comparison
-RRQMD_FORCE_CPU=1 RRQMD_INDEX_DIR=<scratch> rqmd bench --rounds 5
+RQMD_FORCE_CPU=1 RQMD_INDEX_DIR=<scratch> rqmd bench --rounds 5
 
 # 6. Search quality (eval fixture corpus, mode: bm25 / vec / hybrid)
 rqmd eval --mode bm25 --verbose

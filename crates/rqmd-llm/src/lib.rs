@@ -5,8 +5,8 @@
 //!   ort-backend  — OrtBackend via ONNX Runtime (CoreML/CUDA/DirectML/CPU)
 //!
 //! Backend selection at runtime (read by `create_backend()`):
-//!   RRQMD_INFERENCE_BACKEND=llama|ort   (default: llama)
-//!   RRQMD_ORT_EP=auto|coreml|cuda|directml|cpu
+//!   RQMD_INFERENCE_BACKEND=llama|ort   (default: llama)
+//!   RQMD_ORT_EP=auto|coreml|cuda|directml|cpu
 //!
 //! All API shapes validated against llama-cpp-2 v0.1.150 in spike-inference.
 //! Critical gotchas (all confirmed by spike):
@@ -19,7 +19,7 @@
 //!
 //! Each of the three GGUF models loads lazily on first use (`ensure_embed` /
 //! `ensure_rerank` / `ensure_generate`) and is evicted after
-//! `RRQMD_MODEL_IDLE_TTL` seconds of inactivity (default 300; `0` disables) —
+//! `RQMD_MODEL_IDLE_TTL` seconds of inactivity (default 300; `0` disables) —
 //! see `release_idle`. This keeps an idle daemon from permanently holding the
 //! ~2 GB generate model resident once query expansion (on by default) has
 //! triggered it once.
@@ -96,9 +96,10 @@ const EMBEDDINGGEMMA_QUERY_PREFIX: &str = "task: search result | query: ";
 const EMBEDDINGGEMMA_PASSAGE_PREFIX: &str = "title: none | text: ";
 
 /// L2-normalize a vector in place, matching `InferenceBackend::embed`'s documented
-/// unit-normalized contract. Mirrors `ort_backend::l2_normalize`; duplicated rather
-/// than shared because `ort_backend` is feature-gated and not built by default.
-fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
+/// unit-normalized contract. Shared with the feature-gated `ort_backend` module —
+/// this crate root is compiled unconditionally, so `pub(crate)` here is reachable
+/// regardless of whether the `ort-backend` feature is on.
+pub(crate) fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
     let norm = v.iter().map(|&x| x * x).sum::<f32>().sqrt().max(1e-12);
     for x in &mut v {
         *x /= norm;
@@ -119,6 +120,40 @@ pub struct BackendCapabilities {
 }
 
 /// Core inference operations needed by qmd's search pipeline.
+///
+/// Only `embed`, `rerank`, `generate`, and the three `*_model_name` methods are
+/// required — `capabilities`, `embed_batch`, `embed_query`, `embed_passage`,
+/// `embed_batch_passage`, and `release_idle` all have default implementations
+/// (see each method's own doc comment) and only need overriding where a
+/// backend's behavior actually differs from the default.
+///
+/// ```
+/// use rqmd_llm::{BackendCapabilities, InferenceBackend};
+///
+/// struct EchoBackend;
+///
+/// impl InferenceBackend for EchoBackend {
+///     fn capabilities(&self) -> BackendCapabilities {
+///         // Override truthfully — this stub only supports embed.
+///         BackendCapabilities { embed: true, rerank: false, generate: false }
+///     }
+///     fn embed(&mut self, text: &str) -> anyhow::Result<Vec<f32>> {
+///         Ok(vec![text.len() as f32])
+///     }
+///     fn rerank(&mut self, _query: &str, docs: &[&str]) -> anyhow::Result<Vec<f32>> {
+///         Ok(vec![0.0; docs.len()])
+///     }
+///     fn generate(&mut self, _prompt: &str) -> anyhow::Result<String> {
+///         Ok(String::new())
+///     }
+///     fn embed_model_name(&self) -> &str { "echo" }
+///     fn rerank_model_name(&self) -> &str { "echo" }
+///     fn generate_model_name(&self) -> &str { "echo" }
+/// }
+///
+/// let mut backend = EchoBackend;
+/// assert_eq!(backend.embed("hi").unwrap(), vec![2.0]);
+/// ```
 pub trait InferenceBackend: Send {
     /// Which operations this backend actually supports. Default: full support
     /// (embed + rerank + generate), matching `LlamaCppBackend`. Backends that
@@ -659,9 +694,9 @@ pub struct LlamaCppBackend {
 impl LlamaCppBackend {
     /// Download models via hf-hub and initialize. Blocks the current thread.
     pub fn new(mut config: LlamaCppConfig) -> Result<Self> {
-        // Honour RRQMD_FORCE_CPU=1: disable Metal/CUDA offload for both models.
-        // Matches the TS original's RRQMD_FORCE_CPU contract documented in README.
-        let force_cpu = std::env::var("RRQMD_FORCE_CPU")
+        // Honour RQMD_FORCE_CPU=1: disable Metal/CUDA offload for both models.
+        // Matches the TS original's RQMD_FORCE_CPU contract documented in README.
+        let force_cpu = std::env::var("RQMD_FORCE_CPU")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         if force_cpu {
@@ -1100,8 +1135,8 @@ pub use ort_backend::{OrtBackend, OrtConfig, OrtEp};
 
 /// Backend selection. Read by `create_backend()`.
 ///
-///   RRQMD_INFERENCE_BACKEND=llama|ort  (default: llama)
-///   RRQMD_ORT_EP=auto|coreml|cuda|directml|cpu
+///   RQMD_INFERENCE_BACKEND=llama|ort  (default: llama)
+///   RQMD_ORT_EP=auto|coreml|cuda|directml|cpu
 #[derive(Debug, Clone)]
 pub enum BackendKind {
     Llama,
@@ -1111,7 +1146,7 @@ pub enum BackendKind {
 
 impl BackendKind {
     pub fn from_env() -> Self {
-        match std::env::var("RRQMD_INFERENCE_BACKEND")
+        match std::env::var("RQMD_INFERENCE_BACKEND")
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str()
@@ -1157,7 +1192,7 @@ pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
         #[cfg(feature = "ort-backend")]
         BackendKind::Ort => {
             use ort_backend::OrtEp;
-            let ep = std::env::var("RRQMD_ORT_EP")
+            let ep = std::env::var("RQMD_ORT_EP")
                 .ok()
                 .and_then(|s| OrtEp::from_str(&s))
                 .unwrap_or(OrtEp::Auto);
@@ -1177,21 +1212,54 @@ pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
-    // Mutates the shared RRQMD_INFERENCE_BACKEND env var — safe here since no
-    // other test in this crate reads it, but keep any future env-based test
-    // in this same block so ordering stays obvious.
+    // `cargo test` runs tests concurrently on a thread pool within one process,
+    // so being adjacent in this file gives no ordering guarantee by itself.
+    // `#[serial(inference_backend_env)]` is what actually prevents two tests
+    // from racing on the shared RQMD_INFERENCE_BACKEND env var; `EnvVarGuard`
+    // restores the prior value on drop (including on panic) so a failing
+    // assertion can't leak state into whichever test runs next.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
+    #[serial(inference_backend_env)]
     fn backend_kind_from_env_defaults_to_llama_when_unset() {
-        std::env::remove_var("RRQMD_INFERENCE_BACKEND");
+        let _guard = EnvVarGuard::unset("RQMD_INFERENCE_BACKEND");
         assert!(matches!(BackendKind::from_env(), BackendKind::Llama));
     }
 
     #[test]
+    #[serial(inference_backend_env)]
     fn backend_kind_from_env_parses_llama_case_insensitively() {
-        std::env::set_var("RRQMD_INFERENCE_BACKEND", "LLAMA");
+        let _guard = EnvVarGuard::set("RQMD_INFERENCE_BACKEND", "LLAMA");
         assert!(matches!(BackendKind::from_env(), BackendKind::Llama));
-        std::env::remove_var("RRQMD_INFERENCE_BACKEND");
     }
 
     /// This is the exact identity `create_backend(&BackendKind::Llama)` would

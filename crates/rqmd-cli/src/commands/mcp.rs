@@ -20,7 +20,7 @@ pub fn run_mcp(
              index's full-text and semantic search — including `get`, which returns arbitrary \
              indexed file content — with no authentication to anything that can reach \
              {host}:{port}.\n\nIf this is intentional (e.g. a trusted network or container), \
-             pass --allow-non-loopback (or set RRQMD_MCP_ALLOW_NON_LOOPBACK=1)."
+             pass --allow-non-loopback (or set RQMD_MCP_ALLOW_NON_LOOPBACK=1)."
         );
     }
 

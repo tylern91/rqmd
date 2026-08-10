@@ -32,8 +32,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Disable model downloads in CI — integration tests that need models are skipped
-  RQMD_CI: "1"
 
 jobs:
   version-sync:
@@ -87,23 +85,23 @@ jobs:
 
       - name: Clippy (workspace)
         if: matrix.feature-set == 'default'
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Build (default)
         if: matrix.feature-set == 'default'
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
 
       - name: Build (ort-backend)
         if: matrix.feature-set == 'ort-backend'
-        run: cargo build ${{ matrix.cargo-args }}
+        run: cargo build --locked ${{ matrix.cargo-args }}
 
-      - name: Unit tests (lib only, no model downloads)
+      - name: Tests (workspace, incl. integration — no model downloads)
         if: matrix.feature-set == 'default'
-        run: cargo test --workspace --lib
+        run: cargo test --workspace --locked
 
       - name: Search quality eval (BM25, no model required)
         if: matrix.feature-set == 'default'
-        run: cargo run --bin rqmd -- eval --mode bm25
+        run: cargo run --locked --bin rqmd -- eval --mode bm25
 
   build-linux:
     name: Build default (Linux x64)
@@ -136,12 +134,12 @@ jobs:
         env:
           # Force CPU-only llama.cpp build on Linux (no CUDA in free runners)
           LLAMA_METAL: "0"
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
 
-      - name: Unit tests (lib only)
+      - name: Tests (workspace, incl. integration)
         env:
           LLAMA_METAL: "0"
-        run: cargo test --workspace --lib
+        run: cargo test --workspace --locked
 
   dist-binary:
     name: Release binary (macOS arm64)
@@ -166,7 +164,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build dist binary
-        run: cargo build --profile dist -p rqmd-cli
+        run: cargo build --profile dist -p rqmd-cli --locked
 
       - name: Show binary info
         run: |

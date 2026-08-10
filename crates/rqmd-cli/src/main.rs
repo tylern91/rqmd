@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 
 mod commands;
 mod daemon;
@@ -13,15 +13,15 @@ mod store;
 #[command(name = "rqmd", version, about, long_about = None)]
 struct Cli {
     /// Override the index directory (default: ~/.cache/rqmd/)
-    #[arg(long, env = "RRQMD_INDEX_DIR", global = true)]
+    #[arg(long, env = "RQMD_INDEX_DIR", global = true)]
     index_dir: Option<String>,
 
     /// Inference backend: llama (default, GGUF via llama-cpp-2) or ort (ONNX Runtime)
-    #[arg(long, env = "RRQMD_INFERENCE_BACKEND", global = true)]
+    #[arg(long, env = "RQMD_INFERENCE_BACKEND", global = true)]
     backend: Option<String>,
 
     /// ORT execution provider: auto (default), coreml, cuda, directml, cpu
-    #[arg(long, env = "RRQMD_ORT_EP", global = true)]
+    #[arg(long, env = "RQMD_ORT_EP", global = true)]
     ort_ep: Option<String>,
 
     /// Show native model-loading and inference logs (also enabled by RUST_LOG)
@@ -32,54 +32,49 @@ struct Cli {
     command: Commands,
 }
 
+/// Shared `-c/--collection`, `-n`, `--format`, `--full` quartet for the three
+/// search commands (`Query`, `Search`, `Vsearch`) — flattened rather than
+/// repeated on each variant.
+#[derive(Args)]
+struct SearchScopeArgs {
+    /// Scope to a collection (repeatable, OR-matched): -c docs -c notes
+    #[arg(short = 'c', long, action = ArgAction::Append)]
+    collection: Vec<String>,
+    #[arg(short = 'n', default_value = "10")]
+    num: usize,
+    #[arg(long, value_enum, default_value = "cli")]
+    format: format::Format,
+    #[arg(long)]
+    full: bool,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Hybrid search: BM25 + vector + rerank (recommended)
     Query {
         query: String,
-        /// Scope to a collection (repeatable, OR-matched): -c docs -c notes
-        #[arg(short = 'c', long, action = ArgAction::Append)]
-        collection: Vec<String>,
-        #[arg(short = 'n', default_value = "10")]
-        num: usize,
-        #[arg(long, value_enum, default_value = "cli")]
-        format: format::Format,
+        #[command(flatten)]
+        scope: SearchScopeArgs,
         #[arg(long)]
         no_rerank: bool,
-        #[arg(long)]
-        full: bool,
         /// Optional context/intent to steer query expansion and reranking.
         #[arg(long)]
         intent: Option<String>,
         /// Skip the LLM query-expansion / HyDE round-trip (faster; pure hybrid retrieval).
-        #[arg(long, env = "RRQMD_NO_EXPAND")]
+        #[arg(long, env = "RQMD_NO_EXPAND")]
         no_expand: bool,
     },
     /// Full-text keyword search (BM25 only, no LLM)
     Search {
         query: String,
-        /// Scope to a collection (repeatable, OR-matched): -c docs -c notes
-        #[arg(short = 'c', long, action = ArgAction::Append)]
-        collection: Vec<String>,
-        #[arg(short = 'n', default_value = "10")]
-        num: usize,
-        #[arg(long, value_enum, default_value = "cli")]
-        format: format::Format,
-        #[arg(long)]
-        full: bool,
+        #[command(flatten)]
+        scope: SearchScopeArgs,
     },
     /// Vector similarity search (no rerank)
     Vsearch {
         query: String,
-        /// Scope to a collection (repeatable, OR-matched): -c docs -c notes
-        #[arg(short = 'c', long, action = ArgAction::Append)]
-        collection: Vec<String>,
-        #[arg(short = 'n', default_value = "10")]
-        num: usize,
-        #[arg(long, value_enum, default_value = "cli")]
-        format: format::Format,
-        #[arg(long)]
-        full: bool,
+        #[command(flatten)]
+        scope: SearchScopeArgs,
     },
     /// Find documents most similar to an already-indexed one (by path or #docid)
     Similar {
@@ -162,19 +157,19 @@ enum Commands {
         #[arg(long)]
         http: bool,
         /// HTTP port
-        #[arg(long, default_value = "8181", env = "RRQMD_MCP_PORT")]
+        #[arg(long, default_value = "8181", env = "RQMD_MCP_PORT")]
         port: u16,
         /// HTTP bind host. A non-loopback value exposes this index's full-text
         /// and semantic search (and `get`, which returns file content) with no
         /// authentication to anything that can reach it — only use on a
         /// trusted network or container.
-        #[arg(long, default_value = "127.0.0.1", env = "RRQMD_MCP_HOST")]
+        #[arg(long, default_value = "127.0.0.1", env = "RQMD_MCP_HOST")]
         host: String,
         /// Required alongside a non-loopback --host: confirms you understand
         /// this exposes the index with no authentication to anything that can
         /// reach that host/port. Loopback hosts (127.0.0.1/localhost/::1)
         /// never need this.
-        #[arg(long, env = "RRQMD_MCP_ALLOW_NON_LOOPBACK")]
+        #[arg(long, env = "RQMD_MCP_ALLOW_NON_LOOPBACK")]
         allow_non_loopback: bool,
         /// Run as a background daemon (implies --http); daemonize and exit
         #[arg(long)]
@@ -232,8 +227,16 @@ pub enum CollectionCommand {
 
 #[derive(Subcommand)]
 pub enum ContextCommand {
-    /// Add context for a path
-    Add { path: Option<String>, text: String },
+    /// Add context for a path: `context add [path] <text>`.
+    ///
+    /// clap forbids an optional positional before a required one (an
+    /// ambiguous shape it rejects with a debug-assert panic), so the two
+    /// forms are captured as a bounded Vec and split in `context::run`:
+    /// one arg is `<text>` (path defaults to `/`), two are `<path> <text>`.
+    Add {
+        #[arg(num_args = 1..=2, value_names = ["PATH_OR_TEXT", "TEXT"])]
+        args: Vec<String>,
+    },
     /// List all contexts
     List,
     /// Remove context for a path
@@ -263,10 +266,10 @@ fn main() -> Result<()> {
 
     // Propagate CLI flags into env vars so BackendKind::from_env() picks them up.
     if let Some(b) = &cli.backend {
-        std::env::set_var("RRQMD_INFERENCE_BACKEND", b);
+        std::env::set_var("RQMD_INFERENCE_BACKEND", b);
     }
     if let Some(ep) = &cli.ort_ep {
-        std::env::set_var("RRQMD_ORT_EP", ep);
+        std::env::set_var("RQMD_ORT_EP", ep);
     }
 
     // Install a tracing subscriber.  Default behaviour mirrors qmd: native llama.cpp /
@@ -297,7 +300,7 @@ fn main() -> Result<()> {
     if cli.verbose || rust_log_set {
         // Signal to library crates (e.g. rqmd-llm) that verbose mode is on so they
         // can adjust their own native-library log levels accordingly.
-        std::env::set_var("RRQMD_VERBOSE", "1");
+        std::env::set_var("RQMD_VERBOSE", "1");
     }
 
     let index_dir = store::resolve_index_dir(cli.index_dir.as_deref())?;
@@ -305,51 +308,38 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Query {
             query,
-            collection,
-            num,
-            format,
+            scope,
             no_rerank,
-            full,
             intent,
             no_expand,
         } => commands::query::run_query(
             &index_dir,
             &query,
-            intent.as_deref(),
-            collections_filter(&collection),
-            num,
-            format,
-            no_rerank,
-            full,
-            no_expand,
+            commands::query::QueryOptions {
+                intent: intent.as_deref(),
+                collections: collections_filter(&scope.collection),
+                num: scope.num,
+                fmt: scope.format,
+                no_rerank,
+                full: scope.full,
+                no_expand,
+            },
         ),
-        Commands::Search {
-            query,
-            collection,
-            num,
-            format,
-            full,
-        } => commands::query::run_search(
+        Commands::Search { query, scope } => commands::query::run_search(
             &index_dir,
             &query,
-            collections_filter(&collection),
-            num,
-            format,
-            full,
+            collections_filter(&scope.collection),
+            scope.num,
+            scope.format,
+            scope.full,
         ),
-        Commands::Vsearch {
-            query,
-            collection,
-            num,
-            format,
-            full,
-        } => commands::query::run_vsearch(
+        Commands::Vsearch { query, scope } => commands::query::run_vsearch(
             &index_dir,
             &query,
-            collections_filter(&collection),
-            num,
-            format,
-            full,
+            collections_filter(&scope.collection),
+            scope.num,
+            scope.format,
+            scope.full,
         ),
         Commands::Similar { path, num, format } => {
             commands::similar::run_similar(&index_dir, &path, num, format)

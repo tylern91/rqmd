@@ -7,42 +7,83 @@
 The search engine. Key public types:
 
 ```rust
-use rqmd_core::{Store, StoreConfig, SearchResult};
+use rqmd_core::{SearchResult, Store, StoreConfig};
+use rqmd_llm::InferenceBackend;
 
-let store = Store::open(config, backend)?;
+fn example(config: StoreConfig, backend: Box<dyn InferenceBackend>) -> anyhow::Result<()> {
+    let mut store = Store::open(config, backend)?;
 
-// Index a document
-store.index_document("collection", "rel/path.md", "Title", &body)?;
+    // Index a document
+    store.index_document("collection", "rel/path.md", "Title", "body text")?;
 
-// Hybrid search: BM25 + vector + RRF + rerank
-let results: Vec<SearchResult> = store.hybrid_query("search terms", 10, None, false)?;
+    // Hybrid search: BM25 + vector + RRF + rerank
+    let results: Vec<SearchResult> =
+        store.hybrid_query("search terms", None, 10, None, false, false)?;
 
-// BM25 keyword search
-let results = store.search_fts("keyword", 10, None)?;
+    // BM25 keyword search
+    let results = store.search_fts("keyword", 10, None)?;
 
-// Vector similarity search
-let results = store.search_vec("semantic query", 10, None)?;
+    // Vector similarity search
+    let results = store.search_vec("semantic query", 10, None)?;
+    let _ = results;
+
+    Ok(())
+}
 ```
+
+`hybrid_query`'s parameters, in order: `query`, `intent` (optional context for
+expansion/reranking — `None` if unavailable), `limit`, `collection` (`None`
+searches every default-included collection), `skip_rerank`, `no_expand` (skips
+the LLM query-expansion round-trip). `Store::open` and every method that
+mutates the index (`index_document`, `hybrid_query`, `search_vec`) take
+`&mut self`; `search_fts` alone takes `&self`.
+
+This example is kept honest by an identical `no_run` doctest on `Store` itself
+(`crates/rqmd-core/src/store.rs`), compiled by `cargo test --doc` — a future
+signature change fails that build before it can drift from this page.
 
 ## `rqmd-llm`
 
-Inference backend abstraction. Implement `InferenceBackend` to add a new backend:
+Inference backend abstraction. Implement `InferenceBackend` to add a new
+backend. Only `embed`, `rerank`, `generate`, and the three `*_model_name`
+methods are required; `capabilities`, `embed_batch`, `embed_query`,
+`embed_passage`, `embed_batch_passage`, and `release_idle` all have default
+implementations and only need overriding where a backend's behavior actually
+differs from the default (e.g. `OrtBackend` overrides `capabilities` to report
+embed-only support).
 
 ```rust
-use rqmd_llm::{InferenceBackend, BackendKind, create_backend};
+use rqmd_llm::{BackendCapabilities, BackendKind, InferenceBackend, create_backend};
 
-pub trait InferenceBackend: Send {
-    fn embed(&mut self, text: &str) -> Result<Vec<f32>>;
-    fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
-    fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>>;
-    fn generate(&mut self, prompt: &str) -> Result<String>;
-    fn embed_model_name(&self) -> &str;
-    fn rerank_model_name(&self) -> &str;
+struct EchoBackend;
+
+impl InferenceBackend for EchoBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        // Override truthfully — this stub only supports embed.
+        BackendCapabilities { embed: true, rerank: false, generate: false }
+    }
+    fn embed(&mut self, text: &str) -> anyhow::Result<Vec<f32>> {
+        Ok(vec![text.len() as f32])
+    }
+    fn rerank(&mut self, _query: &str, docs: &[&str]) -> anyhow::Result<Vec<f32>> {
+        Ok(vec![0.0; docs.len()])
+    }
+    fn generate(&mut self, _prompt: &str) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+    fn embed_model_name(&self) -> &str { "echo" }
+    fn rerank_model_name(&self) -> &str { "echo" }
+    fn generate_model_name(&self) -> &str { "echo" }
 }
 
-// Factory: reads RRQMD_INFERENCE_BACKEND + RRQMD_ORT_EP from env
+// Factory: reads RQMD_INFERENCE_BACKEND + RQMD_ORT_EP from env
 let backend: Box<dyn InferenceBackend> = create_backend(&BackendKind::from_env())?;
 ```
+
+This example is a real, executable doctest on `InferenceBackend` itself
+(`crates/rqmd-llm/src/lib.rs`) — if a future change adds a required method,
+`EchoBackend` stops compiling and `cargo test --doc` catches it immediately,
+rather than this page silently going stale.
 
 All embeddings are returned as **unit-normalized f32 vectors** (L2 norm = 1.0).
 Cosine similarity is therefore equivalent to dot product.

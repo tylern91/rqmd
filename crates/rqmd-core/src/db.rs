@@ -162,6 +162,24 @@ pub fn get_content(conn: &Connection, hash: &str) -> Result<Option<String>> {
 
 // ── Document CRUD ─────────────────────────────────────────────────────────────
 
+/// Column list shared by every query that hydrates a full `Document` — keeps
+/// column order in sync with `map_document`'s field order across call sites.
+const DOC_COLUMNS: &str = "id, collection, path, title, hash, active";
+
+/// Row mapper shared by every query selecting `DOC_COLUMNS` (optionally with
+/// a table alias, and optionally with trailing columns beyond index 5 — extra
+/// columns are simply ignored).
+fn map_document(row: &rusqlite::Row) -> rusqlite::Result<Document> {
+    Ok(Document {
+        id: row.get(0)?,
+        collection: row.get(1)?,
+        path: row.get(2)?,
+        title: row.get(3)?,
+        hash: row.get(4)?,
+        active: row.get::<_, i64>(5)? != 0,
+    })
+}
+
 /// Insert or update a document record. Returns the document's stable row id.
 ///
 /// Uses `RETURNING id` rather than `last_insert_rowid()`: on the `ON CONFLICT
@@ -203,18 +221,9 @@ pub fn get_document_by_filepath(
     path: &str,
 ) -> Result<Option<Document>> {
     conn.query_row(
-        "SELECT id, collection, path, title, hash, active FROM documents WHERE collection=?1 AND path=?2",
+        &format!("SELECT {DOC_COLUMNS} FROM documents WHERE collection=?1 AND path=?2"),
         params![collection, path],
-        |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        },
+        map_document,
     )
     .optional()
     .context("get document")
@@ -222,18 +231,9 @@ pub fn get_document_by_filepath(
 
 pub fn get_document_by_id(conn: &Connection, id: i64) -> Result<Option<Document>> {
     conn.query_row(
-        "SELECT id, collection, path, title, hash, active FROM documents WHERE id=?1",
+        &format!("SELECT {DOC_COLUMNS} FROM documents WHERE id=?1"),
         params![id],
-        |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        },
+        map_document,
     )
     .optional()
     .context("get document by id")
@@ -259,19 +259,12 @@ fn escape_like_pattern(s: &str) -> String {
 pub fn get_document_by_docid_prefix(conn: &Connection, docid: &str) -> Result<Option<Document>> {
     let pattern = format!("{}%", escape_like_pattern(docid));
     conn.query_row(
-        "SELECT id, collection, path, title, hash, active FROM documents \
-         WHERE hash LIKE ?1 ESCAPE '\\' AND active=1 ORDER BY collection, path LIMIT 1",
+        &format!(
+            "SELECT {DOC_COLUMNS} FROM documents \
+             WHERE hash LIKE ?1 ESCAPE '\\' AND active=1 ORDER BY collection, path LIMIT 1"
+        ),
         params![pattern],
-        |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        },
+        map_document,
     )
     .optional()
     .context("get document by docid")
@@ -292,37 +285,26 @@ pub fn list_documents_multi(
     conn: &Connection,
     collections: Option<&[String]>,
 ) -> Result<Vec<Document>> {
-    let map_row = |row: &rusqlite::Row| -> rusqlite::Result<Document> {
-        Ok(Document {
-            id: row.get(0)?,
-            collection: row.get(1)?,
-            path: row.get(2)?,
-            title: row.get(3)?,
-            hash: row.get(4)?,
-            active: row.get::<_, i64>(5)? != 0,
-        })
-    };
-
     match collections {
         Some(cols) if !cols.is_empty() => {
             let placeholders = vec!["?"; cols.len()].join(",");
             let sql = format!(
-                "SELECT id, collection, path, title, hash, active FROM documents \
+                "SELECT {DOC_COLUMNS} FROM documents \
                  WHERE collection IN ({placeholders}) AND active=1 ORDER BY collection, path"
             );
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
-                .query_map(params_from_iter(cols.iter()), map_row)?
+                .query_map(params_from_iter(cols.iter()), map_document)?
                 .collect::<rusqlite::Result<_>>()?;
             Ok(rows)
         }
         _ => {
-            let mut stmt = conn.prepare(
-                "SELECT id, collection, path, title, hash, active FROM documents \
-                 WHERE active=1 ORDER BY collection, path",
-            )?;
+            let sql = format!(
+                "SELECT {DOC_COLUMNS} FROM documents WHERE active=1 ORDER BY collection, path"
+            );
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
-                .query_map([], map_row)?
+                .query_map([], map_document)?
                 .collect::<rusqlite::Result<_>>()?;
             Ok(rows)
         }
@@ -355,10 +337,7 @@ pub fn find_documents_by_needles(
         params.extend(std::iter::repeat_n(needle.to_string(), 4));
     }
 
-    let mut sql = format!(
-        "SELECT id, collection, path, title, hash, active FROM documents \
-         WHERE active=1 AND ({clauses})"
-    );
+    let mut sql = format!("SELECT {DOC_COLUMNS} FROM documents WHERE active=1 AND ({clauses})");
     if let Some(cols) = collections.filter(|c| !c.is_empty()) {
         let placeholders = vec!["?"; cols.len()].join(",");
         sql.push_str(&format!(" AND collection IN ({placeholders})"));
@@ -368,16 +347,7 @@ pub fn find_documents_by_needles(
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(params_from_iter(params.iter()), |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        })?
+        .query_map(params_from_iter(params.iter()), map_document)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
@@ -500,19 +470,7 @@ pub fn doc_for_vid(conn: &Connection, vid: u64) -> Result<Option<(Document, Stri
         LIMIT 1
         "#,
         params![vid as i64],
-        |row| {
-            Ok((
-                Document {
-                    id: row.get(0)?,
-                    collection: row.get(1)?,
-                    path: row.get(2)?,
-                    title: row.get(3)?,
-                    hash: row.get(4)?,
-                    active: row.get::<_, i64>(5)? != 0,
-                },
-                row.get::<_, String>(6)?,
-            ))
-        },
+        |row| Ok((map_document(row)?, row.get::<_, String>(6)?)),
     )
     .optional()
     .context("doc_for_vid")
@@ -533,16 +491,7 @@ pub fn doc_for_vid_meta(conn: &Connection, vid: u64) -> Result<Option<Document>>
         LIMIT 1
         "#,
         params![vid as i64],
-        |row| {
-            Ok(Document {
-                id: row.get(0)?,
-                collection: row.get(1)?,
-                path: row.get(2)?,
-                title: row.get(3)?,
-                hash: row.get(4)?,
-                active: row.get::<_, i64>(5)? != 0,
-            })
-        },
+        map_document,
     )
     .optional()
     .context("doc_for_vid_meta")
@@ -680,11 +629,16 @@ pub fn deactivate_missing_documents(
         .filter(|p| !current_paths.contains(p))
         .collect();
 
-    for path in &missing {
-        conn.execute(
-            "UPDATE documents SET active = 0 WHERE collection = ?1 AND path = ?2",
-            params![collection, path],
-        )?;
+    // SQLite caps bound parameters at 999 by default; chunk so the collection
+    // param plus each chunk's paths always stays comfortably under that limit.
+    const CHUNK_SIZE: usize = 500;
+    for chunk in missing.chunks(CHUNK_SIZE) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "UPDATE documents SET active = 0 WHERE collection = ? AND path IN ({placeholders})"
+        );
+        let bind_values = std::iter::once(collection).chain(chunk.iter().map(String::as_str));
+        conn.execute(&sql, params_from_iter(bind_values))?;
     }
 
     Ok(missing)
@@ -701,27 +655,32 @@ pub fn deactivate_missing_documents(
 /// the caller can sweep the matching Tantivy entries — this module has no
 /// Tantivy handle.
 pub fn purge_collection(conn: &Connection, name: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT path, hash FROM documents WHERE collection = ?1")?;
-    let rows: Vec<(String, String)> = stmt
-        .query_map(params![name], |row| Ok((row.get(0)?, row.get(1)?)))?
+    let mut stmt = conn.prepare("SELECT path FROM documents WHERE collection = ?1")?;
+    let filepaths: Vec<String> = stmt
+        .query_map(params![name], |row| {
+            let path: String = row.get(0)?;
+            Ok(format!("{name}/{path}"))
+        })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
-    let filepaths: Vec<String> = rows.iter().map(|(p, _)| format!("{name}/{p}")).collect();
-
     conn.execute("DELETE FROM documents WHERE collection = ?1", params![name])?;
 
-    for (_, hash) in &rows {
-        let still_referenced: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM documents WHERE hash = ?1",
-            params![hash],
-            |row| row.get(0),
-        )?;
-        if still_referenced == 0 {
-            conn.execute("DELETE FROM content_vectors WHERE hash = ?1", params![hash])?;
-            conn.execute("DELETE FROM content WHERE hash = ?1", params![hash])?;
-        }
-    }
+    // Content is deduplicated globally by hash, so a hash only becomes
+    // reclaimable once no document anywhere (any collection, active or not
+    // — soft-deleted rows still count as referencing it) points to it
+    // anymore. Sweeping the whole `NOT IN` set in one statement instead of
+    // re-checking each formerly-owned hash individually is both fewer round
+    // trips and exactly equivalent: a hash this collection didn't touch was
+    // already referenced before and stays referenced now.
+    conn.execute(
+        "DELETE FROM content_vectors WHERE hash NOT IN (SELECT hash FROM documents)",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM content WHERE hash NOT IN (SELECT hash FROM documents)",
+        [],
+    )?;
 
     conn.execute(
         "DELETE FROM store_collections WHERE name = ?1",
@@ -807,6 +766,23 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
         params![key, value],
     )?;
     Ok(())
+}
+
+pub fn delete_config(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM store_config WHERE key=?1", params![key])?;
+    Ok(())
+}
+
+/// List all `store_config` rows whose key starts with `prefix`, ordered by key.
+pub fn list_config_by_prefix(conn: &Connection, prefix: &str) -> Result<Vec<(String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT key, value FROM store_config WHERE key LIKE ?1 ORDER BY key")?;
+    let like_pattern = format!("{prefix}%");
+    let rows = stmt
+        .query_map(params![like_pattern], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("list config by prefix")?;
+    Ok(rows)
 }
 
 /// Build the `store_config` key under which a collection's context is stored.

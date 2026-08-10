@@ -51,20 +51,27 @@ silently colliding with the existing listener.
 
 ## Binding beyond localhost
 
-`--host` (default `127.0.0.1`, env `RRQMD_MCP_HOST`) controls the bind
+`--host` (default `127.0.0.1`, env `RQMD_MCP_HOST`) controls the bind
 address for `--http`/`--daemon` mode; `--port` (default `8181`, env
-`RRQMD_MCP_PORT`) controls the port. Binding to anything other than a
-loopback address prints this warning to stderr:
+`RQMD_MCP_PORT`) controls the port. `127.0.0.1`, `localhost`, and `::1` count
+as loopback; anything else is non-loopback.
 
-> WARNING: binding to {host} exposes this index's full-text and semantic
-> search — including `get`, which returns arbitrary indexed file content —
-> with no authentication to anything that can reach {host}:{port}. Only do
-> this on a trusted network or container.
+Passing a non-loopback `--host` to `--http`/`--daemon` **refuses to start**
+with an error, not just a warning:
+
+> refusing to bind the MCP server to non-loopback host {host}: this exposes
+> the index's full-text and semantic search — including `get`, which returns
+> arbitrary indexed file content — with no authentication to anything that
+> can reach {host}:{port}.
+>
+> If this is intentional (e.g. a trusted network or container), pass
+> `--allow-non-loopback` (or set `RQMD_MCP_ALLOW_NON_LOOPBACK=1`).
 
 rqmd ships **no authentication** for the HTTP/MCP listener at all — anyone
 who can reach the bound host:port can query and read every indexed
-document. Treat `--host 0.0.0.0` (or any non-loopback address) as
-production-network-exposure, not a convenience flag.
+document. Treat `--host 0.0.0.0` (or any other non-loopback address) plus
+`--allow-non-loopback` as production-network-exposure, not a convenience
+flag. See [SECURITY.md](../SECURITY.md) for the full security posture.
 
 ## MCP tool parameters
 

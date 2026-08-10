@@ -28,16 +28,16 @@ type McpHttpService = StreamableHttpService<RqmdServer, LocalSessionManager>;
 /// what would let a handful of concurrent requests exhaust host memory.
 const MAX_MCP_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
 
-/// Default `RRQMD_MODEL_IDLE_TTL` in seconds — how long a GGUF model may sit
+/// Default `RQMD_MODEL_IDLE_TTL` in seconds — how long a GGUF model may sit
 /// unused before the periodic sweep releases it. `0` disables the sweep.
 const DEFAULT_MODEL_IDLE_TTL_SECS: u64 = 300;
 
 /// Spawn a background task that periodically releases GGUF models idle for
-/// longer than `RRQMD_MODEL_IDLE_TTL` seconds (default 300; `0` disables).
+/// longer than `RQMD_MODEL_IDLE_TTL` seconds (default 300; `0` disables).
 /// Without this, query expansion (on by default) permanently ratchets a
 /// long-lived daemon up by the ~2 GB generate model the first time it fires.
 fn spawn_idle_eviction(server: RqmdServer) {
-    let ttl_secs = std::env::var("RRQMD_MODEL_IDLE_TTL")
+    let ttl_secs = std::env::var("RQMD_MODEL_IDLE_TTL")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_MODEL_IDLE_TTL_SECS);
