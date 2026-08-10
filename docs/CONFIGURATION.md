@@ -66,15 +66,15 @@ subsequent `rqmd update` run — you only need to specify them once.
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `RRQMD_INDEX_DIR` | path | `~/.cache/rqmd/` (Linux) / `~/Library/Caches/rqmd/` (macOS) | Index storage directory |
-| `RRQMD_INFERENCE_BACKEND` | `llama`, `ort` | `llama` | Inference backend |
-| `RRQMD_ORT_EP` | `auto`, `coreml`, `cuda`, `directml`, `cpu` | `auto` | ONNX Runtime EP |
-| `RRQMD_FORCE_CPU` | `1` | *(unset)* | Disable GPU layers in LlamaCppBackend |
-| `RRQMD_MCP_HOST` | host/IP | `127.0.0.1` | Bind address for `rqmd mcp --http`/`--daemon` |
-| `RRQMD_MCP_PORT` | port number | `8181` | Bind port for `rqmd mcp --http`/`--daemon` |
-| `RRQMD_MODEL_IDLE_TTL` | seconds | `300` | MCP daemon: unload an idle model after this many seconds of no use; `0` disables eviction |
-| `RRQMD_NO_EXPAND` | `1` | *(unset)* | Equivalent to always passing `--no-expand` to `rqmd query` |
-| `RRQMD_VERBOSE` | `1` | *(unset)* | Verbose ORT backend logging |
+| `RQMD_INDEX_DIR` | path | `~/.cache/rqmd/` (Linux) / `~/Library/Caches/rqmd/` (macOS) | Index storage directory |
+| `RQMD_INFERENCE_BACKEND` | `llama`, `ort` | `llama` | Inference backend |
+| `RQMD_ORT_EP` | `auto`, `coreml`, `cuda`, `directml`, `cpu` | `auto` | ONNX Runtime EP |
+| `RQMD_FORCE_CPU` | `1` | *(unset)* | Disable GPU layers in LlamaCppBackend |
+| `RQMD_MCP_HOST` | host/IP | `127.0.0.1` | Bind address for `rqmd mcp --http`/`--daemon` |
+| `RQMD_MCP_PORT` | port number | `8181` | Bind port for `rqmd mcp --http`/`--daemon` |
+| `RQMD_MODEL_IDLE_TTL` | seconds | `300` | MCP daemon: unload an idle model after this many seconds of no use; `0` disables eviction |
+| `RQMD_NO_EXPAND` | `1` | *(unset)* | Equivalent to always passing `--no-expand` to `rqmd query` |
+| `RQMD_VERBOSE` | `1` | *(unset)* | Verbose ORT backend logging |
 
 ---
 
@@ -90,4 +90,4 @@ Paths below use the Linux default; on macOS the base is `~/Library/Caches/` inst
 | Model cache (HuggingFace) | `~/.cache/huggingface/hub/` |
 | Project-local index | `.rqmd/` (created by `rqmd init`) |
 
-Override the root index directory with `--index-dir <path>` or `$RRQMD_INDEX_DIR`.
+Override the root index directory with `--index-dir <path>` or `$RQMD_INDEX_DIR`.

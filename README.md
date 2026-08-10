@@ -139,7 +139,7 @@ any change that touches the search path:
 cargo run -p rqmd-cli -- eval --mode bm25 --verbose
 
 # Full hybrid quality (requires models — run before search-path changes)
-RRQMD_INFERENCE_BACKEND=llama cargo run -p rqmd-cli -- eval --mode hybrid
+RQMD_INFERENCE_BACKEND=llama cargo run -p rqmd-cli -- eval --mode hybrid
 
 # Embed throughput (compare backends)
 cargo run -p rqmd-cli -- bench -n 5

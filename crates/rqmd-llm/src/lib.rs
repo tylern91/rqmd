@@ -5,8 +5,8 @@
 //!   ort-backend  — OrtBackend via ONNX Runtime (CoreML/CUDA/DirectML/CPU)
 //!
 //! Backend selection at runtime (read by `create_backend()`):
-//!   RRQMD_INFERENCE_BACKEND=llama|ort   (default: llama)
-//!   RRQMD_ORT_EP=auto|coreml|cuda|directml|cpu
+//!   RQMD_INFERENCE_BACKEND=llama|ort   (default: llama)
+//!   RQMD_ORT_EP=auto|coreml|cuda|directml|cpu
 //!
 //! All API shapes validated against llama-cpp-2 v0.1.150 in spike-inference.
 //! Critical gotchas (all confirmed by spike):
@@ -19,7 +19,7 @@
 //!
 //! Each of the three GGUF models loads lazily on first use (`ensure_embed` /
 //! `ensure_rerank` / `ensure_generate`) and is evicted after
-//! `RRQMD_MODEL_IDLE_TTL` seconds of inactivity (default 300; `0` disables) —
+//! `RQMD_MODEL_IDLE_TTL` seconds of inactivity (default 300; `0` disables) —
 //! see `release_idle`. This keeps an idle daemon from permanently holding the
 //! ~2 GB generate model resident once query expansion (on by default) has
 //! triggered it once.
@@ -660,9 +660,9 @@ pub struct LlamaCppBackend {
 impl LlamaCppBackend {
     /// Download models via hf-hub and initialize. Blocks the current thread.
     pub fn new(mut config: LlamaCppConfig) -> Result<Self> {
-        // Honour RRQMD_FORCE_CPU=1: disable Metal/CUDA offload for both models.
-        // Matches the TS original's RRQMD_FORCE_CPU contract documented in README.
-        let force_cpu = std::env::var("RRQMD_FORCE_CPU")
+        // Honour RQMD_FORCE_CPU=1: disable Metal/CUDA offload for both models.
+        // Matches the TS original's RQMD_FORCE_CPU contract documented in README.
+        let force_cpu = std::env::var("RQMD_FORCE_CPU")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         if force_cpu {
@@ -1101,8 +1101,8 @@ pub use ort_backend::{OrtBackend, OrtConfig, OrtEp};
 
 /// Backend selection. Read by `create_backend()`.
 ///
-///   RRQMD_INFERENCE_BACKEND=llama|ort  (default: llama)
-///   RRQMD_ORT_EP=auto|coreml|cuda|directml|cpu
+///   RQMD_INFERENCE_BACKEND=llama|ort  (default: llama)
+///   RQMD_ORT_EP=auto|coreml|cuda|directml|cpu
 #[derive(Debug, Clone)]
 pub enum BackendKind {
     Llama,
@@ -1112,7 +1112,7 @@ pub enum BackendKind {
 
 impl BackendKind {
     pub fn from_env() -> Self {
-        match std::env::var("RRQMD_INFERENCE_BACKEND")
+        match std::env::var("RQMD_INFERENCE_BACKEND")
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str()
@@ -1158,7 +1158,7 @@ pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
         #[cfg(feature = "ort-backend")]
         BackendKind::Ort => {
             use ort_backend::OrtEp;
-            let ep = std::env::var("RRQMD_ORT_EP")
+            let ep = std::env::var("RQMD_ORT_EP")
                 .ok()
                 .and_then(|s| OrtEp::from_str(&s))
                 .unwrap_or(OrtEp::Auto);
@@ -1183,7 +1183,7 @@ mod tests {
     // `cargo test` runs tests concurrently on a thread pool within one process,
     // so being adjacent in this file gives no ordering guarantee by itself.
     // `#[serial(inference_backend_env)]` is what actually prevents two tests
-    // from racing on the shared RRQMD_INFERENCE_BACKEND env var; `EnvVarGuard`
+    // from racing on the shared RQMD_INFERENCE_BACKEND env var; `EnvVarGuard`
     // restores the prior value on drop (including on panic) so a failing
     // assertion can't leak state into whichever test runs next.
     struct EnvVarGuard {
@@ -1217,14 +1217,14 @@ mod tests {
     #[test]
     #[serial(inference_backend_env)]
     fn backend_kind_from_env_defaults_to_llama_when_unset() {
-        let _guard = EnvVarGuard::unset("RRQMD_INFERENCE_BACKEND");
+        let _guard = EnvVarGuard::unset("RQMD_INFERENCE_BACKEND");
         assert!(matches!(BackendKind::from_env(), BackendKind::Llama));
     }
 
     #[test]
     #[serial(inference_backend_env)]
     fn backend_kind_from_env_parses_llama_case_insensitively() {
-        let _guard = EnvVarGuard::set("RRQMD_INFERENCE_BACKEND", "LLAMA");
+        let _guard = EnvVarGuard::set("RQMD_INFERENCE_BACKEND", "LLAMA");
         assert!(matches!(BackendKind::from_env(), BackendKind::Llama));
     }
 

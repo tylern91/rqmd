@@ -120,8 +120,8 @@ impl OrtBackend {
         let ep = resolve_ep(config.ep);
 
         // Cap ORT native logging. Default: Warning (suppress Info/Verbose model-loader
-        // noise). With RRQMD_VERBOSE=1 (set by --verbose), allow Verbose output.
-        let ort_log_level = if std::env::var("RRQMD_VERBOSE").is_ok() {
+        // noise). With RQMD_VERBOSE=1 (set by --verbose), allow Verbose output.
+        let ort_log_level = if std::env::var("RQMD_VERBOSE").is_ok() {
             ort::logging::LogLevel::Verbose
         } else {
             ort::logging::LogLevel::Warning

@@ -38,9 +38,9 @@
 Global flags (before the subcommand):
 
 ```
---index-dir <path>       Override index directory ($RRQMD_INDEX_DIR)
---backend llama|ort      Inference backend ($RRQMD_INFERENCE_BACKEND)
---ort-ep auto|coreml|cuda|directml|cpu   ORT execution provider ($RRQMD_ORT_EP)
+--index-dir <path>       Override index directory ($RQMD_INDEX_DIR)
+--backend llama|ort      Inference backend ($RQMD_INFERENCE_BACKEND)
+--ort-ep auto|coreml|cuda|directml|cpu   ORT execution provider ($RQMD_ORT_EP)
 ```
 
 ---
@@ -59,7 +59,7 @@ their respective single-mode search only.
 | `--intent <text>` | *(none)* | Background context to steer expansion and reranking |
 | `-n <num>` | `10` | Number of results to return |
 | `-c/--collection <name>` | *(all)* | Scope to a collection (repeatable, OR-matched) |
-| `--no-expand` | off | Skip LLM query expansion; search the query text as-is (env: `RRQMD_NO_EXPAND`) |
+| `--no-expand` | off | Skip LLM query expansion; search the query text as-is (env: `RQMD_NO_EXPAND`) |
 | `--no-rerank` | off | Skip cross-encoder reranking (expansion still runs) |
 | `--full` | off | Return full document bodies instead of snippets |
 | `--format <fmt>` | `cli` | Output format — see below |

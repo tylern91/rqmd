@@ -51,9 +51,9 @@ silently colliding with the existing listener.
 
 ## Binding beyond localhost
 
-`--host` (default `127.0.0.1`, env `RRQMD_MCP_HOST`) controls the bind
+`--host` (default `127.0.0.1`, env `RQMD_MCP_HOST`) controls the bind
 address for `--http`/`--daemon` mode; `--port` (default `8181`, env
-`RRQMD_MCP_PORT`) controls the port. Binding to anything other than a
+`RQMD_MCP_PORT`) controls the port. Binding to anything other than a
 loopback address prints this warning to stderr:
 
 > WARNING: binding to {host} exposes this index's full-text and semantic

@@ -40,7 +40,7 @@ pub trait InferenceBackend: Send {
     fn rerank_model_name(&self) -> &str;
 }
 
-// Factory: reads RRQMD_INFERENCE_BACKEND + RRQMD_ORT_EP from env
+// Factory: reads RQMD_INFERENCE_BACKEND + RQMD_ORT_EP from env
 let backend: Box<dyn InferenceBackend> = create_backend(&BackendKind::from_env())?;
 ```
 

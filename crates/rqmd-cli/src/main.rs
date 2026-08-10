@@ -13,15 +13,15 @@ mod store;
 #[command(name = "rqmd", version, about, long_about = None)]
 struct Cli {
     /// Override the index directory (default: ~/.cache/rqmd/)
-    #[arg(long, env = "RRQMD_INDEX_DIR", global = true)]
+    #[arg(long, env = "RQMD_INDEX_DIR", global = true)]
     index_dir: Option<String>,
 
     /// Inference backend: llama (default, GGUF via llama-cpp-2) or ort (ONNX Runtime)
-    #[arg(long, env = "RRQMD_INFERENCE_BACKEND", global = true)]
+    #[arg(long, env = "RQMD_INFERENCE_BACKEND", global = true)]
     backend: Option<String>,
 
     /// ORT execution provider: auto (default), coreml, cuda, directml, cpu
-    #[arg(long, env = "RRQMD_ORT_EP", global = true)]
+    #[arg(long, env = "RQMD_ORT_EP", global = true)]
     ort_ep: Option<String>,
 
     /// Show native model-loading and inference logs (also enabled by RUST_LOG)
@@ -61,7 +61,7 @@ enum Commands {
         #[arg(long)]
         intent: Option<String>,
         /// Skip the LLM query-expansion / HyDE round-trip (faster; pure hybrid retrieval).
-        #[arg(long, env = "RRQMD_NO_EXPAND")]
+        #[arg(long, env = "RQMD_NO_EXPAND")]
         no_expand: bool,
     },
     /// Full-text keyword search (BM25 only, no LLM)
@@ -157,19 +157,19 @@ enum Commands {
         #[arg(long)]
         http: bool,
         /// HTTP port
-        #[arg(long, default_value = "8181", env = "RRQMD_MCP_PORT")]
+        #[arg(long, default_value = "8181", env = "RQMD_MCP_PORT")]
         port: u16,
         /// HTTP bind host. A non-loopback value exposes this index's full-text
         /// and semantic search (and `get`, which returns file content) with no
         /// authentication to anything that can reach it — only use on a
         /// trusted network or container.
-        #[arg(long, default_value = "127.0.0.1", env = "RRQMD_MCP_HOST")]
+        #[arg(long, default_value = "127.0.0.1", env = "RQMD_MCP_HOST")]
         host: String,
         /// Required alongside a non-loopback --host: confirms you understand
         /// this exposes the index with no authentication to anything that can
         /// reach that host/port. Loopback hosts (127.0.0.1/localhost/::1)
         /// never need this.
-        #[arg(long, env = "RRQMD_MCP_ALLOW_NON_LOOPBACK")]
+        #[arg(long, env = "RQMD_MCP_ALLOW_NON_LOOPBACK")]
         allow_non_loopback: bool,
         /// Run as a background daemon (implies --http); daemonize and exit
         #[arg(long)]
@@ -266,10 +266,10 @@ fn main() -> Result<()> {
 
     // Propagate CLI flags into env vars so BackendKind::from_env() picks them up.
     if let Some(b) = &cli.backend {
-        std::env::set_var("RRQMD_INFERENCE_BACKEND", b);
+        std::env::set_var("RQMD_INFERENCE_BACKEND", b);
     }
     if let Some(ep) = &cli.ort_ep {
-        std::env::set_var("RRQMD_ORT_EP", ep);
+        std::env::set_var("RQMD_ORT_EP", ep);
     }
 
     // Install a tracing subscriber.  Default behaviour mirrors qmd: native llama.cpp /
@@ -300,7 +300,7 @@ fn main() -> Result<()> {
     if cli.verbose || rust_log_set {
         // Signal to library crates (e.g. rqmd-llm) that verbose mode is on so they
         // can adjust their own native-library log levels accordingly.
-        std::env::set_var("RRQMD_VERBOSE", "1");
+        std::env::set_var("RQMD_VERBOSE", "1");
     }
 
     let index_dir = store::resolve_index_dir(cli.index_dir.as_deref())?;
