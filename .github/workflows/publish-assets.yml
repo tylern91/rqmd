@@ -1,0 +1,271 @@
+name: publish-assets
+# Builds release binaries, syncs the Homebrew tap, and (optionally) refreshes
+# release notes for an EXISTING tag.
+#
+# Two triggers share one job graph on purpose:
+#   - workflow_call:    invoked by release.yml right after it cuts a new tag.
+#   - workflow_dispatch: manual recovery for a tag whose automated run died
+#                        after tagging but before these jobs ran (e.g. v0.11.0,
+#                        which hit a bump-label escalation bug in release.yml
+#                        that's since been fixed — see PR #52 — but left this
+#                        workflow with no way to finish the job after the fact).
+#
+# `inputs.*` resolves identically regardless of which trigger fired, which is
+# what lets a single set of jobs serve both call sites.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to publish assets for, e.g. v0.11.0"
+        required: true
+        type: string
+      refresh_notes:
+        description: "Re-render release notes from CHANGELOG with real asset digests"
+        type: boolean
+        default: true
+      sync_homebrew:
+        description: "Push the rendered formula to the Homebrew tap"
+        type: boolean
+        default: true
+      label:
+        description: "major|minor|patch — informational, passed through to release notes"
+        type: string
+        default: patch
+      breaking:
+        description: "true|false — prepends a breaking-change callout to release notes"
+        type: string
+        default: "false"
+      prev:
+        description: "Previous release tag, for the Full-Changelog link. Resolved automatically if omitted."
+        type: string
+        default: ""
+      pr_number:
+        description: "PR number the release came from, for the Migration-section lookup"
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish assets for, e.g. v0.11.0"
+        required: true
+        type: string
+      refresh_notes:
+        description: >
+          Re-render release notes from CHANGELOG. Leave off for a recovery run
+          on a tag whose commit range collapses to a single chore(release)
+          commit — see stamp-changelog-refs.sh's chore(release) filter, which
+          would misattribute every bullet to the wrong PR in that case.
+        type: boolean
+        default: false
+      sync_homebrew:
+        description: "Push the rendered formula to the Homebrew tap"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: publish-assets-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  upload-assets:
+    name: Upload release binaries (${{ matrix.name_suffix }})
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            name_suffix: aarch64-apple-darwin
+            llama_metal: "1"
+          - os: ubuntu-latest
+            name_suffix: x86_64-unknown-linux-gnu
+            llama_metal: "0"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ inputs.tag }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake build-essential
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ${{ matrix.os }}-dist
+          cache-on-failure: true
+
+      - name: Build dist binary
+        env:
+          LLAMA_METAL: ${{ matrix.llama_metal }}
+        run: cargo build --profile dist -p rqmd-cli --locked
+
+      - name: Assert binary version matches tag
+        # Guards against the class of bug where Cargo.toml's version drifts
+        # from the release tag — the binary would silently ship mis-stamped
+        # (see the v0.4.1 fix this step was introduced alongside).
+        run: |
+          set -euo pipefail
+          want="${VERSION#v}"
+          got="$(./target/dist/rqmd --version | awk '{print $NF}')"
+          if [ "$got" != "$want" ]; then
+            echo "::error::binary reports version '$got' but release tag is '$want'"
+            exit 1
+          fi
+          echo "Binary version '$got' matches release tag '$want'"
+
+      - name: Package tarball and checksum
+        id: pkg
+        run: |
+          set -euo pipefail
+          TARBALL="rqmd-${VERSION}-${{ matrix.name_suffix }}.tar.gz"
+          tar -czf "$TARBALL" -C target/dist rqmd
+          shasum -a 256 "$TARBALL" > "${TARBALL}.sha256"
+          printf 'tarball=%s\n' "$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to GitHub Release
+        run: |
+          TARBALL="${{ steps.pkg.outputs.tarball }}"
+          gh release upload "$VERSION" "$TARBALL" "${TARBALL}.sha256" --clobber
+
+  finalize-notes:
+    name: Inject asset digests into release notes
+    needs: upload-assets
+    if: inputs.refresh_notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ inputs.tag }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve PR body and previous tag
+        # workflow_call already carries both from release.yml's own steps.
+        # workflow_dispatch has neither — this step derives them so the same
+        # downstream steps work unchanged for both triggers.
+        # Inputs are passed via env, never interpolated directly into the
+        # script, even though these particular values (a PR number, a tag
+        # name) aren't free-text — matches this repo's existing convention
+        # (see PR_BODY in release.yml's finalize-notes job).
+        id: ctx
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          PREV_INPUT: ${{ inputs.prev }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          pr_body=""
+          if [ -n "$PR_NUMBER" ]; then
+            pr_body="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body -q .body 2>/dev/null || true)"
+          fi
+          {
+            echo 'pr_body<<PRBODY_EOF'
+            printf '%s\n' "$pr_body"
+            echo 'PRBODY_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          prev="$PREV_INPUT"
+          if [ -z "$prev" ]; then
+            prev="$(git tag --sort=v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -B1 -F -x "$VERSION" | head -1)"
+            [ "$prev" = "$VERSION" ] && prev=""
+          fi
+          printf 'prev=%s\n' "$prev" >> "$GITHUB_OUTPUT"
+
+      - name: Read real asset digests from the Release API
+        # This is a separate job (not a step inside the upload-assets matrix) because the
+        # matrix's two legs (macOS/Linux) run concurrently and would race on `gh release edit`.
+        id: digests
+        run: |
+          set -euo pipefail
+          darwin_asset="rqmd-${VERSION}-aarch64-apple-darwin.tar.gz"
+          linux_asset="rqmd-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          assets_json="$(gh api "repos/${{ github.repository }}/releases/tags/${VERSION}" -q '.assets')"
+          darwin_sha="$(printf '%s' "$assets_json" | jq -r --arg n "$darwin_asset" '.[] | select(.name==$n) | .digest // empty' | sed 's/^sha256://')"
+          linux_sha="$(printf '%s' "$assets_json" | jq -r --arg n "$linux_asset" '.[] | select(.name==$n) | .digest // empty' | sed 's/^sha256://')"
+          if [ -z "$darwin_sha" ] || [ -z "$linux_sha" ]; then
+            echo "::warning::digest missing from Release API for one or both assets — falling back to placeholder text"
+          fi
+          printf 'darwin=%s\n' "$darwin_sha" >> "$GITHUB_OUTPUT"
+          printf 'linux=%s\n' "$linux_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp commit/PR refs into this release's CHANGELOG section
+        # Stamps CHANGELOG.md in THIS ephemeral checkout only — never committed or pushed
+        # back to main. See the identical step in release.yml's `release` job for the full
+        # rationale; STAMP_HEAD_REF isn't needed here since the tag already exists.
+        run: |
+          set -euo pipefail
+          bash scripts/stamp-changelog-refs.sh "${VERSION#v}"
+
+      - name: Re-render release notes with real digests
+        env:
+          ASSET_SHA256_DARWIN: ${{ steps.digests.outputs.darwin }}
+          ASSET_SHA256_LINUX: ${{ steps.digests.outputs.linux }}
+          PR_BODY: ${{ steps.ctx.outputs.pr_body }}
+          LABEL: ${{ inputs.label }}
+          BREAKING: ${{ inputs.breaking }}
+          PREV: ${{ steps.ctx.outputs.prev }}
+        run: |
+          bash scripts/build-release-notes.sh \
+            "${VERSION}" \
+            "${LABEL}" \
+            "${BREAKING}" \
+            --from-existing \
+            --prev "${PREV}" \
+            > /tmp/RELEASE_BODY_FINAL.md
+
+      - name: Apply finalized notes to the Release
+        run: gh release edit "${VERSION}" --notes-file /tmp/RELEASE_BODY_FINAL.md
+
+  sync-homebrew:
+    name: Sync Homebrew tap formula
+    needs: upload-assets
+    if: inputs.sync_homebrew && vars.HOMEBREW_SYNC_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ inputs.tag }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mint tap token from GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.HOMEBREW_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
+          owner: tylern91
+          repositories: homebrew-rqmd
+
+      - name: Update and push formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: bash scripts/update-homebrew-formula.sh "$VERSION"

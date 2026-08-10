@@ -1,6 +1,20 @@
 # rqmd Changelog
 
 ## [Unreleased]
+### Fixed
+- CI: a release that failed after tagging (e.g. the v1.0.0 bump-label
+  escalation bug) silently skipped asset uploads, release-notes
+  finalization, and the Homebrew tap sync, with no supported way to finish
+  the job — this is what left v0.11.0 published without a Linux asset and
+  the tap pinned to v0.10.6. `upload-assets`, `finalize-notes`, and
+  `sync-homebrew` are now a separate reusable workflow
+  (`publish-assets.yml`) that also accepts `workflow_dispatch`, so a
+  half-finished release can be completed for an already-existing tag.
+- `scripts/stamp-changelog-refs.sh`: a release whose commit range contained
+  only `chore(release):` commits (e.g. a squash-merged release PR) aborted
+  the entire release job instead of falling back to the unfiltered commit
+  pool; a genuinely empty range now warns and exits 0 instead of failing
+  the release.
 
 ---
 

@@ -103,8 +103,13 @@ for entry in "${all_commit_lines[@]+"${all_commit_lines[@]}"}"; do
   commit_lines+=("$entry")
 done
 if [ "${#commit_lines[@]}" -eq 0 ]; then
-  printf 'stamp-changelog-refs: no commits found for %s\n' "$range" >&2
-  exit 1
+  if [ "${#all_commit_lines[@]}" -gt 0 ]; then
+    printf 'stamp-changelog-refs: every commit in %s is chore(release) — using the unfiltered pool\n' "$range" >&2
+    commit_lines=("${all_commit_lines[@]}")
+  else
+    printf 'stamp-changelog-refs: no commits in %s — skipping stamping\n' "$range" >&2
+    exit 0
+  fi
 fi
 
 # bash 3.2 (macOS system /bin/bash) has no ${var,,} lowercasing operator, and its
