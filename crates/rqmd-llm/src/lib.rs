@@ -120,6 +120,40 @@ pub struct BackendCapabilities {
 }
 
 /// Core inference operations needed by qmd's search pipeline.
+///
+/// Only `embed`, `rerank`, `generate`, and the three `*_model_name` methods are
+/// required — `capabilities`, `embed_batch`, `embed_query`, `embed_passage`,
+/// `embed_batch_passage`, and `release_idle` all have default implementations
+/// (see each method's own doc comment) and only need overriding where a
+/// backend's behavior actually differs from the default.
+///
+/// ```
+/// use rqmd_llm::{BackendCapabilities, InferenceBackend};
+///
+/// struct EchoBackend;
+///
+/// impl InferenceBackend for EchoBackend {
+///     fn capabilities(&self) -> BackendCapabilities {
+///         // Override truthfully — this stub only supports embed.
+///         BackendCapabilities { embed: true, rerank: false, generate: false }
+///     }
+///     fn embed(&mut self, text: &str) -> anyhow::Result<Vec<f32>> {
+///         Ok(vec![text.len() as f32])
+///     }
+///     fn rerank(&mut self, _query: &str, docs: &[&str]) -> anyhow::Result<Vec<f32>> {
+///         Ok(vec![0.0; docs.len()])
+///     }
+///     fn generate(&mut self, _prompt: &str) -> anyhow::Result<String> {
+///         Ok(String::new())
+///     }
+///     fn embed_model_name(&self) -> &str { "echo" }
+///     fn rerank_model_name(&self) -> &str { "echo" }
+///     fn generate_model_name(&self) -> &str { "echo" }
+/// }
+///
+/// let mut backend = EchoBackend;
+/// assert_eq!(backend.embed("hi").unwrap(), vec![2.0]);
+/// ```
 pub trait InferenceBackend: Send {
     /// Which operations this backend actually supports. Default: full support
     /// (embed + rerank + generate), matching `LlamaCppBackend`. Backends that

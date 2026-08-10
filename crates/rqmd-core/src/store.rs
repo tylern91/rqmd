@@ -52,6 +52,33 @@ const BLEND_LO: f32 = 0.25;
 
 // ── Store ─────────────────────────────────────────────────────────────────────
 
+/// The hybrid search engine — opens the SQLite/Tantivy/HNSW triad and exposes
+/// indexing and search over them. See [`crate`] for the full pipeline description.
+///
+/// ```no_run
+/// use rqmd_core::{SearchResult, Store, StoreConfig};
+/// use rqmd_llm::InferenceBackend;
+///
+/// fn example(config: StoreConfig, backend: Box<dyn InferenceBackend>) -> anyhow::Result<()> {
+///     let mut store = Store::open(config, backend)?;
+///
+///     // Index a document
+///     store.index_document("collection", "rel/path.md", "Title", "body text")?;
+///
+///     // Hybrid search: BM25 + vector + RRF + rerank
+///     let results: Vec<SearchResult> =
+///         store.hybrid_query("search terms", None, 10, None, false, false)?;
+///
+///     // BM25 keyword search
+///     let results = store.search_fts("keyword", 10, None)?;
+///
+///     // Vector similarity search
+///     let results = store.search_vec("semantic query", 10, None)?;
+///     # let _ = results;
+///
+///     Ok(())
+/// }
+/// ```
 pub struct Store {
     pub db: Connection,
     fts: FtsIndex,

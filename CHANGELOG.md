@@ -4,6 +4,82 @@
 
 ---
 
+## [0.11.0] - 2026-08-10
+### Breaking
+- Every environment variable's doubled-R `RRQMD_` prefix is renamed to the
+  single-R `RQMD_`, matching the binary, crates, and URI scheme. No
+  compatibility shim — set the new names before upgrading. See
+  [docs/MIGRATING.md](docs/MIGRATING.md#migrating-from-rqmd--010x) for the
+  full old → new table:
+
+  | Old | New |
+  |---|---|
+  | `RRQMD_INDEX_DIR` | `RQMD_INDEX_DIR` |
+  | `RRQMD_INFERENCE_BACKEND` | `RQMD_INFERENCE_BACKEND` |
+  | `RRQMD_ORT_EP` | `RQMD_ORT_EP` |
+  | `RRQMD_FORCE_CPU` | `RQMD_FORCE_CPU` |
+  | `RRQMD_MCP_HOST` | `RQMD_MCP_HOST` |
+  | `RRQMD_MCP_PORT` | `RQMD_MCP_PORT` |
+  | `RRQMD_MCP_ALLOW_NON_LOOPBACK` | `RQMD_MCP_ALLOW_NON_LOOPBACK` |
+  | `RRQMD_MODEL_IDLE_TTL` | `RQMD_MODEL_IDLE_TTL` |
+  | `RRQMD_NO_EXPAND` | `RQMD_NO_EXPAND` |
+  | `RRQMD_VERBOSE` | `RQMD_VERBOSE` |
+
+### Fixed
+- `rqmd mcp`'s five tools (`query`, `search`, `get`, `multi_get`, `status`)
+  reported backend and store errors as successful results with an
+  error-shaped string body, so an MCP client could not distinguish a failed
+  search from a successful one whose top result happened to discuss errors.
+  They now return a real MCP error response on failure.
+- `rqmd context add <bare-name>` wrote a key
+  (`context:<name>`) that no reader ever looks up — only the fully-qualified
+  `context:rqmd://<collection>/` form round-trips — so context silently never
+  applied to bare-name adds. `add`/`rm` now resolve a bare name against the
+  known collection list and normalize it, or reject with the correct form.
+- Collection-scoped BM25 search (`search_fts_multi`) applied its
+  collection filter *after* the Tantivy top-K cut, so a scoped query could
+  return fewer than the requested limit even when enough in-scope matches
+  existed further down the ranking. Candidates are now over-fetched before
+  the post-filter so the requested limit is honored.
+
+### Changed
+- `rqmd multi-get` (and MCP `multi_get`) glob matching moved from a
+  hand-rolled `*`-only matcher to `globset`. Cross-`/` matching is preserved
+  (`docs/*` still matches `docs/a/b.md`), and `?`, `[...]`, and `{...}` are
+  now supported. An invalid glob pattern is now a reported error instead of
+  silently matching nothing.
+- `db::purge_collection` and `db::deactivate_missing_documents` now issue
+  batched/set-based SQL instead of one query per row, removing two N+1
+  patterns from `rqmd update`.
+- Search result construction (`Store`'s `search_fts`, `search_vec`,
+  `hybrid_query`, `hybrid_query_multi`) now shares one `result_from_doc`/
+  `first_chunk` path instead of four near-identical copies, and stops
+  running the full multi-pass chunker just to take its first chunk.
+
+### Removed
+- The dead `RQMD_CI` CI-only environment variable (set in
+  `rust.yml`, read by nothing).
+- Verified-unreachable code from `rqmd-core::chunking` (an unreachable
+  branch in `extract_snippet`, three unused `build_snippet_result`
+  parameters, the ignored `intent` parameter, and the dead `BreakPattern.kind`
+  field) and dead ANSI-color helpers from `rqmd-cli::format`.
+
+### Internal
+- `crates/rqmd-core/tests/integration.rs` (40 tests) now actually runs in
+  CI on both the macOS and Linux legs — CI previously compiled it
+  (`--all-targets`) but never executed it (`cargo test --workspace --lib`).
+- All `cargo build`/`test`/`clippy`/`run` invocations in CI now pass
+  `--locked`.
+- Added `[workspace.lints.clippy] all = "deny"` so a local `cargo clippy`
+  matches CI's strictness instead of being laxer.
+- New tests for `rqmd-cli::format`, `rqmd-cli::commands::context`, and
+  `rqmd-cli::store`, previously untested.
+- `docs/CRATE-API.md`'s example code is now backed by real doctests on
+  `Store` and `InferenceBackend` (`cargo test --doc`), so a future signature
+  change fails the build instead of letting the docs drift silently.
+
+---
+
 ## [0.10.6] - 2026-08-04
 ### Fixed
 - `rqmd-llm`: model downloads could fail with a 401 even on public repos, and

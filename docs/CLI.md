@@ -19,7 +19,7 @@
 | `rqmd doctor` | Diagnose config, index, model, and device issues |
 | `rqmd bench [-n N]` | Embed throughput benchmark (default: 5 rounds) |
 | `rqmd eval [--mode bm25\|vec\|hybrid] [--verbose]` | Search quality eval against synthetic fixtures |
-| `rqmd mcp [--http] [--port N] [--host HOST] [--daemon]` | Start MCP server |
+| `rqmd mcp [--http] [--port N] [--host HOST] [--allow-non-loopback] [--daemon]` | Start MCP server |
 | `rqmd mcp status` | Show MCP daemon status (pid, health, uptime) |
 | `rqmd mcp stop` | Stop the running MCP daemon |
 | `rqmd collection add <path> [--mask PATTERN] [--ignore PATTERN] [--hidden]` | Add a directory as a collection |
@@ -41,7 +41,13 @@ Global flags (before the subcommand):
 --index-dir <path>       Override index directory ($RQMD_INDEX_DIR)
 --backend llama|ort      Inference backend ($RQMD_INFERENCE_BACKEND)
 --ort-ep auto|coreml|cuda|directml|cpu   ORT execution provider ($RQMD_ORT_EP)
+-v, --verbose            Show native model-loading and inference logs (also enabled by $RUST_LOG)
 ```
+
+`rqmd mcp`'s `--allow-non-loopback` (env `$RQMD_MCP_ALLOW_NON_LOOPBACK`) is not
+global — it only applies to the `mcp` subcommand, alongside a non-loopback
+`--host`. See [MCP.md](MCP.md#binding-beyond-localhost) and
+[SECURITY.md](../SECURITY.md) for what it gates.
 
 ---
 
