@@ -2642,6 +2642,7 @@ dependencies = [
  "rqmd-core",
  "rqmd-llm",
  "rqmd-mcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

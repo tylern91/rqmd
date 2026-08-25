@@ -689,9 +689,6 @@ impl Store {
             );
         }
 
-        let mut ranked_lists: Vec<Vec<RankedResult>> = Vec::new();
-        let mut list_meta: Vec<RankedListMeta> = Vec::new();
-
         // Parse the raw query per docs/SYNTAX.md.
         let parsed = parse_query(query);
 
@@ -707,6 +704,52 @@ impl Store {
             Some(i) => format!("{i}\n{query}"),
             None => query.to_string(),
         };
+
+        let (ranked_lists, list_meta) = self.retrieve_ranked_lists(
+            &parsed,
+            effective_intent.as_deref(),
+            query,
+            collections,
+            fetch_size,
+            no_expand,
+        )?;
+
+        // Step 4: RRF fusion. Step 5: resolve fused candidates to full documents.
+        let candidate_docs =
+            self.fuse_and_resolve_candidates(&ranked_lists, &list_meta, fetch_size)?;
+        if candidate_docs.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Step 6: chunk selection + rerank.
+        let (best_chunks, rerank_scores) = self.select_chunks_and_rerank(
+            query,
+            &rerank_query,
+            effective_intent.as_deref(),
+            &candidate_docs,
+            skip_rerank,
+        );
+
+        Ok(self.assemble_results(candidate_docs, &best_chunks, rerank_scores, limit))
+    }
+
+    /// Steps 1-3 of `hybrid_query_multi`: retrieve one ranked list per query
+    /// signal — either every sub-query in a parsed query document ("query
+    /// document mode"), or BM25 + vector + optional generation-based
+    /// expansion on the raw query text ("expand mode") — without fusing them
+    /// yet. Returns the ranked lists alongside metadata (source + query type)
+    /// used by `rrf_weights` to weight each list during fusion.
+    fn retrieve_ranked_lists(
+        &mut self,
+        parsed: &crate::query::ParsedQuery,
+        effective_intent: Option<&str>,
+        query: &str,
+        collections: Option<&[String]>,
+        fetch_size: usize,
+        no_expand: bool,
+    ) -> Result<(Vec<Vec<RankedResult>>, Vec<RankedListMeta>)> {
+        let mut ranked_lists: Vec<Vec<RankedResult>> = Vec::new();
+        let mut list_meta: Vec<RankedListMeta> = Vec::new();
 
         if !parsed.subqueries.is_empty() {
             // ── Query document mode ────────────────────────────────────────────
@@ -816,7 +859,7 @@ impl Store {
                          generation — falling back to BM25+vector fusion only"
                     );
                 } else {
-                    let prompt = build_expansion_prompt(expand_text, effective_intent.as_deref());
+                    let prompt = build_expansion_prompt(expand_text, effective_intent);
                     match self.backend.generate(&prompt) {
                         Ok(expansion) => {
                             let expansion_lists =
@@ -834,30 +877,52 @@ impl Store {
             }
         }
 
-        // Step 4: RRF fusion.
+        Ok((ranked_lists, list_meta))
+    }
+
+    /// Step 4-5 of `hybrid_query_multi`: RRF-fuse the independently ranked
+    /// lists, then resolve the top `fetch_size` fused candidates to their
+    /// document bodies. Returns an empty vec if there were no ranked lists
+    /// to fuse, or none of the fused candidates resolved to a document —
+    /// callers treat either case as "no results."
+    fn fuse_and_resolve_candidates(
+        &self,
+        ranked_lists: &[Vec<RankedResult>],
+        list_meta: &[RankedListMeta],
+        fetch_size: usize,
+    ) -> Result<Vec<(RankedResult, String, String)>> {
         if ranked_lists.is_empty() {
             return Ok(vec![]);
         }
-        let weights = rrf_weights(&list_meta);
-        let fused = reciprocal_rank_fusion(&ranked_lists, &weights);
+        let weights = rrf_weights(list_meta);
+        let fused = reciprocal_rank_fusion(ranked_lists, &weights);
         let candidates = &fused[..fetch_size.min(fused.len())];
 
-        // Step 5: Resolve candidates to full documents.
         let mut candidate_docs: Vec<(RankedResult, String, String)> = Vec::new();
         for cand in candidates {
             if let Some((doc, body)) = self.filepath_to_doc_body(&cand.filepath)? {
                 candidate_docs.push((cand.clone(), doc.hash, body));
             }
         }
+        Ok(candidate_docs)
+    }
 
-        if candidate_docs.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Step 6: Chunk selection — chunk each candidate once, reuse for both
-        // the rerank input list and the final best_chunk / best_chunk_pos.
+    /// Step 6 of `hybrid_query_multi`: chunk each candidate once (reused for
+    /// both the rerank input list and the final `best_chunk`/`best_chunk_pos`),
+    /// then rerank with the cross-encoder unless reranking was skipped or the
+    /// active backend doesn't support it. Returns `(best_chunks, rerank_scores)`
+    /// — `rerank_scores` is `None` when reranking didn't run, in which case
+    /// `assemble_results` falls back to pure RRF scoring.
+    fn select_chunks_and_rerank(
+        &mut self,
+        query: &str,
+        rerank_query: &str,
+        effective_intent: Option<&str>,
+        candidate_docs: &[(RankedResult, String, String)],
+        skip_rerank: bool,
+    ) -> (Vec<(String, usize)>, Option<Vec<f32>>) {
         // Fold intent terms into query terms for better snippet selection.
-        let term_source = match &effective_intent {
+        let term_source = match effective_intent {
             Some(i) => format!("{i} {query}"),
             None => query.to_string(),
         };
@@ -886,9 +951,23 @@ impl Store {
             None
         } else {
             // Use the intent-prepended rerank query for better cross-encoder scoring.
-            self.backend.rerank(&rerank_query, &chunk_refs).ok()
+            self.backend.rerank(rerank_query, &chunk_refs).ok()
         };
 
+        (best_chunks, rerank_scores)
+    }
+
+    /// Step 7 of `hybrid_query_multi`: blend each candidate's rerank score
+    /// with its RRF score (falling back to pure RRF when reranking didn't
+    /// run), build the final `SearchResult`s, then sort by score descending
+    /// and truncate to `limit`.
+    fn assemble_results(
+        &self,
+        candidate_docs: Vec<(RankedResult, String, String)>,
+        best_chunks: &[(String, usize)],
+        rerank_scores: Option<Vec<f32>>,
+        limit: usize,
+    ) -> Vec<SearchResult> {
         let mut final_results = Vec::new();
 
         for (i, (cand, hash, body)) in candidate_docs.into_iter().enumerate() {
@@ -927,7 +1006,7 @@ impl Store {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         final_results.truncate(limit);
-        Ok(final_results)
+        final_results
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

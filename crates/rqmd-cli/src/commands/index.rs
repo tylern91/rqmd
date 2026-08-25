@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
+use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Instant;
 use walkdir::WalkDir;
 
-use rqmd_core::{db, snap_char_boundary_backward, IndexOutcome, PendingVectorMeta};
+use rqmd_core::{db, snap_char_boundary_backward, Collection, IndexOutcome, PendingVectorMeta};
 
 use crate::{document, exclusions, format as fmt, store};
 
@@ -64,46 +65,7 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
 
     // ── Collections (qmd.ts:565-586, per-collection multi-line blocks) ───────────
     let cols = db::list_collections(&s.db)?;
-    if cols.is_empty() {
-        println!(
-            "\n\x1b[2mNo collections. Run 'rqmd collection add .' to index markdown files.\x1b[0m"
-        );
-    } else {
-        println!("\n\x1b[1mCollections\x1b[0m");
-        for col in &cols {
-            let (count, last_mod) = db::collection_doc_stats(&s.db, &col.name).unwrap_or((0, None));
-            let last_mod_str = last_mod
-                .as_deref()
-                .map(fmt::format_time_ago)
-                .unwrap_or_else(|| "never".to_string());
-            println!(
-                "  \x1b[36m{}\x1b[0m \x1b[2m(rqmd://{}/)\x1b[0m",
-                col.name, col.name
-            );
-            println!("    \x1b[2mPattern:\x1b[0m  {}", col.pattern);
-            println!("    \x1b[2mFiles:\x1b[0m    {count} (updated {last_mod_str})");
-            if let Ok(Some(ctx)) = db::get_context_for_collection(&s.db, &col.name) {
-                let preview = truncate_context_preview(&ctx);
-                println!("    \x1b[2mContexts:\x1b[0m 1");
-                println!("      \x1b[2m/:\x1b[0m {preview}");
-            }
-        }
-
-        // ── Examples (qmd.ts:588-601, using rqmd command names) ─────────────────
-        println!("\n\x1b[1mExamples\x1b[0m");
-        println!("  \x1b[2m# List files in a collection\x1b[0m");
-        if let Some(first) = cols.first() {
-            println!("  rqmd ls {}", first.name);
-        }
-        println!("  \x1b[2m# Get a document\x1b[0m");
-        if let Some(first) = cols.first() {
-            println!("  rqmd get rqmd://{}/path/to/file.md", first.name);
-        }
-        println!("  \x1b[2m# Search within a collection\x1b[0m");
-        if let Some(first) = cols.first() {
-            println!("  rqmd search \"query\" -c {}", first.name);
-        }
-    }
+    print_status_collections(&s.db, &cols)?;
 
     // ── Models (qmd.ts:606-617) — show repo (browsable) + exact downloaded file ──
     println!("\n\x1b[1mModels\x1b[0m");
@@ -133,13 +95,67 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
     );
 
     // ── Tips (qmd.ts:621-654) ────────────────────────────────────────────────────
+    print_status_tips(&s.db, &cols);
+
+    Ok(())
+}
+
+/// Print the "Collections" and "Examples" blocks of `rqmd status`
+/// (qmd.ts:565-601).
+fn print_status_collections(conn: &Connection, cols: &[Collection]) -> Result<()> {
+    if cols.is_empty() {
+        println!(
+            "\n\x1b[2mNo collections. Run 'rqmd collection add .' to index markdown files.\x1b[0m"
+        );
+        return Ok(());
+    }
+
+    println!("\n\x1b[1mCollections\x1b[0m");
+    for col in cols {
+        let (count, last_mod) = db::collection_doc_stats(conn, &col.name).unwrap_or((0, None));
+        let last_mod_str = last_mod
+            .as_deref()
+            .map(fmt::format_time_ago)
+            .unwrap_or_else(|| "never".to_string());
+        println!(
+            "  \x1b[36m{}\x1b[0m \x1b[2m(rqmd://{}/)\x1b[0m",
+            col.name, col.name
+        );
+        println!("    \x1b[2mPattern:\x1b[0m  {}", col.pattern);
+        println!("    \x1b[2mFiles:\x1b[0m    {count} (updated {last_mod_str})");
+        if let Ok(Some(ctx)) = db::get_context_for_collection(conn, &col.name) {
+            let preview = truncate_context_preview(&ctx);
+            println!("    \x1b[2mContexts:\x1b[0m 1");
+            println!("      \x1b[2m/:\x1b[0m {preview}");
+        }
+    }
+
+    // ── Examples (qmd.ts:588-601, using rqmd command names) ─────────────────
+    println!("\n\x1b[1mExamples\x1b[0m");
+    println!("  \x1b[2m# List files in a collection\x1b[0m");
+    if let Some(first) = cols.first() {
+        println!("  rqmd ls {}", first.name);
+    }
+    println!("  \x1b[2m# Get a document\x1b[0m");
+    if let Some(first) = cols.first() {
+        println!("  rqmd get rqmd://{}/path/to/file.md", first.name);
+    }
+    println!("  \x1b[2m# Search within a collection\x1b[0m");
+    if let Some(first) = cols.first() {
+        println!("  rqmd search \"query\" -c {}", first.name);
+    }
+    Ok(())
+}
+
+/// Build and print the "Tips" block of `rqmd status` (qmd.ts:621-654).
+fn print_status_tips(conn: &Connection, cols: &[Collection]) {
     let mut tips: Vec<String> = Vec::new();
 
     // Tip 1: collections missing context
     let without_ctx: Vec<&str> = cols
         .iter()
         .filter(|c| {
-            db::get_context_for_collection(&s.db, &c.name)
+            db::get_context_for_collection(conn, &c.name)
                 .ok()
                 .flatten()
                 .is_none()
@@ -192,8 +208,6 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
             println!("  {tip}");
         }
     }
-
-    Ok(())
 }
 
 /// Flush the HNSW file to disk, then atomically commit buffered vector metadata
@@ -232,6 +246,40 @@ fn checkpoint(s: &mut rqmd_core::Store, pending: &mut Vec<PendingVectorMeta>) ->
 /// How many documents to embed before checkpointing HNSW+DB.
 /// Lower = more frequent saves (better resume granularity), higher = faster.
 const CHECKPOINT_INTERVAL: usize = 50;
+
+/// Render one `rqmd embed` TTY progress line: bar, percent, chunk/doc counts,
+/// throughput, and ETA. Throughput/ETA stay placeholders until `elapsed_secs`
+/// passes 2s and at least one doc is done, matching the original inline logic.
+fn render_embed_progress_line(
+    done: usize,
+    todo_total: usize,
+    chunks_so_far: usize,
+    bytes_processed: usize,
+    elapsed_secs: f64,
+) -> String {
+    let pct = if todo_total > 0 {
+        (done as f64 / todo_total as f64) * 100.0
+    } else {
+        100.0
+    };
+    let bar = fmt::render_progress_bar(pct, 30);
+    let pct_int = pct.round() as u64;
+    let (throughput_str, eta_str) = if elapsed_secs > 2.0 && done > 0 {
+        let bps = bytes_processed as f64 / elapsed_secs;
+        let docs_per_sec = done as f64 / elapsed_secs;
+        let remaining = (todo_total - done) as f64 / docs_per_sec.max(0.001);
+        (
+            format!("{}/s", fmt_bytes(bps as u64)),
+            fmt::format_eta(remaining),
+        )
+    } else {
+        (".../s".to_string(), "...".to_string())
+    };
+    format!(
+        "\x1b[36m{bar}\x1b[0m \x1b[1m{pct_int:>3}% input\x1b[0m \
+         \x1b[2m{chunks_so_far} chunks · {done}/{todo_total} docs · {throughput_str} · ETA {eta_str}\x1b[0m"
+    )
+}
 
 pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> Result<()> {
     let cols = {
@@ -358,29 +406,12 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
             }
 
             if is_tty {
-                let pct = if todo_total > 0 {
-                    (done as f64 / todo_total as f64) * 100.0
-                } else {
-                    100.0
-                };
-                let bar = fmt::render_progress_bar(pct, 30);
-                let pct_int = pct.round() as u64;
-                let elapsed = start.elapsed().as_secs_f64();
-                let (throughput_str, eta_str) = if elapsed > 2.0 && done > 0 {
-                    let bps = bytes_processed as f64 / elapsed;
-                    let docs_per_sec = done as f64 / elapsed;
-                    let remaining = (todo_total - done) as f64 / docs_per_sec.max(0.001);
-                    (
-                        format!("{}/s", fmt_bytes(bps as u64)),
-                        fmt::format_eta(remaining),
-                    )
-                } else {
-                    (".../s".to_string(), "...".to_string())
-                };
-                let chunks_so_far = total_new_chunks + pending.len();
-                let line = format!(
-                    "\x1b[36m{bar}\x1b[0m \x1b[1m{pct_int:>3}% input\x1b[0m \
-                     \x1b[2m{chunks_so_far} chunks · {done}/{todo_total} docs · {throughput_str} · ETA {eta_str}\x1b[0m"
+                let line = render_embed_progress_line(
+                    done,
+                    todo_total,
+                    total_new_chunks + pending.len(),
+                    bytes_processed,
+                    start.elapsed().as_secs_f64(),
                 );
                 let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
                 eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
@@ -463,143 +494,7 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             col.pattern
         );
 
-        let dir = Path::new(&col.path);
-        if !dir.exists() {
-            eprintln!("  WARN: directory not found: {}", dir.display());
-            continue;
-        }
-
-        // Run the collection's pre-update hook (e.g. `git fetch && git pull ...`)
-        // before walking the directory, so indexing sees freshly synced content.
-        if let Some(cmd) = col.update_command.as_deref() {
-            if !cmd.trim().is_empty() {
-                println!("  \x1b[2m$ {cmd}\x1b[0m");
-                match std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .current_dir(dir)
-                    .status()
-                {
-                    Ok(status) if !status.success() => {
-                        eprintln!("  WARN: update hook exited with {status}");
-                    }
-                    Err(e) => {
-                        eprintln!("  WARN: update hook failed to run: {e}");
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let include_set = match exclusions::build_include_set(&col.pattern) {
-            Ok(set) => set,
-            Err(e) => {
-                eprintln!(
-                    "  WARN: {}: invalid mask '{}': {e:#}",
-                    col.name, col.pattern
-                );
-                continue;
-            }
-        };
-        let ignore_set = exclusions::build_ignore_set(&col.ignore);
-
-        let mut new_count = 0usize;
-        let mut updated_count = 0usize;
-        let mut unchanged_count = 0usize;
-        let mut processed = 0usize;
-        let mut skips = document::SkipCounts::default();
-
-        // Pre-collect matching paths so we know the total before indexing begins,
-        // enabling "Indexing: N/total" progress (matching qmd's output). Reuses the
-        // same walk/filter logic `collection add` uses, so a re-index can't silently
-        // disagree with the original add about which files belong in the collection.
-        let files = document::collect_candidates(dir, &include_set, &ignore_set, col.allow_hidden);
-        let total = files.len();
-        if total == 0 {
-            eprintln!(
-                "  WARN: mask '{}' matched 0 files under {} (try --hidden if content lives under a dot-directory)",
-                col.pattern,
-                dir.display()
-            );
-        }
-
-        for path in &files {
-            let doc = match document::prepare(path, dir) {
-                Ok(doc) => doc,
-                Err(reason) => {
-                    skips.record(reason);
-                    processed += 1;
-                    continue;
-                }
-            };
-
-            processed += 1;
-            if is_tty {
-                let line = format!("Indexing: {processed}/{total} {}", doc.rel_path);
-                let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
-                eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
-            }
-
-            match s.index_document_fts_only_with_raw(
-                &col.name,
-                &doc.rel_path,
-                &doc.title,
-                &doc.indexed_text,
-                &doc.raw,
-            ) {
-                Err(e) => eprintln!("  WARN: {}: {e:#}", doc.rel_path),
-                Ok(IndexOutcome::New) => new_count += 1,
-                Ok(IndexOutcome::Updated) => updated_count += 1,
-                Ok(IndexOutcome::Unchanged) => unchanged_count += 1,
-            }
-        }
-
-        // Prune documents whose file is no longer on disk (deleted or renamed away).
-        // Built from `files` — the raw walked candidate list — not from the set of
-        // docs that made it through `prepare` above: a file that still exists but
-        // failed to read this run (permission denied, transient I/O error) is still
-        // *present* and must not be soft-deleted just because this pass couldn't
-        // read it. Skipped entirely when the mask matched 0 files (warned above) —
-        // a config/mount glitch must never read as "delete everything".
-        let removed_count = if total > 0 {
-            let present_paths: HashSet<String> = files
-                .iter()
-                .map(|p| {
-                    p.strip_prefix(dir)
-                        .unwrap_or(p)
-                        .to_string_lossy()
-                        .to_string()
-                })
-                .collect();
-            let removed = db::deactivate_missing_documents(&s.db, &col.name, &present_paths)
-                .context("deactivate missing documents")?;
-            for path in &removed {
-                let filepath = format!("{}/{path}", col.name);
-                if let Err(e) = s.remove_from_fts(&filepath) {
-                    eprintln!("  WARN: failed to remove stale FTS entry for {filepath}: {e:#}");
-                }
-            }
-            removed.len()
-        } else {
-            0
-        };
-
-        s.flush()?;
-
-        if is_tty {
-            eprint!("\r\x1b[2K");
-        }
-
-        // Summary line matching qmd's "Indexed: X new, Y updated..." (qmd.ts:735), extended
-        // with an honest skip-reason breakdown instead of silently dropping unreadable files.
-        let skip_suffix = if skips.total() > 0 {
-            format!(", skipped {} ({})", skips.total(), skips.describe())
-        } else {
-            String::new()
-        };
-        println!(
-            "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, {removed_count} removed{skip_suffix}"
-        );
+        update_one_collection(&mut s, col, is_tty)?;
     }
 
     // "needs embeddings" notice (qmd.ts:747–748) — printed once after all collections
@@ -610,6 +505,151 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             "\nRun 'rqmd embed' to update embeddings ({needs_embed} unique hashes need vectors)"
         );
     }
+    Ok(())
+}
+
+/// Re-walk one collection's directory, run its update hook, re-index changed
+/// files, and prune deleted ones. Extracted from `run_update`'s per-collection
+/// loop body; the `IndexOutcome`-based tally counters and every WARN-on-failure
+/// path are preserved bit-for-bit.
+fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: bool) -> Result<()> {
+    let dir = Path::new(&col.path);
+    if !dir.exists() {
+        eprintln!("  WARN: directory not found: {}", dir.display());
+        return Ok(());
+    }
+
+    // Run the collection's pre-update hook (e.g. `git fetch && git pull ...`)
+    // before walking the directory, so indexing sees freshly synced content.
+    if let Some(cmd) = col.update_command.as_deref() {
+        if !cmd.trim().is_empty() {
+            println!("  \x1b[2m$ {cmd}\x1b[0m");
+            match std::process::Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(dir)
+                .status()
+            {
+                Ok(status) if !status.success() => {
+                    eprintln!("  WARN: update hook exited with {status}");
+                }
+                Err(e) => {
+                    eprintln!("  WARN: update hook failed to run: {e}");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let include_set = match exclusions::build_include_set(&col.pattern) {
+        Ok(set) => set,
+        Err(e) => {
+            eprintln!(
+                "  WARN: {}: invalid mask '{}': {e:#}",
+                col.name, col.pattern
+            );
+            return Ok(());
+        }
+    };
+    let ignore_set = exclusions::build_ignore_set(&col.ignore);
+
+    let mut new_count = 0usize;
+    let mut updated_count = 0usize;
+    let mut unchanged_count = 0usize;
+    let mut processed = 0usize;
+    let mut skips = document::SkipCounts::default();
+
+    // Pre-collect matching paths so we know the total before indexing begins,
+    // enabling "Indexing: N/total" progress (matching qmd's output). Reuses the
+    // same walk/filter logic `collection add` uses, so a re-index can't silently
+    // disagree with the original add about which files belong in the collection.
+    let files = document::collect_candidates(dir, &include_set, &ignore_set, col.allow_hidden);
+    let total = files.len();
+    if total == 0 {
+        eprintln!(
+            "  WARN: mask '{}' matched 0 files under {} (try --hidden if content lives under a dot-directory)",
+            col.pattern,
+            dir.display()
+        );
+    }
+
+    for path in &files {
+        let doc = match document::prepare(path, dir) {
+            Ok(doc) => doc,
+            Err(reason) => {
+                skips.record(reason);
+                processed += 1;
+                continue;
+            }
+        };
+
+        processed += 1;
+        if is_tty {
+            let line = format!("Indexing: {processed}/{total} {}", doc.rel_path);
+            let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
+            eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
+        }
+
+        match s.index_document_fts_only_with_raw(
+            &col.name,
+            &doc.rel_path,
+            &doc.title,
+            &doc.indexed_text,
+            &doc.raw,
+        ) {
+            Err(e) => eprintln!("  WARN: {}: {e:#}", doc.rel_path),
+            Ok(IndexOutcome::New) => new_count += 1,
+            Ok(IndexOutcome::Updated) => updated_count += 1,
+            Ok(IndexOutcome::Unchanged) => unchanged_count += 1,
+        }
+    }
+
+    // Prune documents whose file is no longer on disk (deleted or renamed away).
+    // Built from `files` — the raw walked candidate list — not from the set of
+    // docs that made it through `prepare` above: a file that still exists but
+    // failed to read this run (permission denied, transient I/O error) is still
+    // *present* and must not be soft-deleted just because this pass couldn't
+    // read it. Skipped entirely when the mask matched 0 files (warned above) —
+    // a config/mount glitch must never read as "delete everything".
+    let removed_count = if total > 0 {
+        let present_paths: HashSet<String> = files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(dir)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        let removed = db::deactivate_missing_documents(&s.db, &col.name, &present_paths)
+            .context("deactivate missing documents")?;
+        for path in &removed {
+            let filepath = format!("{}/{path}", col.name);
+            if let Err(e) = s.remove_from_fts(&filepath) {
+                eprintln!("  WARN: failed to remove stale FTS entry for {filepath}: {e:#}");
+            }
+        }
+        removed.len()
+    } else {
+        0
+    };
+
+    s.flush()?;
+
+    if is_tty {
+        eprint!("\r\x1b[2K");
+    }
+
+    // Summary line matching qmd's "Indexed: X new, Y updated..." (qmd.ts:735), extended
+    // with an honest skip-reason breakdown instead of silently dropping unreadable files.
+    let skip_suffix = if skips.total() > 0 {
+        format!(", skipped {} ({})", skips.total(), skips.describe())
+    } else {
+        String::new()
+    };
+    println!(
+        "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, {removed_count} removed{skip_suffix}"
+    );
     Ok(())
 }
 
@@ -694,42 +734,8 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
             println!("    {} — {count} docs at {}", col.name, col.path);
         }
 
-        // Stale-embedding check: content_vectors can accumulate rows from more than
-        // one embed_fingerprint after an embed-model or chunking-constant change,
-        // since `rqmd embed` only re-embeds hashes with zero vectors (see
-        // `count_docs_needing_embed`). A single stale fingerprint (no mixing at
-        // all — e.g. right after upgrading, before any new doc has been embedded)
-        // is just as broken as a mix, so the gate below checks for any mismatch
-        // against the current fingerprint, not just `breakdown.len() > 1`.
-        let breakdown = db::fingerprint_breakdown(&s.db).unwrap_or_default();
-        let expected = store::expected_fingerprint();
-        if breakdown.iter().any(|(fp, _)| fp != &expected) {
-            println!("\n  \x1b[33m⚠ Stale embedding fingerprint(s) detected\x1b[0m — vectors were generated by a different model/chunking config than the one active now:");
-            for (fp, count) in &breakdown {
-                let marker = if *fp == expected {
-                    " (current)"
-                } else {
-                    " (stale)"
-                };
-                println!("    {fp}{marker} — {count} chunks");
-            }
-            println!(
-                "    Run 'rqmd embed --rebuild' to re-embed everything under the current model"
-            );
-        }
-
-        // Orphaned-vector check: `rqmd update` soft-deletes documents whose file was
-        // removed or renamed (active=0) rather than hard-deleting, so their
-        // content_vectors/HNSW vids survive but become unreachable — every
-        // vector→document join requires an active document. Say this plainly rather
-        // than implying the space is freed; only `embed --rebuild` reclaims it.
-        let orphaned_vectors = db::count_orphaned_vectors(&s.db).unwrap_or(0);
-        if orphaned_vectors > 0 {
-            println!(
-                "\n  \x1b[33m⚠ {orphaned_vectors} orphaned vector(s)\x1b[0m — left behind by documents removed or renamed since their last embed. Unreachable in search but not yet freed from the HNSW file."
-            );
-            println!("    Run 'rqmd embed --rebuild' to reclaim the space");
-        }
+        print_doctor_stale_fingerprint_check(&s.db);
+        print_doctor_orphaned_vector_check(&s.db);
 
         // Recommended next steps.
         let needs_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(0);
@@ -739,6 +745,46 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Stale-embedding check for `rqmd doctor`: content_vectors can accumulate rows
+/// from more than one embed_fingerprint after an embed-model or
+/// chunking-constant change, since `rqmd embed` only re-embeds hashes with zero
+/// vectors (see `count_docs_needing_embed`). A single stale fingerprint (no
+/// mixing at all — e.g. right after upgrading, before any new doc has been
+/// embedded) is just as broken as a mix, so the gate below checks for any
+/// mismatch against the current fingerprint, not just `breakdown.len() > 1`.
+fn print_doctor_stale_fingerprint_check(conn: &Connection) {
+    let breakdown = db::fingerprint_breakdown(conn).unwrap_or_default();
+    let expected = store::expected_fingerprint();
+    if breakdown.iter().any(|(fp, _)| fp != &expected) {
+        println!("\n  \x1b[33m⚠ Stale embedding fingerprint(s) detected\x1b[0m — vectors were generated by a different model/chunking config than the one active now:");
+        for (fp, count) in &breakdown {
+            let marker = if *fp == expected {
+                " (current)"
+            } else {
+                " (stale)"
+            };
+            println!("    {fp}{marker} — {count} chunks");
+        }
+        println!("    Run 'rqmd embed --rebuild' to re-embed everything under the current model");
+    }
+}
+
+/// Orphaned-vector check for `rqmd doctor`: `rqmd update` soft-deletes
+/// documents whose file was removed or renamed (active=0) rather than
+/// hard-deleting, so their content_vectors/HNSW vids survive but become
+/// unreachable — every vector→document join requires an active document. Say
+/// this plainly rather than implying the space is freed; only `embed
+/// --rebuild` reclaims it.
+fn print_doctor_orphaned_vector_check(conn: &Connection) {
+    let orphaned_vectors = db::count_orphaned_vectors(conn).unwrap_or(0);
+    if orphaned_vectors > 0 {
+        println!(
+            "\n  \x1b[33m⚠ {orphaned_vectors} orphaned vector(s)\x1b[0m — left behind by documents removed or renamed since their last embed. Unreachable in search but not yet freed from the HNSW file."
+        );
+        println!("    Run 'rqmd embed --rebuild' to reclaim the space");
+    }
 }
 
 fn fmt_bytes(b: u64) -> String {
