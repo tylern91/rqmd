@@ -333,8 +333,7 @@ pub fn find_documents_by_needles(
     // wildcard and the suffix check degrades to "any path with a `/` in it",
     // i.e. every document. The two `=` arms are exact matches and take the
     // needle raw.
-    const NEEDLE_CLAUSE: &str =
-        "(path = ? OR (collection || '/' || path) = ? OR path LIKE '%/' || ? ESCAPE '\\' OR (collection || '/' || path) LIKE '%/' || ? ESCAPE '\\')";
+    const NEEDLE_CLAUSE: &str = "(path = ? OR (collection || '/' || path) = ? OR path LIKE '%/' || ? ESCAPE '\\' OR (collection || '/' || path) LIKE '%/' || ? ESCAPE '\\')";
     let clauses = vec![NEEDLE_CLAUSE; needles.len()].join(" OR ");
 
     let mut params: Vec<String> = Vec::with_capacity(needles.len() * 4);
