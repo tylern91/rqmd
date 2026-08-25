@@ -6,8 +6,7 @@
 # `[workspace.package] version = "..."` line in the root Cargo.toml. Nothing
 # forces that line to move in lockstep with CHANGELOG.md's finalized release
 # heading (`## [Unreleased]` -> `## [X.Y.Z] - DATE`) — a forgotten bump ships
-# a binary that reports the previous release's version (see CHANGELOG entry
-# for v0.4.1 for the incident this guards against).
+# a binary that reports the previous release's version.
 #
 # Usage: check-version-sync.sh [path-to-repo-root]
 set -Eeuo pipefail
