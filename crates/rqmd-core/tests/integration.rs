@@ -879,6 +879,37 @@ fn find_documents_by_needles_is_anchored_at_path_boundary() {
     );
 }
 
+/// Regression test: a needle containing a LIKE metacharacter (`%` or `_`)
+/// must be treated as a literal, not a wildcard. Before this fix, a needle of
+/// "%" widened `path LIKE '%/' || ?` into `LIKE '%/%'`, which matches any
+/// `collection/path` string (every row has a `/`) — turning a targeted
+/// `multi_get` lookup into a full corpus dump.
+#[test]
+fn find_documents_by_needles_treats_percent_and_underscore_as_literal() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir.path().join("test.sqlite")).unwrap();
+
+    for (collection, path) in [("docs", "SYNTAX.md"), ("docs", "guide/SYNTAX.md")] {
+        let hash = content_hash(path);
+        upsert_content(&db, &hash, "body", "t").unwrap();
+        upsert_document(&db, collection, path, "Title", &hash, "t").unwrap();
+    }
+
+    let hits = find_documents_by_needles(&db, None, &["%"]).unwrap();
+    assert_eq!(
+        hits.len(),
+        0,
+        "a bare '%' needle must not match every document: {hits:?}"
+    );
+
+    let hits = find_documents_by_needles(&db, None, &["_YNTAX.md"]).unwrap();
+    assert_eq!(
+        hits.len(),
+        0,
+        "a bare '_' must not act as a single-char wildcard: {hits:?}"
+    );
+}
+
 #[test]
 fn find_documents_by_needles_respects_collection_filter() {
     let dir = TempDir::new().unwrap();

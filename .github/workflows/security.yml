@@ -14,6 +14,25 @@ permissions:
   security-events: write
 
 jobs:
+  cargo-audit:
+    name: cargo audit (RUSTSEC)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      # Trivy (below) ignores unfixed advisories and only blocks on CRITICAL,
+      # so a HIGH RUSTSEC advisory with an available patch merges anyway.
+      # cargo-audit checks the full resolved `Cargo.lock` graph against the
+      # RUSTSEC database and blocks on any unpatched advisory by default.
+      - name: Audit Cargo.lock
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   trivy:
     name: Trivy
     runs-on: ubuntu-latest

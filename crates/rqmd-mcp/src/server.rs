@@ -51,6 +51,12 @@ impl RqmdServer {
     }
 
     /// Return the ML store, initialising it (loading models) on first call.
+    ///
+    /// Reloads the store if the on-disk index has changed since it was last
+    /// checked — see `Store::reload_if_stale` for why this is necessary: a
+    /// long-lived MCP daemon never indexes through its own stores, so
+    /// without this it would serve the snapshot it saw at startup forever,
+    /// even after a separate `rqmd index`/`update`/`embed` run.
     fn ml(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Store>> {
         let store = self.ml_store.get_or_try_init(|| {
             let kind = BackendKind::from_env();
@@ -63,15 +69,21 @@ impl RqmdServer {
             let s = Store::open(config, backend)?;
             Ok::<_, anyhow::Error>(Arc::new(std::sync::Mutex::new(s)))
         })?;
-        store
+        let mut guard = store
             .lock()
-            .map_err(|e| anyhow::anyhow!("ml store lock poisoned: {e}"))
+            .map_err(|e| anyhow::anyhow!("ml store lock poisoned: {e}"))?;
+        guard.reload_if_stale().context("reload ml store")?;
+        Ok(guard)
     }
 
+    /// Same staleness handling as [`Self::ml`] — see its doc comment.
     fn fts(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Store>> {
-        self.fts_store
+        let mut guard = self
+            .fts_store
             .lock()
-            .map_err(|e| anyhow::anyhow!("fts store lock poisoned: {e}"))
+            .map_err(|e| anyhow::anyhow!("fts store lock poisoned: {e}"))?;
+        guard.reload_if_stale().context("reload fts store")?;
+        Ok(guard)
     }
 
     /// Release any GGUF model idle for at least `ttl`. Returns how many were

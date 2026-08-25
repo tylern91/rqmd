@@ -207,6 +207,17 @@ impl FtsIndex {
         limit: usize,
         collections: Option<&[String]>,
     ) -> Result<Vec<(String, i64, f32)>> {
+        // `TopDocs::with_limit` asserts `limit != 0` and panics otherwise. A
+        // panic here unwinds through the caller's `Mutex<Store>` guard (the
+        // MCP server holds one per tool call) and poisons it, wedging every
+        // subsequent query until the daemon is restarted — so this must be
+        // handled before it ever reaches tantivy, not just documented as a
+        // caller obligation. "0 results requested" is a well-defined,
+        // non-panicking answer: none.
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
         let searcher = self.reader.searcher();
 
         // `parse_query` fails hard on a fragment tantivy reads as a field specifier
@@ -389,6 +400,23 @@ mod tests {
         let beta = idx.search_fts("uniquebetatoken", 10, None).unwrap();
         assert_eq!(alpha.len(), 0, "old body's terms must no longer match");
         assert_eq!(beta.len(), 1, "new body's terms must match");
+    }
+
+    /// Regression test: `limit: 0` (e.g. from an MCP client, or `rqmd search
+    /// -n 0`) must return an empty result, not panic. `TopDocs::with_limit`
+    /// asserts on a zero limit, and a panic here would unwind through the
+    /// MCP server's `Mutex<Store>` guard and poison it, wedging every
+    /// subsequent tool call until the daemon is restarted.
+    #[test]
+    fn search_fts_zero_limit_returns_empty_not_panic() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("notes/a.md", "Title", "uniquealphatoken", 1)
+            .unwrap();
+        idx.commit().unwrap();
+
+        let results = idx.search_fts("uniquealphatoken", 0, None).unwrap();
+        assert_eq!(results.len(), 0);
     }
 
     /// A path whose tokenization yields exactly one term (below the
