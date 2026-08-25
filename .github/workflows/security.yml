@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -29,7 +29,7 @@ jobs:
       # cargo-audit checks the full resolved `Cargo.lock` graph against the
       # RUSTSEC database and blocks on any unpatched advisory by default.
       - name: Audit Cargo.lock
-        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -38,14 +38,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
           fetch-depth: 1
 
       # ── Step 1: Record CRITICAL + HIGH to the GitHub Security tab (non-blocking) ──
       - name: Trivy scan → SARIF
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -56,7 +56,7 @@ jobs:
         # exit-code defaults to 0 — this step never fails the job
 
       - name: Upload SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@d1ba80a13dd99fba24a470575428917156a28b43 # v4
+        uses: github/codeql-action/upload-sarif@v4
         if: always() # upload even if the blocking step below fails
         with:
           sarif_file: trivy-results.sarif
@@ -66,7 +66,7 @@ jobs:
       # ignore-unfixed: Rust transitive CVEs often have no upstream fix yet; without
       # this flag any advisory without a patched version would wedge every PR.
       - name: Trivy scan → block on CRITICAL
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
