@@ -121,12 +121,16 @@ mod tests {
 
     #[test]
     fn compile_glob_wildcard_and_exact() {
-        assert!(compile_glob("docs/*.md")
-            .unwrap()
-            .is_match("docs/SYNTAX.md"));
-        assert!(!compile_glob("docs/*.md")
-            .unwrap()
-            .is_match("other/SYNTAX.md"));
+        assert!(
+            compile_glob("docs/*.md")
+                .unwrap()
+                .is_match("docs/SYNTAX.md")
+        );
+        assert!(
+            !compile_glob("docs/*.md")
+                .unwrap()
+                .is_match("other/SYNTAX.md")
+        );
         assert!(compile_glob("*").unwrap().is_match("anything/at/all.md"));
         assert!(compile_glob("exact").unwrap().is_match("exact"));
         assert!(!compile_glob("exact").unwrap().is_match("not-exact"));

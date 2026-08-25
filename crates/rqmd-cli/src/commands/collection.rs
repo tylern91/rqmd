@@ -1,9 +1,9 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
-use rqmd_core::{db, Collection};
+use rqmd_core::{Collection, db};
 
-use crate::{document, exclusions, format as fmt, store, CollectionCommand};
+use crate::{CollectionCommand, document, exclusions, format as fmt, store};
 
 pub fn run(index_dir: &Path, cmd: CollectionCommand) -> Result<()> {
     match cmd {
@@ -163,7 +163,7 @@ fn add(
         );
     }
 
-    eprintln!("Collection '{}' ready.", collection_name);
+    eprintln!("Collection '{collection_name}' ready.");
     Ok(())
 }
 

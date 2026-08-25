@@ -8,7 +8,7 @@
 //! "confirmed"; anything else (`/health` unreachable, or answered by a
 //! different pid) is resolved without ever calling `kill`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

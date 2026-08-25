@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
-use rqmd_core::{extract_snippet, snap_char_boundary_backward, SearchResult};
+use rqmd_core::{SearchResult, extract_snippet, snap_char_boundary_backward};
 
 /// Output format shared by every `--format` flag in the CLI. Not every
 /// variant makes sense for every command — `print_document` rejects the
@@ -70,7 +70,7 @@ pub fn atty_stderr() -> bool {
 // We link against libc via the standard library — just call isatty directly.
 #[cfg(unix)]
 fn libc_isatty(fd: i32) -> bool {
-    extern "C" {
+    unsafe extern "C" {
         fn isatty(fd: i32) -> i32;
     }
     unsafe { isatty(fd) != 0 }
@@ -92,7 +92,7 @@ pub fn term_width() -> Option<usize> {
         ws_xpixel: u16,
         ws_ypixel: u16,
     }
-    extern "C" {
+    unsafe extern "C" {
         // ioctl is variadic (int ioctl(int, unsigned long, ...)).
         // On arm64/AAPCS64 variadic and fixed args use different calling conventions,
         // so the declaration MUST use `...` or the third argument lands in the wrong
@@ -411,10 +411,10 @@ fn print_cli(results: &[SearchResult], show_full: bool, query: &str) {
         }
 
         // Line 3: Context (if present)
-        if let Some(ref ctx) = r.context {
-            if !ctx.is_empty() {
-                println!("{}", dim(&format!("Context: {ctx}")));
-            }
+        if let Some(ref ctx) = r.context
+            && !ctx.is_empty()
+        {
+            println!("{}", dim(&format!("Context: {ctx}")));
         }
 
         // Line 4: Score

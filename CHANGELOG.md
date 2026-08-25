@@ -4,6 +4,32 @@
 
 ---
 
+## [0.12.0] - 2026-08-25
+### Breaking
+- `rust-version = "1.88"` is now declared in `[workspace.package]`, inherited
+  by all four crates. This is the true floor of the resolved dependency graph
+  (`time` 0.3.51, `darling` 0.23, `cookie_store` 0.22), not a new
+  requirement — but it is now enforced: a toolchain below 1.88 fails to
+  compile with a clear resolver error instead of a confusing one. Anyone
+  building rqmd on an older Rust must upgrade to 1.88+.
+
+### Changed
+- Migrated all four crates to Rust edition 2024 (needs only 1.85, below the
+  1.88 floor, so it costs nothing in compatibility). `unsafe extern "C"`
+  blocks and the `std::env::set_var`/`remove_var` call sites edition 2024
+  requires as `unsafe` now carry safety comments proving soundness (no
+  concurrent env access, or `#[serial]`-guarded tests).
+- CI: `rust.yml`'s `build-linux` job now runs a `["stable", "1.88"]`
+  toolchain matrix. The pinned `1.88` leg is `continue-on-error` so it can't
+  block `dist-binary`, but a real MSRV regression still shows red in PR
+  checks.
+- Docs: `docs/INSTALL.md` no longer claims a false "≥1.78" floor (was wrong
+  by 10 releases); `CONTRIBUTING.md` gained an MSRV policy section;
+  `flake.nix` now notes the drift risk of its unpinned
+  `nixpkgs-unstable` rustc/cargo.
+
+---
+
 ## [0.11.1] - 2026-08-25
 ### Fixed
 - MCP daemon (`rqmd mcp --daemon`) served permanently stale search results

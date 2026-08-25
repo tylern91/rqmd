@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use ndarray::Ix3;
 use std::path::PathBuf;
 
-use crate::{l2_normalize, InferenceBackend};
+use crate::{InferenceBackend, l2_normalize};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -333,7 +333,7 @@ impl InferenceBackend for OrtBackend {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn resolve_ep(ep: OrtEp) -> ort::ep::ExecutionProviderDispatch {
-    use ort::ep::{DirectML, CPU, CUDA};
+    use ort::ep::{CPU, CUDA, DirectML};
     match ep {
         OrtEp::Cuda => CUDA::default().build(),
         OrtEp::DirectMl => DirectML::default().build(),

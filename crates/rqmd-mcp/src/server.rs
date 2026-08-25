@@ -6,13 +6,14 @@ use std::{
 };
 
 use rmcp::{
+    ServerHandler,
     handler::server::wrapper::Parameters,
     model::{Implementation, ServerCapabilities, ServerInfo},
-    schemars, serde, tool, tool_handler, tool_router, ServerHandler,
+    schemars, serde, tool, tool_handler, tool_router,
 };
 
-use rqmd_core::{db, resolve, Document, Store, StoreConfig};
-use rqmd_llm::{create_backend, no_backend, BackendKind};
+use rqmd_core::{Document, Store, StoreConfig, db, resolve};
+use rqmd_llm::{BackendKind, create_backend, no_backend};
 
 /// Hard cap on documents returned by a single `multi_get` call. Without this,
 /// an unauthenticated caller could pass a bare `*` glob with no collection

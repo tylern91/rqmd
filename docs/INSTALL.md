@@ -15,7 +15,7 @@ brew install rqmd
 
 ### cargo install (source build, cross-platform)
 
-Requires Rust stable ≥1.78, cmake ≥3.14, and a C/C++ toolchain (builds llama.cpp from source).
+Requires Rust stable ≥1.88 (the MSRV, enforced by a pinned CI job), cmake ≥3.14, and a C/C++ toolchain (builds llama.cpp from source).
 
 ```sh
 cargo install --git https://github.com/tylern91/rqmd --locked rqmd-cli
@@ -54,7 +54,7 @@ install -m 0755 rqmd ~/.local/bin/rqmd
 
 ### From source (recommended while in development)
 
-Requirements: Rust stable (≥1.78), cmake ≥3.14 (cmake 4.x supported), Xcode Command Line Tools (macOS) or `build-essential` (Linux).
+Requirements: Rust stable (≥1.88, the MSRV, enforced by a pinned CI job), cmake ≥3.14 (cmake 4.x supported), Xcode Command Line Tools (macOS) or `build-essential` (Linux).
 
 ```sh
 # Clone the repo

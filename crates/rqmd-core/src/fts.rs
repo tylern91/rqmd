@@ -6,11 +6,11 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 use tantivy::{
+    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
     collector::TopDocs,
     doc,
     query::{BooleanQuery, ConstScoreQuery, PhraseQuery, Query, QueryParser, TermQuery},
-    schema::{Field, IndexRecordOption, Schema, SchemaBuilder, Value, FAST, STORED, TEXT},
-    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
+    schema::{FAST, Field, IndexRecordOption, STORED, Schema, SchemaBuilder, TEXT, Value},
 };
 
 pub struct FtsSchema {
@@ -293,15 +293,14 @@ impl FtsIndex {
 
             // Apply collection filter at result level (filepath = "collection/path").
             // No filter, or an empty list, means "search all collections".
-            if let Some(cols) = collections {
-                if !cols.is_empty()
-                    && !cols.iter().any(|cf| {
-                        let prefix = format!("{cf}/");
-                        filepath.starts_with(&prefix) || filepath == cf.as_str()
-                    })
-                {
-                    continue;
-                }
+            if let Some(cols) = collections
+                && !cols.is_empty()
+                && !cols.iter().any(|cf| {
+                    let prefix = format!("{cf}/");
+                    filepath.starts_with(&prefix) || filepath == cf.as_str()
+                })
+            {
+                continue;
             }
 
             let doc_id = retrieved
@@ -498,8 +497,10 @@ mod tests {
             10,
             "expected the full requested limit of in-scope hits, got {results:?}"
         );
-        assert!(results
-            .iter()
-            .all(|(path, _, _)| path.starts_with("notes/")));
+        assert!(
+            results
+                .iter()
+                .all(|(path, _, _)| path.starts_with("notes/"))
+        );
     }
 }

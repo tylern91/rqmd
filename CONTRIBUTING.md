@@ -95,6 +95,24 @@ one) runs no Rust CI at all. `security.yml` (Trivy) runs on every PR
 regardless; only a **CRITICAL** vulnerability with a known fix blocks the
 merge, HIGH severity is recorded to the Security tab but doesn't block.
 
+## MSRV policy
+
+`rust-version = "1.88"` in the root `Cargo.toml` (`[workspace.package]`,
+inherited by every crate) is the **actual** floor of the resolved dependency
+graph — the max `rust-version` any transitive dependency declares (`time`
+0.3.51, `darling` 0.23, `cookie_store` 0.22 as of this writing) — not an
+arbitrary or aspirational number. Don't raise it casually to pick up a new
+API; if a dependency bump pushes the floor higher, that's when it moves.
+
+- Raising the MSRV is a **minor** version bump — it can break users on older
+  toolchains, same as the `RQMD_` env var rename in v0.11.0.
+- `rust.yml`'s `build-linux` job runs a `["stable", "1.88"]` toolchain matrix;
+  the pinned `1.88` leg is what actually enforces the floor (`continue-on-error`
+  so it can't block `dist-binary`, but a real regression still shows red in
+  the PR checks).
+- The edition is 2024, which needs Rust ≥1.85 — below the 1.88 floor, so it
+  costs nothing in compatibility and isn't itself an MSRV constraint.
+
 ## Version + CHANGELOG convention
 
 This is the part that isn't written down anywhere else, so read it carefully:
