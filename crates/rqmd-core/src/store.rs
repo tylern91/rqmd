@@ -3,7 +3,7 @@
 //! Orchestrates rusqlite (metadata), Tantivy (BM25), usearch (HNSW), and
 //! the InferenceBackend (embed/rerank) to provide a hybrid search pipeline.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -519,10 +519,10 @@ impl Store {
                 let Some((doc, body)) = doc_for_vid(&self.db, vid)? else {
                     continue;
                 };
-                if let Some(cols) = &effective {
-                    if !cols.iter().any(|c| c == &doc.collection) {
-                        continue;
-                    }
+                if let Some(cols) = &effective
+                    && !cols.iter().any(|c| c == &doc.collection)
+                {
+                    continue;
                 }
                 let filepath = format!("{}/{}", doc.collection, doc.path);
                 // Keep only the best-scoring chunk per document — a multi-chunk
@@ -1069,10 +1069,11 @@ impl Store {
             // Ranking only needs document identity, not the body — `doc_for_vid_meta`
             // skips the `content` join that `doc_for_vid` pays for on every candidate.
             if let Some(doc) = doc_for_vid_meta(&self.db, vid)? {
-                if let Some(cols) = collections {
-                    if !cols.is_empty() && !cols.iter().any(|c| c == &doc.collection) {
-                        continue;
-                    }
+                if let Some(cols) = collections
+                    && !cols.is_empty()
+                    && !cols.iter().any(|c| c == &doc.collection)
+                {
+                    continue;
                 }
                 results.push(RankedResult {
                     filepath: format!("{}/{}", doc.collection, doc.path),
@@ -1185,10 +1186,10 @@ impl Store {
     /// empty list on: to the FTS/vector search functions an empty slice means
     /// "no filter", which would silently widen back to "search everything".
     fn effective_collections(&self, requested: Option<&[String]>) -> Result<Option<Vec<String>>> {
-        if let Some(cols) = requested {
-            if !cols.is_empty() {
-                return Ok(Some(cols.to_vec()));
-            }
+        if let Some(cols) = requested
+            && !cols.is_empty()
+        {
+            return Ok(Some(cols.to_vec()));
         }
 
         let all = db::list_collections(&self.db).context("list collections for default scope")?;

@@ -2,6 +2,7 @@
 //! Does NOT require inference backend (no model downloads).
 
 use rqmd_core::{
+    Store, StoreConfig,
     chunking::chunk_document,
     db::{
         collection_context_key, content_hash, count_orphaned_vectors, deactivate_missing_documents,
@@ -12,7 +13,6 @@ use rqmd_core::{
     resolve::resolve_multi_get,
     rrf::{reciprocal_rank_fusion, rrf_weights},
     types::{QueryType, RankedListMeta, RankedResult},
-    Store, StoreConfig,
 };
 use rusqlite::params;
 use std::collections::HashSet;
@@ -447,9 +447,11 @@ fn search_fts_multi_filters_to_requested_collections() {
     let two = ["alpha".to_string(), "beta".to_string()];
     let subset = store.search_fts_multi("widget", 10, Some(&two)).unwrap();
     assert_eq!(subset.len(), 2, "expected 2 collections, got {subset:?}");
-    assert!(subset
-        .iter()
-        .all(|h| h.collection == "alpha" || h.collection == "beta"));
+    assert!(
+        subset
+            .iter()
+            .all(|h| h.collection == "alpha" || h.collection == "beta")
+    );
     assert!(!subset.iter().any(|h| h.collection == "gamma"));
 }
 
@@ -602,9 +604,11 @@ fn list_documents_multi_filters_to_requested_collections() {
     let two = ["alpha".to_string(), "gamma".to_string()];
     let subset = rqmd_core::db::list_documents_multi(&store.db, Some(&two)).unwrap();
     assert_eq!(subset.len(), 2);
-    assert!(subset
-        .iter()
-        .all(|d| d.collection == "alpha" || d.collection == "gamma"));
+    assert!(
+        subset
+            .iter()
+            .all(|d| d.collection == "alpha" || d.collection == "gamma")
+    );
 }
 
 // ── Repeatable `-c`/`--collection` CLI flag (Vec<String> instead of Option<String>) ──
@@ -701,9 +705,11 @@ fn search_vec_multi_filters_to_requested_collections() {
         .search_vec_multi("widgetopic", 10, Some(&two))
         .unwrap();
     assert_eq!(subset.len(), 2, "expected 2 collections, got {subset:?}");
-    assert!(subset
-        .iter()
-        .all(|h| h.collection == "alpha" || h.collection == "beta"));
+    assert!(
+        subset
+            .iter()
+            .all(|h| h.collection == "alpha" || h.collection == "beta")
+    );
     assert!(!subset.iter().any(|h| h.collection == "gamma"));
 }
 
@@ -838,9 +844,11 @@ fn hybrid_query_multi_filters_to_requested_collections() {
         .hybrid_query_multi("widgetopic", None, 10, Some(&two), true, true)
         .unwrap();
     assert_eq!(subset.len(), 2, "expected 2 collections, got {subset:?}");
-    assert!(subset
-        .iter()
-        .all(|h| h.collection == "alpha" || h.collection == "beta"));
+    assert!(
+        subset
+            .iter()
+            .all(|h| h.collection == "alpha" || h.collection == "beta")
+    );
     assert!(!subset.iter().any(|h| h.collection == "gamma"));
 }
 
@@ -1194,9 +1202,11 @@ fn purge_collection_hard_deletes_and_preserves_shared_content() {
     );
 
     // `keep`'s copy of the shared content survives untouched.
-    assert!(get_document_by_filepath(&store.db, "keep", "shared.md")
-        .unwrap()
-        .is_some());
+    assert!(
+        get_document_by_filepath(&store.db, "keep", "shared.md")
+            .unwrap()
+            .is_some()
+    );
     let shared_content_count: i64 = store
         .db
         .query_row(

@@ -1,9 +1,9 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::path::Path;
 
-use rqmd_core::{db, Store};
+use rqmd_core::{Store, db};
 
-use crate::{store, ContextCommand};
+use crate::{ContextCommand, store};
 
 const CTX_PREFIX: &str = "context:";
 

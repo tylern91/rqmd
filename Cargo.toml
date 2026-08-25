@@ -4,6 +4,7 @@ resolver = "2"
 
 [workspace.package]
 version = "0.11.1"
+rust-version = "1.88"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

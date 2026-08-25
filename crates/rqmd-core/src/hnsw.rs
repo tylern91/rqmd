@@ -4,7 +4,7 @@
 //! The reverse mapping vid→document is in rusqlite; this module only handles
 //! the vector similarity search itself.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use std::path::Path;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 

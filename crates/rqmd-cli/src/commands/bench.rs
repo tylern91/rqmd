@@ -1,6 +1,6 @@
 use anyhow::Result;
 use rqmd_core::Store;
-use rqmd_llm::{create_backend, BackendKind, InferenceBackend};
+use rqmd_llm::{BackendKind, InferenceBackend, create_backend};
 use std::path::Path;
 use std::time::Instant;
 

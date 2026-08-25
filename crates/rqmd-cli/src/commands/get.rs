@@ -145,10 +145,10 @@ pub fn run_ls(index_dir: &Path, path: Option<&str>) -> Result<()> {
             return Ok(());
         }
         for doc in &docs {
-            if let Some(ref prefix) = filter_prefix {
-                if !doc.path.starts_with(prefix.as_str()) {
-                    continue;
-                }
+            if let Some(ref prefix) = filter_prefix
+                && !doc.path.starts_with(prefix.as_str())
+            {
+                continue;
             }
             println!("rqmd://{}/{}", doc.collection, doc.path);
         }

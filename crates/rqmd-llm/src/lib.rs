@@ -26,18 +26,18 @@
 
 use anyhow::{Context, Result};
 use hf_hub::{
-    api::tokio::{Api, ApiBuilder},
     Cache, Repo, RepoType,
+    api::tokio::{Api, ApiBuilder},
 };
 use llama_cpp_2::{
+    LogOptions,
     context::params::{LlamaContextParams, LlamaPoolingType},
     llama_backend::LlamaBackend,
     llama_batch::LlamaBatch,
-    model::{params::LlamaModelParams, AddBos, LlamaModel},
+    model::{AddBos, LlamaModel, params::LlamaModelParams},
     sampling::LlamaSampler,
     send_logs_to_tracing,
     token::LlamaToken,
-    LogOptions,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -1250,24 +1250,30 @@ mod tests {
     }
 
     impl EnvVarGuard {
+        // SAFETY: `#[serial(inference_backend_env)]` on every test that
+        // constructs an EnvVarGuard is what makes these env mutations sound —
+        // it prevents concurrent access to the same env var from other tests.
         fn set(key: &'static str, value: &str) -> Self {
             let prev = std::env::var(key).ok();
-            std::env::set_var(key, value);
+            unsafe { std::env::set_var(key, value) };
             Self { key, prev }
         }
 
         fn unset(key: &'static str) -> Self {
             let prev = std::env::var(key).ok();
-            std::env::remove_var(key);
+            unsafe { std::env::remove_var(key) };
             Self { key, prev }
         }
     }
 
     impl Drop for EnvVarGuard {
+        // SAFETY: see `EnvVarGuard::set` — same `#[serial]` invariant applies on drop.
         fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
             }
         }
     }
@@ -1441,9 +1447,11 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let cache = Cache::new(dir.path().join("hub"));
         let repo = test_repo("deadbeef");
-        assert!(resolve_cached(&cache, &repo, "model.gguf", ABC_SHA256)
-            .unwrap()
-            .is_none());
+        assert!(
+            resolve_cached(&cache, &repo, "model.gguf", ABC_SHA256)
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// `doctor`'s status check must see the same legacy layout `resolve_cached`

@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use rqmd_core::{Store, StoreConfig};
-use rqmd_llm::{create_backend, BackendKind};
+use rqmd_llm::{BackendKind, create_backend};
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -301,11 +301,7 @@ fn index_all_with_embed(store: &mut Store) -> Result<()> {
 // ── Report ────────────────────────────────────────────────────────────────────
 
 fn pass_fail(rate: f64, threshold: f64) -> &'static str {
-    if rate >= threshold {
-        "PASS"
-    } else {
-        "FAIL"
-    }
+    if rate >= threshold { "PASS" } else { "FAIL" }
 }
 
 fn print_report(mode: &str, thresholds: &Thresholds, results: &EvalResults) {

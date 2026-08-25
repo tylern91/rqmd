@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rqmd_mcp::RqmdServer;
 use std::path::Path;
 use std::time::Duration;

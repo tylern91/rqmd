@@ -254,22 +254,22 @@ pub enum ContextCommand {
 /// the collections marked `include_by_default`. Losing this distinction would
 /// silently turn "no -c flag" into "match zero collections".
 fn collections_filter(v: &[String]) -> Option<&[String]> {
-    if v.is_empty() {
-        None
-    } else {
-        Some(v)
-    }
+    if v.is_empty() { None } else { Some(v) }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Propagate CLI flags into env vars so BackendKind::from_env() picks them up.
-    if let Some(b) = &cli.backend {
-        std::env::set_var("RQMD_INFERENCE_BACKEND", b);
-    }
-    if let Some(ep) = &cli.ort_ep {
-        std::env::set_var("RQMD_ORT_EP", ep);
+    // SAFETY: single-threaded — this runs at the top of main() before any
+    // thread or tokio runtime is spawned, so no concurrent env access exists.
+    unsafe {
+        // Propagate CLI flags into env vars so BackendKind::from_env() picks them up.
+        if let Some(b) = &cli.backend {
+            std::env::set_var("RQMD_INFERENCE_BACKEND", b);
+        }
+        if let Some(ep) = &cli.ort_ep {
+            std::env::set_var("RQMD_ORT_EP", ep);
+        }
     }
 
     // Install a tracing subscriber.  Default behaviour mirrors qmd: native llama.cpp /
@@ -283,24 +283,31 @@ fn main() -> Result<()> {
     // original TypeScript qmd.  ERROR-level messages from those crates still surface.
     // --verbose (or RUST_LOG) restores full output.
     let rust_log_set = std::env::var("RUST_LOG").is_ok();
-    if !rust_log_set {
-        std::env::set_var(
-            "RUST_LOG",
-            if cli.verbose {
-                "debug"
-            } else {
-                "warn,llama-cpp-2=error,ggml=error"
-            },
-        );
+    // SAFETY: single-threaded — still at the top of main(), before any
+    // thread or tokio runtime is spawned, so no concurrent env access exists.
+    unsafe {
+        if !rust_log_set {
+            std::env::set_var(
+                "RUST_LOG",
+                if cli.verbose {
+                    "debug"
+                } else {
+                    "warn,llama-cpp-2=error,ggml=error"
+                },
+            );
+        }
     }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .init();
     if cli.verbose || rust_log_set {
-        // Signal to library crates (e.g. rqmd-llm) that verbose mode is on so they
-        // can adjust their own native-library log levels accordingly.
-        std::env::set_var("RQMD_VERBOSE", "1");
+        // SAFETY: still single-threaded at this point in main() startup.
+        unsafe {
+            // Signal to library crates (e.g. rqmd-llm) that verbose mode is on so they
+            // can adjust their own native-library log levels accordingly.
+            std::env::set_var("RQMD_VERBOSE", "1");
+        }
     }
 
     let index_dir = store::resolve_index_dir(cli.index_dir.as_deref())?;
