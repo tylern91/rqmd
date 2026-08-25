@@ -104,9 +104,17 @@ jobs:
         run: cargo run --locked --bin rqmd -- eval --mode bm25
 
   build-linux:
-    name: Build default (Linux x64)
+    name: Build default (Linux x64, ${{ matrix.toolchain }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # The MSRV (1.88) leg is a drift check, not a release gate — its failure
+    # must not block dist-binary or show as a required-check failure.
+    continue-on-error: ${{ matrix.toolchain != 'stable' }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["stable", "1.88"]
 
     steps:
       - uses: actions/checkout@v7
@@ -114,8 +122,10 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust ${{ matrix.toolchain }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
 
       - name: Install system dependencies
         run: |
@@ -126,7 +136,7 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          key: linux-x64-default
+          key: linux-x64-${{ matrix.toolchain }}
           cache-on-failure: true
 
       - name: Build (default, Linux CPU-only — no Metal)
