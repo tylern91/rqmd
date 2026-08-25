@@ -328,13 +328,22 @@ pub fn find_documents_by_needles(
         return Ok(vec![]);
     }
 
+    // The two LIKE arms need `ESCAPE '\'` and an escaped needle — otherwise a
+    // needle containing `%` or `_` (e.g. a client-supplied "%") widens into a
+    // wildcard and the suffix check degrades to "any path with a `/` in it",
+    // i.e. every document. The two `=` arms are exact matches and take the
+    // needle raw.
     const NEEDLE_CLAUSE: &str =
-        "(path = ? OR (collection || '/' || path) = ? OR path LIKE '%/' || ? OR (collection || '/' || path) LIKE '%/' || ?)";
+        "(path = ? OR (collection || '/' || path) = ? OR path LIKE '%/' || ? ESCAPE '\\' OR (collection || '/' || path) LIKE '%/' || ? ESCAPE '\\')";
     let clauses = vec![NEEDLE_CLAUSE; needles.len()].join(" OR ");
 
     let mut params: Vec<String> = Vec::with_capacity(needles.len() * 4);
     for needle in needles {
-        params.extend(std::iter::repeat_n(needle.to_string(), 4));
+        let escaped = escape_like_pattern(needle);
+        params.push(needle.to_string());
+        params.push(needle.to_string());
+        params.push(escaped.clone());
+        params.push(escaped);
     }
 
     let mut sql = format!("SELECT {DOC_COLUMNS} FROM documents WHERE active=1 AND ({clauses})");

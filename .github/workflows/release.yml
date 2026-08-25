@@ -41,7 +41,7 @@ jobs:
       # which needs the credential actions/checkout wires into .git/config.
       # Disabling it here (unlike the read-only checkouts in this file) would
       # break tag publishing.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}

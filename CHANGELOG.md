@@ -1,7 +1,42 @@
 # rqmd Changelog
 
 ## [Unreleased]
+
+---
+
+## [0.11.1] - 2026-08-25
 ### Fixed
+- MCP daemon (`rqmd mcp --daemon`) served permanently stale search results
+  after any subsequent `rqmd index`/`update`: it opened both the FTS
+  (Tantivy `ReloadPolicy::Manual`) and vector (`usearch` mmap `view()`)
+  indexes read-only and never reloaded them. `Store` now stats Tantivy's
+  `meta.json` (rewritten atomically on every commit — the SQLite main
+  file's mtime does not change under WAL-mode writes) and the HNSW file,
+  and reloads both when either has advanced.
+- `FtsIndex::search_fts_multi` panicked on `limit: 0` (`TopDocs::with_limit`
+  asserts `limit != 0`), which — reached via the MCP `search` tool or the
+  CLI's `search -n 0` — unwound through the daemon's `Mutex<Store>` guard,
+  poisoning it and wedging every subsequent tool call until restart. Zero
+  results is now returned directly instead of reaching Tantivy.
+- `db::find_documents_by_needles` (`multi_get`'s literal-fragment path)
+  built its `LIKE` clauses without escaping `%`/`_`, so a needle containing
+  either widened into an unintended wildcard match (e.g. a bare `%`
+  matched every document, since every row's `collection/path` contains a
+  `/`). Both `LIKE` arms now escape the needle and add `ESCAPE '\'`.
+- `resolve_multi_get` classified only `*` as a glob metacharacter, so
+  `globset`-valid patterns using `?` or `[a-z]` fell through to the
+  literal-needle branch and silently matched the wrong documents (or none).
+  Classification now checks for any of `*`, `?`, `[`, `{`.
+- An unmatched `#docid`, needle, or glob entry in a `multi_get` pattern was
+  silently dropped from the result set with no signal, indistinguishable
+  from "the document has no content." Each now emits a `tracing::warn!`.
+- CI had no RUSTSEC advisory scan of `Cargo.lock` — the only scanner
+  (Trivy) ignores unfixed advisories and only blocks on `CRITICAL`, so a
+  patchable `HIGH` Rust advisory would merge unnoticed. Added a
+  `cargo-audit` job, and bumped two transitive deps it flagged on first
+  run: `crossbeam-epoch` 0.9.18 → 0.9.20 (RUSTSEC-2026-0204, invalid
+  pointer deref) and `h2` 0.4.15 → 0.4.16 (RUSTSEC-2026-0258, unbounded
+  empty DATA frames).
 - CI: a release that failed after tagging (e.g. the v1.0.0 bump-label
   escalation bug) silently skipped asset uploads, release-notes
   finalization, and the Homebrew tap sync, with no supported way to finish

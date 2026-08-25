@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use rqmd_llm::InferenceBackend;
 use sha2::{Digest, Sha256};
@@ -85,6 +85,19 @@ pub struct Store {
     hnsw: VectorIndex,
     backend: Box<dyn InferenceBackend>,
     hnsw_path: PathBuf,
+    /// Tantivy's `meta.json` — rewritten atomically on every `commit()`, so
+    /// its mtime is the reliable staleness signal for the FTS side. The main
+    /// `.sqlite` file is *not* a substitute: this database runs in WAL mode
+    /// (`db.rs`'s `PRAGMA journal_mode = WAL`), and ordinary writes land in
+    /// the `-wal` sidecar without touching the main file's mtime until a
+    /// checkpoint happens — which can lag far behind the writes a resident
+    /// reader needs to notice.
+    tantivy_meta_path: PathBuf,
+    /// mtimes observed at `open()` (or the last `reload_if_stale()`), used to
+    /// detect when another process has written to the index since. `None`
+    /// means the file didn't exist at that point.
+    last_seen_tantivy_meta_mtime: Option<SystemTime>,
+    last_seen_hnsw_mtime: Option<SystemTime>,
 }
 
 pub struct StoreConfig {
@@ -165,13 +178,59 @@ impl Store {
             hnsw.ensure_next_vid_at_least(max_vid + 1);
         }
 
+        let tantivy_meta_path = config.tantivy_dir.join("meta.json");
+        let last_seen_tantivy_meta_mtime = mtime_of(&tantivy_meta_path);
+        let last_seen_hnsw_mtime = mtime_of(&config.hnsw_path);
+
         Ok(Self {
             db,
             fts,
             hnsw,
             backend,
             hnsw_path: config.hnsw_path,
+            tantivy_meta_path,
+            last_seen_tantivy_meta_mtime,
+            last_seen_hnsw_mtime,
         })
+    }
+
+    /// Reload the FTS reader and re-`view()` the HNSW index if either has
+    /// changed on disk since `open()` (or the last call to this method).
+    /// Returns whether a reload happened.
+    ///
+    /// This exists for long-lived, read-only callers — namely the MCP
+    /// daemon — that open a [`Store`] once and keep it resident across many
+    /// tool calls without ever indexing through it themselves. Without this,
+    /// such a caller serves whatever snapshot existed at startup forever:
+    /// the Tantivy reader was built with `ReloadPolicy::Manual` (only
+    /// `commit()` reloads it, and this Store never commits), and the HNSW
+    /// index was opened via `VectorIndex::view()`, a frozen mmap snapshot.
+    /// A separate process running `rqmd index`/`update`/`embed` against the
+    /// same paths would otherwise never become visible without restarting
+    /// the daemon.
+    ///
+    /// Cheap to call on every tool invocation: it's two `stat()` calls in
+    /// the common case where nothing changed.
+    pub fn reload_if_stale(&mut self) -> Result<bool> {
+        let tantivy_meta_mtime = mtime_of(&self.tantivy_meta_path);
+        let hnsw_mtime = mtime_of(&self.hnsw_path);
+
+        if tantivy_meta_mtime == self.last_seen_tantivy_meta_mtime
+            && hnsw_mtime == self.last_seen_hnsw_mtime
+        {
+            return Ok(false);
+        }
+
+        self.fts.reader.reload().context("reload fts reader")?;
+        self.hnsw = if self.hnsw_path.exists() {
+            VectorIndex::view(&self.hnsw_path).context("reload hnsw view")?
+        } else {
+            VectorIndex::new()?
+        };
+
+        self.last_seen_tantivy_meta_mtime = tantivy_meta_mtime;
+        self.last_seen_hnsw_mtime = hnsw_mtime;
+        Ok(true)
     }
 
     // ── Indexing ──────────────────────────────────────────────────────────────
@@ -630,9 +689,6 @@ impl Store {
             );
         }
 
-        let mut ranked_lists: Vec<Vec<RankedResult>> = Vec::new();
-        let mut list_meta: Vec<RankedListMeta> = Vec::new();
-
         // Parse the raw query per docs/SYNTAX.md.
         let parsed = parse_query(query);
 
@@ -648,6 +704,52 @@ impl Store {
             Some(i) => format!("{i}\n{query}"),
             None => query.to_string(),
         };
+
+        let (ranked_lists, list_meta) = self.retrieve_ranked_lists(
+            &parsed,
+            effective_intent.as_deref(),
+            query,
+            collections,
+            fetch_size,
+            no_expand,
+        )?;
+
+        // Step 4: RRF fusion. Step 5: resolve fused candidates to full documents.
+        let candidate_docs =
+            self.fuse_and_resolve_candidates(&ranked_lists, &list_meta, fetch_size)?;
+        if candidate_docs.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Step 6: chunk selection + rerank.
+        let (best_chunks, rerank_scores) = self.select_chunks_and_rerank(
+            query,
+            &rerank_query,
+            effective_intent.as_deref(),
+            &candidate_docs,
+            skip_rerank,
+        );
+
+        Ok(self.assemble_results(candidate_docs, &best_chunks, rerank_scores, limit))
+    }
+
+    /// Steps 1-3 of `hybrid_query_multi`: retrieve one ranked list per query
+    /// signal — either every sub-query in a parsed query document ("query
+    /// document mode"), or BM25 + vector + optional generation-based
+    /// expansion on the raw query text ("expand mode") — without fusing them
+    /// yet. Returns the ranked lists alongside metadata (source + query type)
+    /// used by `rrf_weights` to weight each list during fusion.
+    fn retrieve_ranked_lists(
+        &mut self,
+        parsed: &crate::query::ParsedQuery,
+        effective_intent: Option<&str>,
+        query: &str,
+        collections: Option<&[String]>,
+        fetch_size: usize,
+        no_expand: bool,
+    ) -> Result<(Vec<Vec<RankedResult>>, Vec<RankedListMeta>)> {
+        let mut ranked_lists: Vec<Vec<RankedResult>> = Vec::new();
+        let mut list_meta: Vec<RankedListMeta> = Vec::new();
 
         if !parsed.subqueries.is_empty() {
             // ── Query document mode ────────────────────────────────────────────
@@ -757,7 +859,7 @@ impl Store {
                          generation — falling back to BM25+vector fusion only"
                     );
                 } else {
-                    let prompt = build_expansion_prompt(expand_text, effective_intent.as_deref());
+                    let prompt = build_expansion_prompt(expand_text, effective_intent);
                     match self.backend.generate(&prompt) {
                         Ok(expansion) => {
                             let expansion_lists =
@@ -775,30 +877,52 @@ impl Store {
             }
         }
 
-        // Step 4: RRF fusion.
+        Ok((ranked_lists, list_meta))
+    }
+
+    /// Step 4-5 of `hybrid_query_multi`: RRF-fuse the independently ranked
+    /// lists, then resolve the top `fetch_size` fused candidates to their
+    /// document bodies. Returns an empty vec if there were no ranked lists
+    /// to fuse, or none of the fused candidates resolved to a document —
+    /// callers treat either case as "no results."
+    fn fuse_and_resolve_candidates(
+        &self,
+        ranked_lists: &[Vec<RankedResult>],
+        list_meta: &[RankedListMeta],
+        fetch_size: usize,
+    ) -> Result<Vec<(RankedResult, String, String)>> {
         if ranked_lists.is_empty() {
             return Ok(vec![]);
         }
-        let weights = rrf_weights(&list_meta);
-        let fused = reciprocal_rank_fusion(&ranked_lists, &weights);
+        let weights = rrf_weights(list_meta);
+        let fused = reciprocal_rank_fusion(ranked_lists, &weights);
         let candidates = &fused[..fetch_size.min(fused.len())];
 
-        // Step 5: Resolve candidates to full documents.
         let mut candidate_docs: Vec<(RankedResult, String, String)> = Vec::new();
         for cand in candidates {
             if let Some((doc, body)) = self.filepath_to_doc_body(&cand.filepath)? {
                 candidate_docs.push((cand.clone(), doc.hash, body));
             }
         }
+        Ok(candidate_docs)
+    }
 
-        if candidate_docs.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Step 6: Chunk selection — chunk each candidate once, reuse for both
-        // the rerank input list and the final best_chunk / best_chunk_pos.
+    /// Step 6 of `hybrid_query_multi`: chunk each candidate once (reused for
+    /// both the rerank input list and the final `best_chunk`/`best_chunk_pos`),
+    /// then rerank with the cross-encoder unless reranking was skipped or the
+    /// active backend doesn't support it. Returns `(best_chunks, rerank_scores)`
+    /// — `rerank_scores` is `None` when reranking didn't run, in which case
+    /// `assemble_results` falls back to pure RRF scoring.
+    fn select_chunks_and_rerank(
+        &mut self,
+        query: &str,
+        rerank_query: &str,
+        effective_intent: Option<&str>,
+        candidate_docs: &[(RankedResult, String, String)],
+        skip_rerank: bool,
+    ) -> (Vec<(String, usize)>, Option<Vec<f32>>) {
         // Fold intent terms into query terms for better snippet selection.
-        let term_source = match &effective_intent {
+        let term_source = match effective_intent {
             Some(i) => format!("{i} {query}"),
             None => query.to_string(),
         };
@@ -827,9 +951,23 @@ impl Store {
             None
         } else {
             // Use the intent-prepended rerank query for better cross-encoder scoring.
-            self.backend.rerank(&rerank_query, &chunk_refs).ok()
+            self.backend.rerank(rerank_query, &chunk_refs).ok()
         };
 
+        (best_chunks, rerank_scores)
+    }
+
+    /// Step 7 of `hybrid_query_multi`: blend each candidate's rerank score
+    /// with its RRF score (falling back to pure RRF when reranking didn't
+    /// run), build the final `SearchResult`s, then sort by score descending
+    /// and truncate to `limit`.
+    fn assemble_results(
+        &self,
+        candidate_docs: Vec<(RankedResult, String, String)>,
+        best_chunks: &[(String, usize)],
+        rerank_scores: Option<Vec<f32>>,
+        limit: usize,
+    ) -> Vec<SearchResult> {
         let mut final_results = Vec::new();
 
         for (i, (cand, hash, body)) in candidate_docs.into_iter().enumerate() {
@@ -868,7 +1006,7 @@ impl Store {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         final_results.truncate(limit);
-        Ok(final_results)
+        final_results
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1107,6 +1245,13 @@ fn split_filepath(filepath: &str) -> (&str, &str) {
     filepath.split_once('/').unwrap_or((filepath, ""))
 }
 
+/// `path`'s last-modified time, or `None` if it doesn't exist or the
+/// platform can't report one. Used by [`Store::reload_if_stale`] to detect
+/// out-of-process writes without needing an fs watcher.
+fn mtime_of(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 /// Pick the chunk with the most query-term overlap.
 /// Returns `(text, char_offset)` — chunks once and returns both to avoid
 /// duplicate work in the caller.
@@ -1307,6 +1452,75 @@ mod tests {
             read_only: false,
         };
         Store::open(config, Box::new(backend)).unwrap()
+    }
+
+    /// Regression test for the MCP daemon staleness bug: a long-lived,
+    /// read-only `Store` (standing in for the daemon's) must be able to see
+    /// documents written by a separate `Store` handle (standing in for a
+    /// concurrent `rqmd index`/`update` run) after calling
+    /// `reload_if_stale()` — without being reopened.
+    ///
+    /// This also pins the fix for a follow-on bug in the first attempt at
+    /// this method: it compared the main `.sqlite` file's mtime, which does
+    /// not change under WAL-mode writes (confirmed empirically — WAL writes
+    /// land in the `-wal` sidecar) until a checkpoint happens. The real
+    /// staleness signal for the FTS side is Tantivy's `meta.json`, rewritten
+    /// atomically on every `commit()`.
+    #[test]
+    fn reload_if_stale_surfaces_writes_from_a_second_store_handle() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        // Writer: simulates `rqmd index` running as a separate process.
+        let writer_backend = StubBackend {
+            name: "stub-org/stub-embed.onnx".to_string(),
+            caps: rqmd_llm::BackendCapabilities {
+                embed: false,
+                rerank: false,
+                generate: false,
+            },
+        };
+        let mut writer = open_stub_store(dir.path(), writer_backend);
+
+        // Reader: simulates the resident MCP daemon, opened read-only before
+        // any documents exist.
+        let reader_config = StoreConfig {
+            db_path: dir.path().join("test.sqlite"),
+            tantivy_dir: dir.path().join("tantivy"),
+            hnsw_path: dir.path().join("hnsw.usearch"),
+            read_only: true,
+        };
+        let mut reader = Store::open(reader_config, rqmd_llm::no_backend()).unwrap();
+
+        assert_eq!(
+            reader.search_fts("uniquestaledoc", 10, None).unwrap().len(),
+            0,
+            "sanity: nothing indexed yet"
+        );
+
+        writer
+            .index_document_fts_only("coll", "notes/new.md", "Title", "uniquestaledoc")
+            .unwrap();
+        writer.flush().unwrap();
+
+        // Without calling reload_if_stale, the reader's Manual-reload Tantivy
+        // reader must still show the pre-write snapshot.
+        assert_eq!(
+            reader.search_fts("uniquestaledoc", 10, None).unwrap().len(),
+            0,
+            "reader must not see the new doc before reload_if_stale() is called"
+        );
+
+        let reloaded = reader.reload_if_stale().unwrap();
+        assert!(reloaded, "reload_if_stale must detect the writer's commit");
+
+        assert_eq!(
+            reader.search_fts("uniquestaledoc", 10, None).unwrap().len(),
+            1,
+            "reader must see the new doc after reload_if_stale()"
+        );
+
+        // Calling again with nothing new written must be a no-op.
+        assert!(!reader.reload_if_stale().unwrap());
     }
 
     /// Regression test for the "embeddings are stale" false-positive: the

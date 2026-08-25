@@ -35,7 +35,9 @@ use llama_cpp_2::{
     llama_batch::LlamaBatch,
     model::{params::LlamaModelParams, AddBos, LlamaModel},
     sampling::LlamaSampler,
-    send_logs_to_tracing, LogOptions,
+    send_logs_to_tracing,
+    token::LlamaToken,
+    LogOptions,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -588,6 +590,34 @@ async fn get_verified(
     Ok(path)
 }
 
+/// Build the primary hf-hub API client and, when a credential is in play, an
+/// anonymous fallback client to retry without one on a 401/403 (see
+/// `get_with_auth_fallback`). Token precedence: `HF_TOKEN` /
+/// `HUGGING_FACE_HUB_TOKEN` env vars override hf-hub's own cache-file token
+/// (which `ApiBuilder::from_env` already picks up via `Cache::token()`); with
+/// neither, no token is sent.
+fn build_hf_api_clients(cache: &Cache) -> Result<(Api, Option<Api>)> {
+    let env_token = env_hf_token();
+    let mut builder = ApiBuilder::from_env();
+    if let Some(tok) = env_token.clone() {
+        builder = builder.with_token(Some(tok));
+    }
+    let api = builder.build().context("hf-hub API init")?;
+
+    let anon_api = if env_token.is_some() || cache.token().is_some() {
+        Some(
+            ApiBuilder::from_env()
+                .with_token(None)
+                .build()
+                .context("hf-hub anonymous API init")?,
+        )
+    } else {
+        None
+    };
+
+    Ok((api, anon_api))
+}
+
 /// Download (or resolve from cache) all three GGUF models. Shared between the
 /// two runtime contexts in `LlamaCppBackend::new` (already inside a tokio
 /// runtime vs. not) so revision pinning and SHA-256 verification are
@@ -602,30 +632,7 @@ async fn download_models(config: &LlamaCppConfig) -> Result<(PathBuf, PathBuf, P
     // use `Cache::from_env()`) checking a different directory than downloads
     // actually landed in whenever HF_HOME was set.
     let cache = Cache::from_env();
-
-    // Token precedence: HF_TOKEN / HUGGING_FACE_HUB_TOKEN env vars override
-    // hf-hub's own cache-file token (which `ApiBuilder::from_env` already
-    // picks up via `Cache::token()`); with neither, no token is sent.
-    let env_token = env_hf_token();
-    let mut builder = ApiBuilder::from_env();
-    if let Some(tok) = env_token.clone() {
-        builder = builder.with_token(Some(tok));
-    }
-    let api = builder.build().context("hf-hub API init")?;
-
-    // Build the anonymous fallback client only when a credential is actually
-    // in play — env override or cache file — since it exists purely to retry
-    // without one on a 401/403 (see `get_with_auth_fallback`).
-    let anon_api = if env_token.is_some() || cache.token().is_some() {
-        Some(
-            ApiBuilder::from_env()
-                .with_token(None)
-                .build()
-                .context("hf-hub anonymous API init")?,
-        )
-    } else {
-        None
-    };
+    let (api, anon_api) = build_hf_api_clients(&cache)?;
 
     let ep = get_verified(
         &api,
@@ -856,6 +863,47 @@ fn is_idle(last_used: Option<Instant>, now: Instant, ttl: Duration) -> bool {
     }
 }
 
+/// Build the single-sequence batch that decodes a HyDE expansion prompt in
+/// one shot (logits requested only on the last token).
+fn build_prompt_batch(tokens: &[LlamaToken], n_prompt: usize) -> Result<LlamaBatch<'_>> {
+    let mut batch = LlamaBatch::new(n_prompt.max(1), 1);
+    for (i, &tok) in tokens.iter().enumerate() {
+        let last = i == n_prompt - 1;
+        batch
+            .add(tok, i as i32, &[0], last)
+            .context("batch add (prompt)")?;
+    }
+    Ok(batch)
+}
+
+/// Free-form sampler chain for HyDE expansion generation — no GBNF grammar.
+/// GBNF grammar sampling is not viable on llama-cpp-2 v0.1.150: the
+/// llama.cpp grammar engine aborts with GGML_ASSERT(!stacks.empty()) when
+/// a multi-byte token drives the grammar into a dead state, and that assert
+/// is uncatchable across Rust FFI.  The output parser (parse_and_run_expansion)
+/// is lenient line-based and never needed the grammar's hard constraint.
+///
+/// Rule: dist() MUST be last — temp/top_k/top_p are filters only (they do
+/// not set cur_p.selected); without dist the sampler aborts with
+/// GGML_ASSERT(cur_p.selected >= 0).
+fn build_expansion_sampler() -> LlamaSampler {
+    LlamaSampler::chain_simple([
+        LlamaSampler::temp(0.7),
+        LlamaSampler::top_k(40),
+        LlamaSampler::top_p(0.9, 1),
+        LlamaSampler::dist(1337),
+    ])
+}
+
+/// Has the `hyde:` line in a partially-decoded HyDE expansion been completed
+/// (i.e. `out` contains "hyde:" followed by a newline)? The three-line
+/// lex:/vec:/hyde: format is done as soon as this is true.
+fn hyde_expansion_complete(out: &str) -> bool {
+    out.split_once("hyde:")
+        .map(|(_, tail)| tail.contains('\n'))
+        .unwrap_or(false)
+}
+
 impl InferenceBackend for LlamaCppBackend {
     fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
         self.ensure_embed()?;
@@ -979,31 +1027,10 @@ impl InferenceBackend for LlamaCppBackend {
         }
 
         // Decode the full prompt in one batch (logits only on the last token).
-        let mut batch = LlamaBatch::new(n_prompt.max(1), 1);
-        for (i, &tok) in tokens.iter().enumerate() {
-            let last = i == n_prompt - 1;
-            batch
-                .add(tok, i as i32, &[0], last)
-                .context("batch add (prompt)")?;
-        }
+        let mut batch = build_prompt_batch(&tokens, n_prompt)?;
         ctx.decode(&mut batch).context("generate prompt decode")?;
 
-        // Free-form sampler chain — no GBNF grammar.
-        // GBNF grammar sampling is not viable on llama-cpp-2 v0.1.150: the
-        // llama.cpp grammar engine aborts with GGML_ASSERT(!stacks.empty()) when
-        // a multi-byte token drives the grammar into a dead state, and that assert
-        // is uncatchable across Rust FFI.  The output parser (parse_and_run_expansion)
-        // is lenient line-based and never needed the grammar's hard constraint.
-        //
-        // Rule: dist() MUST be last — temp/top_k/top_p are filters only (they do
-        // not set cur_p.selected); without dist the sampler aborts with
-        // GGML_ASSERT(cur_p.selected >= 0).
-        let mut sampler = LlamaSampler::chain_simple([
-            LlamaSampler::temp(0.7),
-            LlamaSampler::top_k(40),
-            LlamaSampler::top_p(0.9, 1),
-            LlamaSampler::dist(1337),
-        ]);
+        let mut sampler = build_expansion_sampler();
 
         // Accumulate decoded text; a shared Decoder handles multi-byte UTF-8
         // sequences that span token boundaries correctly.
@@ -1031,13 +1058,10 @@ impl InferenceBackend for LlamaCppBackend {
                 .context("token_to_piece")?;
             out.push_str(&piece);
 
-            // Early stop: once the hyde: line is complete (i.e. out contains
-            // "hyde:" followed by a newline) the three-line format is done.
-            // EOG token and MAX_EXPANSION_TOKENS are additional backstops.
-            if let Some(after_hyde) = out.split_once("hyde:").map(|(_, tail)| tail) {
-                if after_hyde.contains('\n') {
-                    break;
-                }
+            // Early stop: EOG token and MAX_EXPANSION_TOKENS are additional
+            // backstops beyond the hyde: line completing.
+            if hyde_expansion_complete(&out) {
+                break;
             }
 
             // Decode the next single token.
