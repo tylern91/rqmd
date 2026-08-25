@@ -4,6 +4,24 @@
 
 ---
 
+## [0.12.1] - 2026-08-25
+### Fixed
+- CI: `rustsec/audit-check` was pinned to `v2.0.0`, whose `action.yml` still
+  declares the deprecated `node20` runtime; no tag past `v2.0.0` carries the
+  upstream Node 24 fix, so `security.yml` now SHA-pins `rustsec/audit-check` to
+  the `main` commit that ships it.
+- CI: the release workflow's "Import GPG key" step failed opaquely
+  (`gpg: no valid OpenPGP data found`) whenever `GPG_PRIVATE_KEY` was stored
+  base64-wrapped instead of raw ASCII-armored — silently blocking every
+  release since v0.11.0. The step now auto-detects and unwraps a
+  base64-wrapped key, and fails with a non-leaking shape diagnostic
+  (byte lengths only) instead of a bare gpg error when the secret is neither.
+- CI: `release.yml` now grants `workflows: write` — without it, GitHub
+  refuses to push a release tag against a commit whose tree touches
+  `.github/workflows/*`, which blocked the v0.11.1/v0.12.0 tag pushes.
+
+---
+
 ## [0.12.0] - 2026-08-25
 ### Breaking
 - `rust-version = "1.88"` is now declared in `[workspace.package]`, inherited

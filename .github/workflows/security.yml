@@ -28,8 +28,10 @@ jobs:
       # so a HIGH RUSTSEC advisory with an available patch merges anyway.
       # cargo-audit checks the full resolved `Cargo.lock` graph against the
       # RUSTSEC database and blocks on any unpatched advisory by default.
+      # SHA-pinned on purpose, deviating from this repo's otherwise-universal
+      # moving-tag convention (checkout@v7, trivy-action@v0.36.0, …): the newest
       - name: Audit Cargo.lock
-        uses: rustsec/audit-check@v2.0.0
+        uses: rustsec/audit-check@858dc40f52ca2b8570b7a997c1c4e35c6fc9a432 # main @ 2026-03-20 (node24)
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 

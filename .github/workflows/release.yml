@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  workflows: write
 
 concurrency:
   group: release-main
@@ -136,16 +137,46 @@ jobs:
           GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
         run: |
           set -euo pipefail
-          if [ -z "$GPG_PRIVATE_KEY" ]; then
+          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
             echo "::error::GPG_PRIVATE_KEY secret is not set — refusing to publish an unsigned release tag"
             exit 1
           fi
-          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+          # Accept a raw ASCII-armored export or a base64-wrapped one. Storing
+          # the key base64-encoded is a common habit, and the failure it
+          # produces here is opaque ("no valid OpenPGP data found", exit 2) —
+          # which is exactly how v0.11.0, v0.11.1 and v0.12.0 all silently
+          # failed to ship.
+          key="$GPG_PRIVATE_KEY"
+          case "$key" in
+            *"BEGIN PGP PRIVATE KEY BLOCK"*) ;;
+            *) key="$(printf '%s' "$key" | tr -d '[:space:]' | base64 -d 2>/dev/null || true)" ;;
+          esac
+
+          case "$key" in
+            *"BEGIN PGP PRIVATE KEY BLOCK"*) ;;
+            *)
+              # Never echo the secret — report only its shape, enough to tell
+              # wrong-format from wrong-key from truncated-paste.
+              echo "::error::GPG_PRIVATE_KEY is neither ASCII-armored nor base64-wrapped ASCII-armored OpenPGP."
+              echo "::error::  stored length: ${#GPG_PRIVATE_KEY} bytes; after base64 decode: ${#key} bytes"
+              echo "::error::  Re-upload with: gpg --armor --export-secret-keys <KEY_ID> | gh secret set GPG_PRIVATE_KEY"
+              exit 1
+              ;;
+          esac
+
+          printf '%s\n' "$key" | gpg --batch --import
           printf 'default-cache-ttl 7200\n' >> ~/.gnupg/gpg-agent.conf
           printf 'allow-loopback-pinentry\n' >> ~/.gnupg/gpg-agent.conf
           printf 'pinentry-mode loopback\n'  >> ~/.gnupg/gpg.conf
           gpgconf --kill gpg-agent
-          printf '%s' "$GPG_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 --sign -o /dev/null <(printf 'test')
+          if ! printf '%s' "$GPG_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 --sign -o /dev/null <(printf 'test'); then
+            echo "::error::Test sign failed — GPG_PASSPHRASE does not unlock the imported key, or GPG_KEY_ID doesn't match it."
+            echo "::error::  imported secret keys:"
+            gpg --list-secret-keys --keyid-format=long | grep -E '^sec' || echo "::error::  (none imported)"
+            echo "::error::  GPG_KEY_ID secret: $GPG_KEY_ID"
+            exit 1
+          fi
           git config user.signingkey "$GPG_KEY_ID"
           git config tag.gpgsign true
           printf 'signed=true\n' >> "$GITHUB_OUTPUT"
