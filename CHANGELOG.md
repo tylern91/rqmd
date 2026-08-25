@@ -1,6 +1,10 @@
 # rqmd Changelog
 
 ## [Unreleased]
+
+---
+
+## [0.11.1] - 2026-08-25
 ### Fixed
 - MCP daemon (`rqmd mcp --daemon`) served permanently stale search results
   after any subsequent `rqmd index`/`update`: it opened both the FTS
@@ -29,7 +33,10 @@
 - CI had no RUSTSEC advisory scan of `Cargo.lock` — the only scanner
   (Trivy) ignores unfixed advisories and only blocks on `CRITICAL`, so a
   patchable `HIGH` Rust advisory would merge unnoticed. Added a
-  `cargo-audit` job.
+  `cargo-audit` job, and bumped two transitive deps it flagged on first
+  run: `crossbeam-epoch` 0.9.18 → 0.9.20 (RUSTSEC-2026-0204, invalid
+  pointer deref) and `h2` 0.4.15 → 0.4.16 (RUSTSEC-2026-0258, unbounded
+  empty DATA frames).
 - CI: a release that failed after tagging (e.g. the v1.0.0 bump-label
   escalation bug) silently skipped asset uploads, release-notes
   finalization, and the Homebrew tap sync, with no supported way to finish
