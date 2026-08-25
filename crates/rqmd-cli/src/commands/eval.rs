@@ -460,7 +460,7 @@ pub fn run_eval(_index_dir: &Path, mode: &str, verbose: bool) -> Result<()> {
                     Difficulty::Hard,
                     Difficulty::Fusion,
                 ] {
-                    println!("  {:?}:", tier);
+                    println!("  {tier:?}:");
                     for q in EVAL_QUERIES.iter().filter(|q| q.difficulty == tier) {
                         let hits = store
                             .search_fts(q.query, 5, Some("eval-docs"))

@@ -107,7 +107,7 @@ fn main() -> Result<()> {
             .trim()
             .to_string();
 
-        print!("  Indexing {} ... ", filename);
+        print!("  Indexing {filename} ... ");
         store.index_document("eval", &filename, &title, &body)?;
         println!("done");
         indexed += 1;

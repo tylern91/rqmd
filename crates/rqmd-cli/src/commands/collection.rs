@@ -163,7 +163,7 @@ fn add(
         );
     }
 
-    eprintln!("Collection '{}' ready.", collection_name);
+    eprintln!("Collection '{collection_name}' ready.");
     Ok(())
 }
 
