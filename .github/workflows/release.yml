@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # Needed to push a tag against a commit whose tree touches .github/workflows/*.
   workflows: write
 
 concurrency:
@@ -37,23 +38,19 @@ jobs:
       PR_BODY: ${{ github.event.pull_request.body }}
       PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
     steps:
-      # persist-credentials intentionally left at its default (true): the
-      # "Create and push tag" step below does a raw `git push origin "$tag"`
-      # which needs the credential actions/checkout wires into .git/config.
-      # Disabling it here (unlike the read-only checkouts in this file) would
-      # break tag publishing.
+      # persist-credentials left at its default (true): the "Create and push
+      # tag" step below needs the credential actions/checkout wires into
+      # .git/config to push the tag.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve bump label with breaking-change escalation
-        # An explicit major/minor/patch label (required by the job-level `if:` gate
-        # above) always wins. `breaking-change`/`!`/`BREAKING CHANGE:` are informational
-        # only — per the PR template, they pair with an already-chosen label rather than
-        # overriding it, since pre-1.0 this repo's own convention is that breaking changes
-        # take the minor slot, not major. This flag only controls the release-notes
-        # callout in build-release-notes.sh, never the version bump itself.
+        # The explicit major/minor/patch label always sets the version bump.
+        # breaking-change/!/BREAKING CHANGE: are informational only — pre-1.0,
+        # breaking changes take the minor slot, not major — and only control
+        # the release-notes callout in build-release-notes.sh.
         id: bump
         run: |
           set -euo pipefail
@@ -87,14 +84,11 @@ jobs:
           fi
 
       - name: Stamp commit/PR refs into this release's CHANGELOG section
-        # Stamps CHANGELOG.md in THIS ephemeral checkout only — never committed or pushed
-        # back to main (the branch ruleset forbids that regardless: bypass_actors is null,
-        # so not even this job's own token can push to main directly). The tag computed
-        # above (steps.ver.outputs.next) doesn't exist yet at this point in the job, so
-        # STAMP_HEAD_REF tells the script to compute the commit range against HEAD (the
-        # merge commit about to become that tag) instead of requiring the tag to pre-exist.
-        # This is what makes every future release body carry commit/PR provenance
-        # automatically instead of just the one-time historical backfill.
+        # Stamps CHANGELOG.md in THIS ephemeral checkout only — never committed
+        # or pushed back to main (the branch ruleset's bypass_actors is null,
+        # so not even this job's own token can push to main directly). The tag
+        # computed above doesn't exist yet at this point, so STAMP_HEAD_REF
+        # tells the script to diff against HEAD instead of requiring the tag.
         if: steps.guard.outputs.skip == 'false'
         env:
           STAMP_HEAD_REF: HEAD
@@ -144,9 +138,7 @@ jobs:
 
           # Accept a raw ASCII-armored export or a base64-wrapped one. Storing
           # the key base64-encoded is a common habit, and the failure it
-          # produces here is opaque ("no valid OpenPGP data found", exit 2) —
-          # which is exactly how v0.11.0, v0.11.1 and v0.12.0 all silently
-          # failed to ship.
+          # produces here is opaque ("no valid OpenPGP data found", exit 2).
           key="$GPG_PRIVATE_KEY"
           case "$key" in
             *"BEGIN PGP PRIVATE KEY BLOCK"*) ;;
