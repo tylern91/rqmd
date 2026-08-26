@@ -3,12 +3,25 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "major|minor|patch — the version bump to cut"
+        required: true
+        type: choice
+        options: [patch, minor, major]
+      pr_number:
+        description: "PR number this release covers, for release-notes provenance. Optional."
+        type: string
+        default: ""
+      dry_run:
+        description: "Compute and print the tag + notes without creating them"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
   pull-requests: write
-  # Needed to push a tag against a commit whose tree touches .github/workflows/*.
-  workflows: write
 
 concurrency:
   group: release-main
@@ -17,19 +30,21 @@ concurrency:
 jobs:
   release:
     if: >
-      github.event.pull_request.merged == true &&
       vars.RELEASE_ENABLED == 'true' &&
-      (contains(github.event.pull_request.labels.*.name, 'major') ||
-       contains(github.event.pull_request.labels.*.name, 'minor') ||
-       contains(github.event.pull_request.labels.*.name, 'patch')) &&
-      !contains(github.event.pull_request.labels.*.name, 'skip-release')
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.pull_request.merged == true &&
+        (contains(github.event.pull_request.labels.*.name, 'major') ||
+         contains(github.event.pull_request.labels.*.name, 'minor') ||
+         contains(github.event.pull_request.labels.*.name, 'patch')) &&
+        !contains(github.event.pull_request.labels.*.name, 'skip-release')))
     runs-on: ubuntu-slim
     timeout-minutes: 10
     outputs:
       version: ${{ steps.ver.outputs.next }}
       latest: ${{ steps.ver.outputs.latest }}
-      label: ${{ steps.bump.outputs.label }}
-      breaking: ${{ steps.bump.outputs.breaking }}
+      label: ${{ steps.ctx.outputs.label }}
+      breaking: ${{ steps.ctx.outputs.breaking }}
+      pr_number: ${{ steps.ctx.outputs.pr_number }}
       created: ${{ steps.mark.outputs.created }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -37,39 +52,72 @@ jobs:
       PR_TITLE: ${{ github.event.pull_request.title }}
       PR_BODY: ${{ github.event.pull_request.body }}
       PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+      IN_LABEL: ${{ inputs.label }}
+      IN_PR_NUMBER: ${{ inputs.pr_number }}
+      IN_DRY_RUN: ${{ inputs.dry_run }}
     steps:
-      # persist-credentials left at its default (true): the "Create and push
-      # tag" step below needs the credential actions/checkout wires into
-      # .git/config to push the tag.
+      - name: Mint release token from GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.HOMEBREW_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
+          owner: tylern91
+          repositories: rqmd
+
+      # persist-credentials default (true): "Create and push tag" below needs
+      # the App token's Workflows permission wired into .git/config to push a
+      # tag against a commit that touches .github/workflows/*.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
 
-      - name: Resolve bump label with breaking-change escalation
-        # The explicit major/minor/patch label always sets the version bump.
-        # breaking-change/!/BREAKING CHANGE: are informational only — pre-1.0,
-        # breaking changes take the minor slot, not major — and only control
-        # the release-notes callout in build-release-notes.sh.
-        id: bump
+      - name: Resolve release context
+        # Normalizes both trigger shapes into one set of outputs. Pre-1.0,
+        # breaking changes take the minor slot, not major — breaking only
+        # controls the release-notes callout in build-release-notes.sh.
+        id: ctx
         run: |
           set -euo pipefail
-          label="$(jq -nr --argjson l "$PR_LABELS" 'first(["major","minor","patch"][] | select(IN($l[]))) // empty')"
-          breaking=false
-          if printf '%s' "$PR_LABELS" | jq -e 'index("breaking-change") != null' >/dev/null 2>&1 \
-              || printf '%s' "$PR_TITLE" | grep -qE '^[a-z]+(\([^)]+\))?!:' \
-              || printf '%s' "${PR_BODY:-}" | grep -qE '^BREAKING CHANGE:'; then
-            breaking=true
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            label="$IN_LABEL"
+            pr_number="$IN_PR_NUMBER"
+            dry_run="$IN_DRY_RUN"
+            breaking=false
+            if [ -n "$pr_number" ]; then
+              title="$(gh pr view "$pr_number" --json title -q .title)"
+              body="$(gh pr view "$pr_number" --json body -q .body)"
+              if printf '%s' "$title" | grep -qE '^[a-z]+(\([^)]+\))?!:' \
+                  || printf '%s' "${body:-}" | grep -qE '^BREAKING CHANGE:'; then
+                breaking=true
+              fi
+            fi
+          else
+            label="$(jq -nr --argjson l "$PR_LABELS" 'first(["major","minor","patch"][] | select(IN($l[]))) // empty')"
+            pr_number="$PR_NUMBER"
+            breaking=false
+            if printf '%s' "$PR_LABELS" | jq -e 'index("breaking-change") != null' >/dev/null 2>&1 \
+                || printf '%s' "$PR_TITLE" | grep -qE '^[a-z]+(\([^)]+\))?!:' \
+                || printf '%s' "${PR_BODY:-}" | grep -qE '^BREAKING CHANGE:'; then
+              breaking=true
+            fi
+            dry_run=false
+            if printf '%s' "${PR_BODY:-}" | grep -qF '<!-- release-dry-run -->'; then
+              dry_run=true
+            fi
           fi
-          printf 'label=%s\n' "$label" >> "$GITHUB_OUTPUT"
-          printf 'breaking=%s\n' "$breaking" >> "$GITHUB_OUTPUT"
+          printf 'label=%s\n'     "$label"     >> "$GITHUB_OUTPUT"
+          printf 'breaking=%s\n'  "$breaking"  >> "$GITHUB_OUTPUT"
+          printf 'pr_number=%s\n' "$pr_number" >> "$GITHUB_OUTPUT"
+          printf 'dry_run=%s\n'   "$dry_run"   >> "$GITHUB_OUTPUT"
 
       - name: Compute next version
         id: ver
         run: |
           set -euo pipefail
           latest="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)"
-          next="$(bash scripts/bump-version.sh "$latest" "${{ steps.bump.outputs.label }}")"
+          next="$(bash scripts/bump-version.sh "$latest" "${{ steps.ctx.outputs.label }}")"
           printf 'latest=%s\n' "$latest" >> "$GITHUB_OUTPUT"
           printf 'next=%s\n'   "$next"   >> "$GITHUB_OUTPUT"
 
@@ -99,17 +147,14 @@ jobs:
 
       - name: Build release notes
         if: steps.guard.outputs.skip == 'false'
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           bash scripts/build-release-notes.sh \
             "${{ steps.ver.outputs.next }}" \
-            "${{ steps.bump.outputs.label }}" \
-            "${{ steps.bump.outputs.breaking }}" \
+            "${{ steps.ctx.outputs.label }}" \
+            "${{ steps.ctx.outputs.breaking }}" \
             --from-existing \
             --prev "${{ steps.ver.outputs.latest }}" \
             > /tmp/RELEASE_BODY.md
-
 
       - name: Guard against empty release notes
         id: notes_guard
@@ -186,7 +231,7 @@ jobs:
         if: >
           steps.guard.outputs.skip == 'false' &&
           steps.notes_guard.outputs.empty == 'false' &&
-          !contains(github.event.pull_request.body, '<!-- release-dry-run -->')
+          steps.ctx.outputs.dry_run != 'true'
         run: |
           set -euo pipefail
           tag="${{ steps.ver.outputs.next }}"
@@ -202,7 +247,7 @@ jobs:
         if: >
           steps.guard.outputs.skip == 'false' &&
           steps.notes_guard.outputs.empty == 'false' &&
-          !contains(github.event.pull_request.body, '<!-- release-dry-run -->')
+          steps.ctx.outputs.dry_run != 'true'
         run: |
           gh release create "${{ steps.ver.outputs.next }}" \
             --title "${{ steps.ver.outputs.next }}" \
@@ -214,7 +259,7 @@ jobs:
         if: >
           steps.guard.outputs.skip == 'false' &&
           steps.notes_guard.outputs.empty == 'false' &&
-          contains(github.event.pull_request.body, '<!-- release-dry-run -->')
+          steps.ctx.outputs.dry_run == 'true'
         run: |
           echo "::notice::<!-- release-dry-run --> — would create tag ${{ steps.ver.outputs.next }} with the following notes:"
           cat /tmp/RELEASE_BODY.md
@@ -224,7 +269,7 @@ jobs:
         if: >
           steps.guard.outputs.skip == 'false' &&
           steps.notes_guard.outputs.empty == 'false' &&
-          !contains(github.event.pull_request.body, '<!-- release-dry-run -->')
+          steps.ctx.outputs.dry_run != 'true'
         run: printf 'created=true\n' >> "$GITHUB_OUTPUT"
 
   publish:
@@ -237,5 +282,5 @@ jobs:
       label:     ${{ needs.release.outputs.label }}
       breaking:  ${{ needs.release.outputs.breaking }}
       prev:      ${{ needs.release.outputs.latest }}
-      pr_number: ${{ github.event.pull_request.number }}
+      pr_number: ${{ needs.release.outputs.pr_number }}
     secrets: inherit
