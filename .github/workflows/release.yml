@@ -153,6 +153,7 @@ jobs:
             "${{ steps.ctx.outputs.label }}" \
             "${{ steps.ctx.outputs.breaking }}" \
             --from-existing \
+            ${{ steps.ctx.outputs.dry_run == 'true' && '--fallback-unreleased' || '' }} \
             --prev "${{ steps.ver.outputs.latest }}" \
             > /tmp/RELEASE_BODY.md
 
@@ -162,7 +163,7 @@ jobs:
         run: |
           size="$(tr -d '[:space:]' < /tmp/RELEASE_BODY.md | wc -c | tr -d ' ')"
           if [ "$size" -lt 10 ]; then
-            echo "::notice::[Unreleased] section is empty — skipping tag + release"
+            echo "::notice::release notes are empty — skipping tag + release"
             printf 'empty=true\n' >> "$GITHUB_OUTPUT"
           else
             printf 'empty=false\n' >> "$GITHUB_OUTPUT"

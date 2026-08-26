@@ -2,13 +2,15 @@
 # build-release-notes.sh — Build GitHub Release notes from CHANGELOG.md.
 #
 # Usage:
-#   build-release-notes.sh <version> <label> <breaking> [--from-existing] [--prev <tag>]
+#   build-release-notes.sh <version> <label> <breaking> [--from-existing] [--fallback-unreleased] [--prev <tag>]
 #
 # Args:
 #   version       — target version string (e.g. v2.1.0), used only with --from-existing
 #   label         — major|minor|patch (informational only)
 #   breaking      — true|false — prepend breaking-change callout when true
 #   --from-existing — read the matching [version] section instead of [Unreleased]
+#   --fallback-unreleased — when the [version] section doesn't exist yet, preview
+#                   [Unreleased] instead of failing (for previewing a not-yet-cut release)
 #   --prev <tag>  — previous release tag; when set, appends a "Full Changelog" compare
 #                   link and an Install section with versioned asset URLs
 #
@@ -26,11 +28,13 @@ version="${1:-}"
 label="${2:-patch}"
 breaking="${3:-false}"
 from_existing=false
+fallback_unreleased=false
 prev=""
 shift 3 || true
 while [ $# -gt 0 ]; do
   case "$1" in
     --from-existing) from_existing=true ;;
+    --fallback-unreleased) fallback_unreleased=true ;;
     --prev) shift; prev="${1:-}" ;;
   esac
   shift || true
@@ -59,9 +63,23 @@ if [ "$from_existing" = "true" ]; then
     /^## \[/ && found { exit }
     found { print }
   ' "$CHANGELOG" \
-    | grep -v '^---$' \
+    | { grep -v '^---$' || true; } \
     | sed '/^[[:space:]]*$/{ N; /^\n$/d; }')
-else
+
+  # A missing [version] section must not silently fall through to the Install
+  # appendix below — that would emit boilerplate with no changelog content.
+  if [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
+    if [ "$fallback_unreleased" = "true" ]; then
+      printf 'build-release-notes: no [%s] section; falling back to [Unreleased]\n' "$ver_bare" >&2
+      from_existing=false
+    else
+      printf 'build-release-notes: no [%s] section in %s\n' "$ver_bare" "$CHANGELOG" >&2
+      exit 1
+    fi
+  fi
+fi
+
+if [ "$from_existing" = "false" ]; then
   # An empty "## [Unreleased]" section is the expected steady state between
   # releases, not an error — grep exits 1 when it has zero lines to filter,
   # which would otherwise abort the whole script under `pipefail`.
@@ -107,7 +125,8 @@ fi
 # Append Full Changelog compare link + Install section when the previous tag is known.
 # --prev is only passed by callers that already have a concrete tag range (i.e. real
 # releases); the [Unreleased] preview path has no "next" tag yet, so it's skipped there.
-if [ -n "$prev" ] && [ -n "$REPO_SLUG" ]; then
+if [ -n "$prev" ] && [ -n "$REPO_SLUG" ] \
+   && [ -n "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
   compare_range="${prev}...${version}"
   darwin_asset="rqmd-${version}-aarch64-apple-darwin.tar.gz"
   linux_asset="rqmd-${version}-x86_64-unknown-linux-gnu.tar.gz"

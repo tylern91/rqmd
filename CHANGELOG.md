@@ -4,6 +4,21 @@
 
 ---
 
+## [0.12.2] - 2026-08-26
+### Fixed
+- `build-release-notes.sh`: the `--from-existing` extraction branch could abort silently
+  (exit 1, no stderr) when the target `## [version]` CHANGELOG section didn't exist yet,
+  because its `grep -v` was unguarded against `pipefail` on zero-line input; guarded to match
+  the `[Unreleased]` branch.
+- `build-release-notes.sh`: the Install/Full-Changelog appendix could no longer be emitted
+  against an empty changelog body, preventing a release from ever publishing with
+  install-instructions-only notes.
+- `release.yml`: the `workflow_dispatch` dry-run path now previews the `[Unreleased]` section
+  via the new `--fallback-unreleased` flag when the target version's section doesn't exist yet,
+  instead of failing.
+
+---
+
 ## [0.12.1] - 2026-08-25
 ### Fixed
 - CI: `rustsec/audit-check` was pinned to `v2.0.0`, whose `action.yml` still
