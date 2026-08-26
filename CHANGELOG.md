@@ -1,6 +1,10 @@
 # rqmd Changelog
 
 ## [Unreleased]
+
+---
+
+## [0.12.2] - 2026-08-26
 ### Fixed
 - `build-release-notes.sh`: the `--from-existing` extraction branch could abort silently
   (exit 1, no stderr) when the target `## [version]` CHANGELOG section didn't exist yet,
