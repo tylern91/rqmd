@@ -16,9 +16,21 @@
   release since v0.11.0. The step now auto-detects and unwraps a
   base64-wrapped key, and fails with a non-leaking shape diagnostic
   (byte lengths only) instead of a bare gpg error when the secret is neither.
-- CI: `release.yml` now grants `workflows: write` — without it, GitHub
-  refuses to push a release tag against a commit whose tree touches
-  `.github/workflows/*`, which blocked the v0.11.1/v0.12.0 tag pushes.
+- CI: `release.yml` declared a top-level `workflows: write` permission, which
+  is not a valid `GITHUB_TOKEN` permission scope — GitHub rejected the entire
+  workflow file at startup, failing every release in 0 s with zero jobs run
+  (this is what actually blocked v0.12.1). The release job now mints a
+  short-lived GitHub App installation token and uses it for `actions/checkout`
+  and the tag push instead; the App's Workflows permission is what lets the
+  push succeed against a commit whose tree touches `.github/workflows/*`,
+  which is what blocked the v0.11.1/v0.12.0 tag pushes.
+- CI: `release.yml` now also accepts a `workflow_dispatch` trigger
+  (`label`/`pr_number`/`dry_run` inputs) as a break-glass path for cutting a
+  release without a qualifying PR merge, still routed through the same
+  App-token identity rather than a local machine.
+- CI: `security.yml`'s `cargo-audit` job now grants `checks: write` — without
+  it, `rustsec/audit-check` found 0 vulnerabilities but still failed the job
+  because it couldn't publish its result as a check run.
 
 ---
 
