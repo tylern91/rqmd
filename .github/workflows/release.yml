@@ -65,25 +65,18 @@ jobs:
           owner: tylern91
           repositories: rqmd
 
-      # persist-credentials left at its default (true): the "Create and push
-      # tag" step below needs the credential actions/checkout wires into
-      # .git/config to push the tag. A plain GITHUB_TOKEN (a GitHub App
-      # installation token scoped to this run) cannot push a tag against a
-      # commit whose tree touches .github/workflows/* — the App-minted token
-      # above carries the Workflows permission that push needs.
+      # persist-credentials default (true): "Create and push tag" below needs
+      # the App token's Workflows permission wired into .git/config to push a
+      # tag against a commit that touches .github/workflows/*.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Resolve release context
-        # Normalizes both trigger shapes (PR-merge vs. manual dispatch) into
-        # one set of outputs so every step downstream reads the same names
-        # regardless of which one fired. The explicit major/minor/patch
-        # label (or dispatch input) always sets the version bump.
-        # breaking-change/!/BREAKING CHANGE: are informational only —
-        # pre-1.0, breaking changes take the minor slot, not major — and
-        # only control the release-notes callout in build-release-notes.sh.
+        # Normalizes both trigger shapes into one set of outputs. Pre-1.0,
+        # breaking changes take the minor slot, not major — breaking only
+        # controls the release-notes callout in build-release-notes.sh.
         id: ctx
         run: |
           set -euo pipefail
