@@ -4,14 +4,29 @@
 //! Results are joined back to rusqlite by `filepath` = "collection/path".
 
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tantivy::{
-    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
+    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, TantivyError, Term,
     collector::TopDocs,
+    directory::error::LockError,
     doc,
     query::{BooleanQuery, ConstScoreQuery, PhraseQuery, Query, QueryParser, TermQuery},
     schema::{FAST, Field, IndexRecordOption, STORED, Schema, SchemaBuilder, TEXT, Value},
 };
+
+/// How long `writer_mut` waits for another process's `IndexWriter` to release
+/// the Tantivy lock before giving up. `0` disables waiting (fail immediately,
+/// matching the old behavior). Overridable via `RQMD_LOCK_WAIT_SECS`.
+const DEFAULT_LOCK_WAIT_SECS: u64 = 30;
+
+fn lock_wait_budget() -> Duration {
+    let secs = std::env::var("RQMD_LOCK_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_LOCK_WAIT_SECS);
+    Duration::from_secs(secs)
+}
 
 pub struct FtsSchema {
     pub schema: Schema,
@@ -52,6 +67,8 @@ pub struct FtsIndex {
     // concurrently as long as at most one calls add_document/commit.
     writer: Option<IndexWriter>,
     pub query_parser: QueryParser,
+    /// Index directory, kept only to name it in the LockBusy error message.
+    dir: PathBuf,
 }
 
 impl FtsIndex {
@@ -87,13 +104,44 @@ impl FtsIndex {
             reader,
             writer: None,
             query_parser,
+            dir: dir.to_path_buf(),
         })
     }
 
     /// Acquire the writer on first call; subsequent calls reuse it.
+    ///
+    /// On `LockBusy` (another process's `IndexWriter` is open on this same
+    /// directory), retries with backoff up to `RQMD_LOCK_WAIT_SECS` (default
+    /// 30s, `0` disables waiting) instead of failing on the first attempt —
+    /// a short-lived concurrent writer (e.g. a background reindex hook) is
+    /// expected to release the lock well within that window. Any other error
+    /// fails immediately, as before.
     fn writer_mut(&mut self) -> Result<&mut IndexWriter> {
         if self.writer.is_none() {
-            self.writer = Some(self.index.writer(50_000_000).context("index writer")?);
+            let budget = lock_wait_budget();
+            let deadline = Instant::now() + budget;
+            let mut backoff = Duration::from_millis(100);
+            loop {
+                match self.index.writer(50_000_000) {
+                    Ok(w) => {
+                        self.writer = Some(w);
+                        break;
+                    }
+                    Err(TantivyError::LockFailure(LockError::LockBusy, _))
+                        if Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(backoff.min(deadline - Instant::now()));
+                        backoff = (backoff * 2).min(Duration::from_secs(2));
+                    }
+                    Err(TantivyError::LockFailure(LockError::LockBusy, _)) => {
+                        anyhow::bail!(
+                            "another rqmd process is writing to {}; wait for it to finish or set RQMD_LOCK_WAIT_SECS",
+                            self.dir.display()
+                        );
+                    }
+                    Err(e) => return Err(e).context("index writer"),
+                }
+            }
         }
         Ok(self.writer.as_mut().unwrap())
     }
@@ -179,8 +227,16 @@ impl FtsIndex {
     /// Explicitly reloads the reader so that searches immediately after commit
     /// see the new documents (OnCommitWithDelay uses a background thread and
     /// has a non-zero delay that causes stale reads in the same process).
+    ///
+    /// A `None` writer means `add_document`/`delete_by_filepath` were never
+    /// called since this `FtsIndex` was opened — nothing is staged. Returning
+    /// early avoids acquiring the exclusive Tantivy writer lock (and waiting
+    /// on `writer_mut`'s retry loop) just to commit an empty segment.
     pub fn commit(&mut self) -> Result<()> {
-        self.writer_mut()?.commit().context("tantivy commit")?;
+        let Some(writer) = self.writer.as_mut() else {
+            return Ok(());
+        };
+        writer.commit().context("tantivy commit")?;
         self.reader.reload().context("tantivy reader reload")?;
         Ok(())
     }
@@ -439,6 +495,90 @@ mod tests {
         let beta = idx.search_fts("uniquebetatoken", 10, None).unwrap();
         assert_eq!(alpha.len(), 0);
         assert_eq!(beta.len(), 1);
+    }
+
+    /// A `commit()` with nothing staged (writer never acquired) must succeed
+    /// without ever creating an `IndexWriter` — regression test for the
+    /// `LockBusy` failure reported on `rqmd update` when every file in a
+    /// collection hashed `Unchanged`: the old code unconditionally acquired
+    /// the exclusive writer lock just to commit an empty segment.
+    #[test]
+    fn commit_with_nothing_staged_does_not_acquire_writer() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+
+        idx.commit().unwrap();
+        assert!(
+            idx.writer.is_none(),
+            "a no-op commit must not lazily create an IndexWriter"
+        );
+    }
+
+    /// A second `FtsIndex` on the same directory must be able to open and
+    /// commit a genuine no-op while the first still holds its writer open —
+    /// this is exactly the concurrent-hook-vs-manual-run scenario that
+    /// produced the reported `LockBusy` error, minus the actual write.
+    #[test]
+    fn second_index_no_op_flush_succeeds_while_first_holds_writer() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut first = FtsIndex::open_or_create(dir.path()).unwrap();
+        first
+            .add_document("notes/a.md", "Title", "body", 1)
+            .unwrap();
+        // Force the writer to be acquired without committing (releasing) it.
+        first.writer_mut().unwrap();
+
+        let mut second = FtsIndex::open_or_create(dir.path()).unwrap();
+        second
+            .commit()
+            .expect("no-op commit must not need the writer lock");
+    }
+
+    /// When the second index genuinely has something to commit, it must wait
+    /// (not fail instantly) for the first index's writer to be released, and
+    /// succeed once it is. Uses a short `RQMD_LOCK_WAIT_SECS` budget so the
+    /// test doesn't burn the default 30s wait.
+    #[test]
+    fn writer_mut_waits_for_lock_release_within_budget() {
+        // SAFETY: test-only env mutation; this test does not run concurrently
+        // with other tests reading this var (fts.rs tests are single-threaded
+        // in practice here since each opens its own TempDir and none else
+        // reads RQMD_LOCK_WAIT_SECS).
+        unsafe {
+            std::env::set_var("RQMD_LOCK_WAIT_SECS", "5");
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut first = FtsIndex::open_or_create(dir.path()).unwrap();
+        first
+            .add_document("notes/a.md", "Title", "body", 1)
+            .unwrap();
+        first.writer_mut().unwrap(); // holds the lock, never commits
+
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let released_writer = released.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(first);
+            released_writer.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let mut second = FtsIndex::open_or_create(dir.path()).unwrap();
+        second
+            .add_document("notes/b.md", "Title", "other", 2)
+            .unwrap();
+        second
+            .commit()
+            .expect("must wait for the first writer to release, then succeed");
+        assert!(
+            released.load(std::sync::atomic::Ordering::SeqCst),
+            "commit must not have returned before the lock was actually released"
+        );
+
+        handle.join().unwrap();
+        unsafe {
+            std::env::remove_var("RQMD_LOCK_WAIT_SECS");
+        }
     }
 
     /// Deleting a filepath that was never indexed must be a no-op, not an
