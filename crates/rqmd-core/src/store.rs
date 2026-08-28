@@ -98,6 +98,12 @@ pub struct Store {
     /// means the file didn't exist at that point.
     last_seen_tantivy_meta_mtime: Option<SystemTime>,
     last_seen_hnsw_mtime: Option<SystemTime>,
+    /// Set whenever `hnsw.add`/`add_with_vid` stages an unsaved vector; reset
+    /// once `flush()` saves it (or `reload_if_stale()` replaces `self.hnsw`
+    /// with a fresh view that has no unsaved work of its own). Lets `flush()`
+    /// skip `hnsw.save()` — a rewrite of the full usearch file — on a pass
+    /// that added no vectors.
+    hnsw_dirty: bool,
 }
 
 pub struct StoreConfig {
@@ -191,6 +197,7 @@ impl Store {
             tantivy_meta_path,
             last_seen_tantivy_meta_mtime,
             last_seen_hnsw_mtime,
+            hnsw_dirty: false,
         })
     }
 
@@ -230,6 +237,7 @@ impl Store {
 
         self.last_seen_tantivy_meta_mtime = tantivy_meta_mtime;
         self.last_seen_hnsw_mtime = hnsw_mtime;
+        self.hnsw_dirty = false;
         Ok(true)
     }
 
@@ -270,6 +278,7 @@ impl Store {
 
         for (seq, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
             let vid = self.hnsw.add(embedding).context("hnsw add")?;
+            self.hnsw_dirty = true;
             upsert_vector_meta(
                 &self.db,
                 &hash,
@@ -390,6 +399,7 @@ impl Store {
         let mut pending = Vec::with_capacity(total);
         for (seq, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
             let vid = self.hnsw.add(embedding).context("hnsw add")?;
+            self.hnsw_dirty = true;
             pending.push(PendingVectorMeta {
                 hash: hash.to_string(),
                 seq: seq as i64,
@@ -418,9 +428,18 @@ impl Store {
     }
 
     /// Commit FTS writes and persist the HNSW index to disk.
+    ///
+    /// Both halves are skipped when there's nothing to persist: `fts.commit()`
+    /// is a no-op when no document was staged, and `hnsw.save()` is skipped
+    /// entirely when no vector was added since the last flush — avoiding a
+    /// full usearch-file rewrite (and, for FTS, the exclusive Tantivy writer
+    /// lock) on a pass where every file hashed `Unchanged`.
     pub fn flush(&mut self) -> Result<()> {
         self.fts.commit().context("fts commit")?;
-        self.hnsw.save(&self.hnsw_path).context("hnsw save")?;
+        if self.hnsw_dirty {
+            self.hnsw.save(&self.hnsw_path).context("hnsw save")?;
+            self.hnsw_dirty = false;
+        }
         Ok(())
     }
 

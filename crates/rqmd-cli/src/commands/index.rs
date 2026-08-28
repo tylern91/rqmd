@@ -481,7 +481,9 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
     // Update refreshes BM25 metadata only — no vectors. Run `rqmd embed` afterward
     // to regenerate embeddings. Using the FTS-only store avoids loading the inference
     // backend and prevents content_vectors.vid UNIQUE conflicts on re-indexing.
-    // Still needs write access: flush() unconditionally calls hnsw.save().
+    // Still needs write access: re-indexing changed/removed files stages FTS
+    // writes and DB rows even though flush() now skips hnsw.save() when no
+    // vector was added.
     let mut s = store::open_store_no_backend(index_dir, false)?;
     let is_tty = fmt::atty_stderr();
 
