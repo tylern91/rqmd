@@ -4,6 +4,27 @@
 
 ---
 
+## [0.13.0] - 2026-09-02
+
+### Fixed
+- `embed_fingerprint` now folds in a `CHUNK_STRATEGY_VERSION`, and `rqmd embed`'s skip predicate
+  is fingerprint-aware: a chunker change (break-point selection, overlap, or AST dispatch) no
+  longer leaves the index silently stale. Documents whose vectors carry a superseded fingerprint
+  are detected, their old vectors evicted from both `content_vectors` and the HNSW graph, and
+  new vectors inserted in their place — `rqmd status`'s `Pending: N` now reflects real
+  re-embedding work instead of always reporting 0.
+
+### Added
+- `ast-chunking` cargo feature (off by default): tree-sitter-based declaration-boundary chunking
+  for TypeScript/TSX/JavaScript/JSX/MJS/CJS/Java/Python, replacing the character-window chunker
+  for source files when enabled. Falls back to the existing chunker for unsupported extensions,
+  trivial files, or a parse timeout. Feature passthrough added to `rqmd-cli` and `rqmd-mcp` so
+  `--features ast-chunking` works from either crate, not just the workspace root.
+- `hnsw::remove` — wraps `usearch::Index::remove`, used by the fingerprint-aware embed loop to
+  evict superseded vectors without growing the graph.
+
+---
+
 ## [0.12.2] - 2026-08-26
 ### Fixed
 - `build-release-notes.sh`: the `--from-existing` extraction branch could abort silently

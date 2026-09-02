@@ -156,6 +156,19 @@ impl VectorIndex {
         self.inner.size()
     }
 
+    /// Remove a vector by vid. `next_vid` is never decremented or reused —
+    /// callers must not rely on a removed vid becoming available again.
+    /// usearch tombstones rather than compacts on removal, so the on-disk
+    /// file size does not shrink; that's expected, not a bug.
+    pub fn remove(&mut self, vid: u64) -> Result<usize> {
+        if self.read_only {
+            bail!("cannot remove from a read-only (mmap'd) VectorIndex");
+        }
+        self.inner
+            .remove(vid)
+            .map_err(|e| anyhow!("usearch remove: {e}"))
+    }
+
     /// Fetch the stored vector for a given vid. Works on both writable and
     /// `view()`-opened (mmap, read-only) indexes — `usearch::Index::get`
     /// takes `&Index`, so reads never require mutable access.
@@ -220,5 +233,39 @@ mod tests {
         }
 
         assert!(viewed.get_vector(vid + 1).is_err());
+    }
+
+    #[test]
+    fn remove_evicts_vector_from_search_results() {
+        let mut index = VectorIndex::new().unwrap();
+        let a: Vec<f32> = (0..EMBED_DIM).map(|i| i as f32 * 0.001).collect();
+        let b: Vec<f32> = (0..EMBED_DIM)
+            .map(|i| (EMBED_DIM - i) as f32 * 0.001)
+            .collect();
+        let vid_a = index.add(&a).unwrap();
+        let vid_b = index.add(&b).unwrap();
+
+        index.remove(vid_a).unwrap();
+
+        let results = index.search(&a, 10).unwrap();
+        assert!(
+            results.iter().all(|(vid, _)| *vid != vid_a),
+            "removed vid must not appear in search results"
+        );
+        assert!(results.iter().any(|(vid, _)| *vid == vid_b));
+    }
+
+    #[test]
+    fn remove_rejects_on_read_only_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hnsw.usearch");
+
+        let mut writable = VectorIndex::new().unwrap();
+        let embedding = vec![0.1_f32; EMBED_DIM];
+        let vid = writable.add(&embedding).unwrap();
+        writable.save(&path).unwrap();
+
+        let mut viewed = VectorIndex::view(&path).unwrap();
+        assert!(viewed.remove(vid).is_err());
     }
 }

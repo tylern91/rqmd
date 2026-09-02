@@ -24,6 +24,8 @@ cuda   = ["rqmd-llm/cuda"]     # NVIDIA CUDA
 vulkan = ["rqmd-llm/vulkan"]   # Vulkan (cross-vendor)
 # ONNX Runtime backend (CoreML/CUDA/DirectML) — passes through to rqmd-llm
 ort-backend = ["rqmd-llm/ort-backend"]
+# AST-aware chunking for source code — passes through to rqmd-core
+ast-chunking = ["rqmd-core/ast-chunking"]
 
 [dependencies]
 anyhow = "1"

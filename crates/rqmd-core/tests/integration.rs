@@ -5,16 +5,18 @@ use rqmd_core::{
     Store, StoreConfig,
     chunking::chunk_document,
     db::{
-        collection_context_key, content_hash, count_orphaned_vectors, deactivate_missing_documents,
-        docid_from_hash, find_documents_by_needles, get_config, get_context_for_path,
-        get_document_by_docid_prefix, get_document_by_filepath, list_documents, open_db,
-        purge_collection, set_config, upsert_content, upsert_document, upsert_vector_meta,
+        collection_context_key, content_hash, count_docs_needing_embed, count_orphaned_vectors,
+        deactivate_missing_documents, docid_from_hash, find_documents_by_needles, get_config,
+        get_context_for_path, get_document_by_docid_prefix, get_document_by_filepath,
+        list_documents, open_db, purge_collection, set_config, upsert_content, upsert_document,
+        upsert_vector_meta,
     },
     resolve::resolve_multi_get,
     rrf::{reciprocal_rank_fusion, rrf_weights},
     types::{QueryType, RankedListMeta, RankedResult},
 };
 use rusqlite::params;
+use sha2::Digest;
 use std::collections::HashSet;
 use tempfile::TempDir;
 
@@ -852,6 +854,56 @@ fn hybrid_query_multi_filters_to_requested_collections() {
     assert!(!subset.iter().any(|h| h.collection == "gamma"));
 }
 
+#[test]
+fn hybrid_query_multi_finds_minority_collection_despite_bulk_corpus() {
+    // Vector-side counterpart to `search_fts_multi_finds_minority_collection_
+    // despite_bulk_corpus`: the vector leg used to run `hnsw.search(emb,
+    // fetch_size)` globally, THEN filter by collection — a large bulk
+    // collection could fill the entire raw top-`fetch_size` before the
+    // filter ever ran, starving a small scoped collection out of the vector
+    // ranked list entirely. `search_vec_scoped` fixes this by widening the
+    // raw ANN pool until enough in-scope hits are found.
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store_with_vectors(&dir);
+
+    for i in 0..40 {
+        store
+            .index_document(
+                "bulk",
+                &format!("doc{i}.md"),
+                "Bulk Doc",
+                "widgetopic bulk filler content",
+            )
+            .unwrap();
+    }
+    for i in 0..2 {
+        store
+            .index_document(
+                "target",
+                &format!("doc{i}.md"),
+                "Target Doc",
+                "widgetopic target distinguishing content",
+            )
+            .unwrap();
+    }
+    store.flush().unwrap();
+
+    // no_expand=true, skip_rerank=true isolates the FTS+vector retrieval and
+    // RRF fusion legs from the generate/rerank models this fake backend
+    // doesn't meaningfully implement.
+    let target = vec!["target".to_string()];
+    let hits = store
+        .hybrid_query_multi("widgetopic", None, 2, Some(&target), true, true)
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        2,
+        "expected both target-collection docs despite a 40-doc bulk collection sharing the \
+         same embedding: {hits:?}"
+    );
+    assert!(hits.iter().all(|h| h.collection == "target"));
+}
+
 // ── multi-get resolution hardening ────────────────────────────────────────────
 //
 // Regression guard for the previous unanchored `contains()` matcher: a bare
@@ -1272,4 +1324,218 @@ fn count_orphaned_vectors_counts_vectors_for_inactive_documents() {
     let present: HashSet<String> = HashSet::new();
     deactivate_missing_documents(&store.db, collection, &present).unwrap();
     assert_eq!(count_orphaned_vectors(&store.db).unwrap(), 1);
+}
+
+// ── Embed invalidation (chunk-strategy-version fingerprinting + supersede) ────
+
+#[test]
+fn embed_fingerprint_incorporates_chunk_strategy_version() {
+    // `store::expected_embed_fingerprint` must differ from the pre-Phase-1 formula
+    // (model + chunk size + overlap only) — otherwise a `CHUNK_STRATEGY_VERSION`
+    // bump would silently fail to invalidate anything, reintroducing the bug this
+    // phase fixes.
+    let model = "fake-model";
+    let actual = rqmd_core::store::expected_embed_fingerprint(model);
+
+    let old_sig = format!(
+        "model:{model}\nchunk_size_chars:{}\nchunk_overlap_chars:{}",
+        rqmd_core::chunking::CHUNK_SIZE_CHARS,
+        rqmd_core::chunking::CHUNK_OVERLAP_CHARS,
+    );
+    let old_hash = sha2::Sha256::digest(old_sig.as_bytes());
+    let old_fingerprint = hex::encode(&old_hash[..3]);
+
+    assert_ne!(
+        actual, old_fingerprint,
+        "fingerprint must change once chunk_strategy_version is folded in"
+    );
+}
+
+#[test]
+fn expected_embed_fingerprint_is_stable_across_calls() {
+    let a = rqmd_core::store::expected_embed_fingerprint("fake-model");
+    let b = rqmd_core::store::expected_embed_fingerprint("fake-model");
+    assert_eq!(a, b);
+}
+
+#[test]
+fn count_docs_needing_embed_counts_stale_fingerprint_as_pending() {
+    let dir = TempDir::new().unwrap();
+    let store = test_store(&dir);
+    let collection = "coll";
+
+    upsert_content(&store.db, "hash1", "some body", "2024-01-01T00:00:00Z").unwrap();
+    upsert_document(
+        &store.db,
+        collection,
+        "a.md",
+        "A",
+        "hash1",
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+
+    let current = rqmd_core::store::expected_embed_fingerprint("fake");
+
+    // No vectors at all yet — pending.
+    assert_eq!(count_docs_needing_embed(&store.db, &current).unwrap(), 1);
+
+    // A vector exists, but under a stale fingerprint — still pending.
+    upsert_vector_meta(
+        &store.db,
+        "hash1",
+        0,
+        0,
+        "fake",
+        "stale-fp",
+        1,
+        1,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &current).unwrap(),
+        1,
+        "a hash whose only vectors are stale must still count as pending"
+    );
+
+    // A vector exists under the current fingerprint — no longer pending.
+    upsert_vector_meta(
+        &store.db,
+        "hash1",
+        0,
+        0,
+        "fake",
+        &current,
+        1,
+        2,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    assert_eq!(count_docs_needing_embed(&store.db, &current).unwrap(), 0);
+}
+
+#[test]
+fn hash_has_vector_with_fingerprint_distinguishes_stale_from_current() {
+    let dir = TempDir::new().unwrap();
+    let store = test_store(&dir);
+
+    upsert_content(&store.db, "hash1", "body", "2024-01-01T00:00:00Z").unwrap();
+    upsert_vector_meta(
+        &store.db,
+        "hash1",
+        0,
+        0,
+        "fake",
+        "stale-fp",
+        1,
+        1,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+
+    assert!(rqmd_core::db::hash_has_any_vector(&store.db, "hash1"));
+    assert!(!rqmd_core::db::hash_has_vector_with_fingerprint(
+        &store.db,
+        "hash1",
+        "current-fp"
+    ));
+    assert!(rqmd_core::db::hash_has_vector_with_fingerprint(
+        &store.db, "hash1", "stale-fp"
+    ));
+}
+
+#[test]
+fn supersede_cycle_leaves_exactly_one_fingerprint_and_no_growth() {
+    // Mirrors the exact sequence `rqmd embed`'s incremental loop performs when it
+    // finds a hash with stale-fingerprint vectors: evict old vids from HNSW,
+    // delete the old content_vectors rows, embed fresh chunks, insert new rows.
+    // Anti-orphan assertion: the live vector count must not grow across the cycle.
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store_with_vectors(&dir);
+    let collection = "coll";
+    let rel_path = "a.md";
+    let body = "widgetopic content for the supersede cycle test";
+    let hash = content_hash(body);
+
+    upsert_content(&store.db, &hash, body, "2024-01-01T00:00:00Z").unwrap();
+    upsert_document(
+        &store.db,
+        collection,
+        rel_path,
+        "A",
+        &hash,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+
+    // Seed one stale-fingerprint vector for this hash, as if embedded before a
+    // chunker/model change.
+    let stale_vid = store.hnsw_size() as u64;
+    upsert_vector_meta(
+        &store.db,
+        &hash,
+        0,
+        0,
+        "fake",
+        "stale-fp",
+        1,
+        stale_vid,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+
+    let current_fingerprint = rqmd_core::store::expected_embed_fingerprint("fake");
+    assert!(rqmd_core::db::hash_has_any_vector(&store.db, &hash));
+    assert!(!rqmd_core::db::hash_has_vector_with_fingerprint(
+        &store.db,
+        &hash,
+        &current_fingerprint
+    ));
+
+    // Supersede: evict the stale vid from HNSW, delete its DB row, then embed fresh.
+    let stale_vids = rqmd_core::db::vids_for_hash(&store.db, &hash).unwrap();
+    assert_eq!(stale_vids, vec![stale_vid]);
+    store.evict_hnsw_vectors(&stale_vids).unwrap();
+    rqmd_core::db::delete_vectors_for_hash(&store.db, &hash).unwrap();
+
+    let pending = store.embed_document_chunks(&hash, rel_path, body).unwrap();
+    for m in &pending {
+        upsert_vector_meta(
+            &store.db,
+            &m.hash,
+            m.seq,
+            m.pos,
+            &m.model,
+            &m.fingerprint,
+            m.total_chunks,
+            m.vid,
+            &m.now,
+        )
+        .unwrap();
+    }
+    store.flush().unwrap();
+
+    let live_count: i64 = store
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM content_vectors WHERE hash = ?1",
+            rusqlite::params![&hash],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        live_count,
+        pending.len() as i64,
+        "supersede must not leave the old row alongside the new ones"
+    );
+    assert!(rqmd_core::db::hash_has_vector_with_fingerprint(
+        &store.db,
+        &hash,
+        &current_fingerprint
+    ));
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &current_fingerprint).unwrap(),
+        0
+    );
 }

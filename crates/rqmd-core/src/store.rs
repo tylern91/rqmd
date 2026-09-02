@@ -13,7 +13,7 @@ use rqmd_llm::InferenceBackend;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    chunking::{chunk_document, first_chunk},
+    chunking::{chunk_document_for_path, first_chunk},
     db::{
         self, content_hash, doc_for_vid, doc_for_vid_meta, docid_from_hash, get_content,
         get_context_for_path, open_db, upsert_content, upsert_document, upsert_vector_meta,
@@ -266,7 +266,7 @@ impl Store {
             .context("add to tantivy")?;
 
         // 3. Chunk + embed.
-        let chunks = chunk_document(body);
+        let chunks = chunk_document_for_path(rel_path, body);
         let total = chunks.len();
         let embed_model = self.backend.embed_model_name().to_string();
         let fingerprint = embed_fingerprint(&embed_model);
@@ -383,11 +383,12 @@ impl Store {
     pub fn embed_document_chunks(
         &mut self,
         hash: &str,
+        rel_path: &str,
         body: &str,
     ) -> Result<Vec<PendingVectorMeta>> {
         let embed_model = self.backend.embed_model_name().to_string();
         let fingerprint = embed_fingerprint(&embed_model);
-        let chunks = chunk_document(body);
+        let chunks = chunk_document_for_path(rel_path, body);
         let total = chunks.len();
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
         let embeddings = self
@@ -440,6 +441,24 @@ impl Store {
             self.hnsw.save(&self.hnsw_path).context("hnsw save")?;
             self.hnsw_dirty = false;
         }
+        Ok(())
+    }
+
+    /// Evict superseded vectors from the in-memory HNSW index (e.g. a hash's
+    /// old chunks under a stale `embed_fingerprint`). Marks the index dirty
+    /// so the removal is persisted on the next [`Self::flush`] — `hnsw` is a
+    /// private field, so this is the only way callers in other crates can
+    /// reach [`crate::hnsw::VectorIndex::remove`]. Errors propagate: a failed
+    /// removal here means the in-memory index and the DB's view of which
+    /// vids are live have diverged, which must not be silently ignored.
+    pub fn evict_hnsw_vectors(&mut self, vids: &[u64]) -> Result<()> {
+        if vids.is_empty() {
+            return Ok(());
+        }
+        for &vid in vids {
+            self.hnsw.remove(vid)?;
+        }
+        self.hnsw_dirty = true;
         Ok(())
     }
 
@@ -797,8 +816,7 @@ impl Store {
                             .backend
                             .embed_query(&sub.text)
                             .context("embed sub-query")?;
-                        let hits = self.hnsw.search(&emb, fetch_size)?;
-                        let results = self.vec_hits_to_ranked(hits, collections)?;
+                        let results = self.search_vec_scoped(&emb, fetch_size, collections)?;
                         if !results.is_empty() {
                             ranked_lists.push(results);
                             list_meta.push(RankedListMeta {
@@ -817,8 +835,7 @@ impl Store {
                             .backend
                             .embed_passage(&sub.text)
                             .context("embed sub-query")?;
-                        let hits = self.hnsw.search(&emb, fetch_size)?;
-                        let results = self.vec_hits_to_ranked(hits, collections)?;
+                        let results = self.search_vec_scoped(&emb, fetch_size, collections)?;
                         if !results.is_empty() {
                             ranked_lists.push(results);
                             list_meta.push(RankedListMeta {
@@ -859,8 +876,7 @@ impl Store {
                 .backend
                 .embed_query(expand_text)
                 .context("embed query")?;
-            let vec_hits = self.hnsw.search(&query_embedding, fetch_size)?;
-            let vec_results = self.vec_hits_to_ranked(vec_hits, collections)?;
+            let vec_results = self.search_vec_scoped(&query_embedding, fetch_size, collections)?;
             if !vec_results.is_empty() {
                 ranked_lists.push(vec_results);
                 list_meta.push(RankedListMeta {
@@ -955,7 +971,7 @@ impl Store {
         // Chunk once per candidate.
         let best_chunks: Vec<(String, usize)> = candidate_docs
             .iter()
-            .map(|(_, _, body)| best_chunk(body, &query_terms))
+            .map(|(cand, _, body)| best_chunk(&cand.filepath, body, &query_terms))
             .collect();
 
         let chunk_refs: Vec<&str> = best_chunks.iter().map(|(t, _)| t.as_str()).collect();
@@ -1078,6 +1094,34 @@ impl Store {
         Ok(results)
     }
 
+    /// Vector search scoped to `collections`, widening the raw ANN pool until
+    /// enough in-scope hits are found or the whole index has been searched.
+    ///
+    /// A bare `hnsw.search(embedding, fetch_size)` followed by a collection
+    /// filter starves a minority collection buried in a much larger corpus —
+    /// the fixed-size raw top-k can be dominated entirely by the bulk
+    /// collection before the filter ever runs, the vector-side counterpart to
+    /// the BM25 truncate-then-filter bug fixed for `search_fts_multi` (see
+    /// `search_fts_multi_finds_minority_collection_despite_bulk_corpus`).
+    /// Mirrors the doubling strategy `search_vec_multi` already uses.
+    fn search_vec_scoped(
+        &self,
+        embedding: &[f32],
+        fetch_size: usize,
+        collections: Option<&[String]>,
+    ) -> Result<Vec<RankedResult>> {
+        let total_vectors = self.hnsw.size();
+        let mut k = fetch_size;
+        loop {
+            let hits = self.hnsw.search(embedding, k)?;
+            let results = self.vec_hits_to_ranked(hits, collections)?;
+            if results.len() >= fetch_size || k >= total_vectors {
+                return Ok(results);
+            }
+            k = (k * 2).min(total_vectors);
+        }
+    }
+
     fn vec_hits_to_ranked(
         &self,
         hits: Vec<(u64, f32)>,
@@ -1154,8 +1198,7 @@ impl Store {
                         .backend
                         .embed_query(text)
                         .context("embed vec expansion")?;
-                    let hits = self.hnsw.search(&emb, fetch_size)?;
-                    let results = self.vec_hits_to_ranked(hits, collections)?;
+                    let results = self.search_vec_scoped(&emb, fetch_size, collections)?;
                     if !results.is_empty() {
                         lists.push(results);
                         metas.push(RankedListMeta {
@@ -1172,8 +1215,7 @@ impl Store {
                         .backend
                         .embed_passage(text)
                         .context("embed hyde expansion")?;
-                    let hits = self.hnsw.search(&emb, fetch_size)?;
-                    let results = self.vec_hits_to_ranked(hits, collections)?;
+                    let results = self.search_vec_scoped(&emb, fetch_size, collections)?;
                     if !results.is_empty() {
                         lists.push(results);
                         metas.push(RankedListMeta {
@@ -1275,8 +1317,8 @@ fn mtime_of(path: &std::path::Path) -> Option<SystemTime> {
 /// Pick the chunk with the most query-term overlap.
 /// Returns `(text, char_offset)` — chunks once and returns both to avoid
 /// duplicate work in the caller.
-fn best_chunk(body: &str, query_terms: &[String]) -> (String, usize) {
-    let chunks = chunk_document(body);
+fn best_chunk(filepath: &str, body: &str, query_terms: &[String]) -> (String, usize) {
+    let chunks = chunk_document_for_path(filepath, body);
     if chunks.is_empty() {
         return (String::new(), 0);
     }
@@ -1342,9 +1384,10 @@ fn format_rfc3339(secs: u64) -> String {
 /// invalidates the fingerprint instead of going undetected.
 fn embed_fingerprint(model: &str) -> String {
     let sig = format!(
-        "model:{model}\nchunk_size_chars:{}\nchunk_overlap_chars:{}",
+        "model:{model}\nchunk_size_chars:{}\nchunk_overlap_chars:{}\nchunk_strategy_version:{}",
         crate::chunking::CHUNK_SIZE_CHARS,
         crate::chunking::CHUNK_OVERLAP_CHARS,
+        crate::chunking::CHUNK_STRATEGY_VERSION,
     );
     let hash = Sha256::digest(sig.as_bytes());
     hex::encode(&hash[..3]) // 6 hex chars

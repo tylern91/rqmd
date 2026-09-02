@@ -1,3 +1,5 @@
+#[cfg(feature = "ast-chunking")]
+mod ast_chunk;
 pub mod chunking;
 pub mod db;
 pub mod fts;

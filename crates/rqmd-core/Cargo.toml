@@ -12,6 +12,18 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# AST-aware chunking for source code (function/method/class boundaries) via
+# tree-sitter. Off by default: adds five grammar dependencies and increases
+# build time for a capability only source-code collections need.
+ast-chunking = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-typescript",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-java",
+    "dep:tree-sitter-python",
+]
+
 [dependencies]
 anyhow = "1"
 rqmd-llm = { path = "../rqmd-llm" }
@@ -25,6 +37,11 @@ hex = "0.4"
 tantivy = "0.26"
 usearch = "2.25"
 globset = "0.4"
+tree-sitter = { version = "0.25", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-javascript = { version = "0.25", optional = true }
+tree-sitter-java = { version = "0.23", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -373,22 +373,29 @@ pub fn has_vector(conn: &Connection, hash: &str, seq: i64, fingerprint: &str) ->
 }
 
 /// Count distinct content hashes still needing embedding: active documents with
-/// NON-EMPTY content whose hash has no content_vectors row. The `length(c.doc) > 0`
-/// filter mirrors run_embed's `if body.is_empty() { continue; }` skip — without it,
-/// empty files (hash = SHA-256 of "") count as pending forever but never embed.
-pub fn count_docs_needing_embed(conn: &Connection) -> rusqlite::Result<i64> {
+/// NON-EMPTY content whose hash has no content_vectors row at `fingerprint` — the
+/// current `embed_fingerprint` (see `store::expected_fingerprint`). The
+/// `length(c.doc) > 0` filter mirrors run_embed's `if body.is_empty() { continue; }`
+/// skip — without it, empty files (hash = SHA-256 of "") count as pending forever
+/// but never embed. A hash with vectors only under a *stale* fingerprint counts
+/// as pending, since it still needs a re-embed.
+pub fn count_docs_needing_embed(conn: &Connection, fingerprint: &str) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT COUNT(DISTINCT d.hash) FROM documents d \
          JOIN content c ON c.hash = d.hash \
          WHERE d.active = 1 AND length(c.doc) > 0 \
-         AND d.hash NOT IN (SELECT hash FROM content_vectors)",
-        [],
+         AND d.hash NOT IN (\
+             SELECT hash FROM content_vectors WHERE embed_fingerprint = ?1\
+         )",
+        params![fingerprint],
         |r| r.get(0),
     )
 }
 
-/// Check whether a content hash has at least one vector row (any seq, any fingerprint).
-/// Used by `rqmd embed` to skip already-embedded documents during an incremental run.
+/// Check whether a content hash has at least one vector row under any fingerprint
+/// — i.e. it has *some* embedding, possibly stale. Used by `rqmd embed` to detect
+/// hashes that need their old vectors superseded (deleted from `content_vectors`
+/// and evicted from HNSW) before the new embedding is written.
 pub fn hash_has_any_vector(conn: &Connection, hash: &str) -> bool {
     conn.query_row(
         "SELECT COUNT(*) FROM content_vectors WHERE hash=?1",
@@ -397,6 +404,29 @@ pub fn hash_has_any_vector(conn: &Connection, hash: &str) -> bool {
     )
     .unwrap_or(0)
         > 0
+}
+
+/// Check whether a content hash already has a vector row at the *current*
+/// fingerprint — the actual skip check for incremental `rqmd embed` runs.
+/// Unlike `hash_has_any_vector`, this is fingerprint-aware: a hash whose only
+/// vectors carry a stale fingerprint still needs re-embedding.
+pub fn hash_has_vector_with_fingerprint(conn: &Connection, hash: &str, fingerprint: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM content_vectors WHERE hash=?1 AND embed_fingerprint=?2",
+        params![hash, fingerprint],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+/// Delete all content_vectors rows for a hash — used to supersede stale vectors
+/// before inserting the re-embedded rows. Callers must also evict the
+/// corresponding vids from the HNSW index (`Store::evict_hnsw_vectors`) using
+/// `vids_for_hash` taken *before* this delete.
+pub fn delete_vectors_for_hash(conn: &Connection, hash: &str) -> Result<usize> {
+    let n = conn.execute("DELETE FROM content_vectors WHERE hash=?1", params![hash])?;
+    Ok(n)
 }
 
 /// Return the highest vid currently stored in content_vectors, or None if the table is empty.
