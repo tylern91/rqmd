@@ -4,6 +4,17 @@
 
 ---
 
+## [0.13.1] - 2026-09-02
+
+### Fixed
+- `deactivate_missing_documents` soft-deletes documents but never evicted their vectors from
+  `content_vectors`/HNSW. `update_one_collection`'s prune step now hash-reference-counts across
+  all collections (`hashes_for_paths` + `hash_referenced_by_active_document`) and only reclaims a
+  hash's vectors once no active document anywhere still references it, closing an orphan-vector
+  leak that would otherwise silently degrade ANN recall over time.
+
+---
+
 ## [0.13.0] - 2026-09-02
 
 ### Fixed

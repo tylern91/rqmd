@@ -1152,6 +1152,116 @@ fn deactivate_missing_documents_soft_deletes_removed_and_keeps_present() {
 }
 
 #[test]
+fn orphan_vector_cleanup_evicts_only_hashes_with_no_remaining_active_reference() {
+    // Regression for the gap where `deactivate_missing_documents` soft-deleted a
+    // document but left its vectors in `content_vectors`/HNSW forever (only
+    // reclaimed by a full `embed --rebuild`). Content is deduplicated globally by
+    // hash, so a hash shared with another still-active document must survive.
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store_with_vectors(&dir);
+
+    let shared_body = "shared orphan-check content";
+    let shared_hash = content_hash(shared_body);
+    let unique_body = "unique orphan-check content";
+    let unique_hash = content_hash(unique_body);
+
+    upsert_content(&store.db, &shared_hash, shared_body, "2024-01-01T00:00:00Z").unwrap();
+    upsert_content(&store.db, &unique_hash, unique_body, "2024-01-01T00:00:00Z").unwrap();
+
+    // "keep" collection references shared_hash and stays untouched throughout.
+    upsert_document(
+        &store.db,
+        "keep",
+        "shared.md",
+        "Shared",
+        &shared_hash,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    // "coll" collection also references shared_hash (will be deactivated below)
+    // plus a unique_hash document with no other reference.
+    upsert_document(
+        &store.db,
+        "coll",
+        "shared.md",
+        "Shared",
+        &shared_hash,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    upsert_document(
+        &store.db,
+        "coll",
+        "unique.md",
+        "Unique",
+        &unique_hash,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+
+    let shared_vid = store.hnsw_size() as u64;
+    upsert_vector_meta(
+        &store.db,
+        &shared_hash,
+        0,
+        0,
+        "fake",
+        "fp",
+        1,
+        shared_vid,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    let unique_vid = shared_vid + 1;
+    upsert_vector_meta(
+        &store.db,
+        &unique_hash,
+        0,
+        0,
+        "fake",
+        "fp",
+        1,
+        unique_vid,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+
+    // Simulate a walk of "coll" that no longer sees either file on disk.
+    let present: HashSet<String> = HashSet::new();
+    let removed = deactivate_missing_documents(&store.db, "coll", &present).unwrap();
+    assert_eq!(removed.len(), 2);
+
+    let candidate_hashes = rqmd_core::db::hashes_for_paths(&store.db, "coll", &removed).unwrap();
+    let mut orphaned = Vec::new();
+    for hash in candidate_hashes {
+        if !rqmd_core::db::hash_referenced_by_active_document(&store.db, &hash).unwrap() {
+            let vids = rqmd_core::db::vids_for_hash(&store.db, &hash).unwrap();
+            store.evict_hnsw_vectors(&vids).unwrap();
+            orphaned.push(hash);
+        }
+    }
+    assert_eq!(
+        orphaned,
+        vec![unique_hash.clone()],
+        "shared_hash must not be evicted — `keep` still actively references it"
+    );
+    for hash in &orphaned {
+        rqmd_core::db::delete_vectors_for_hash(&store.db, hash).unwrap();
+    }
+    store.flush().unwrap();
+
+    assert!(
+        rqmd_core::db::hash_has_any_vector(&store.db, &shared_hash),
+        "shared_hash's vector must survive"
+    );
+    assert!(
+        !rqmd_core::db::hash_has_any_vector(&store.db, &unique_hash),
+        "unique_hash's vector must be reclaimed"
+    );
+    assert_eq!(count_orphaned_vectors(&store.db).unwrap(), 0);
+}
+
+#[test]
 fn update_prune_removes_stale_document_from_fts_search() {
     // End-to-end regression for the rename/delete ghost-path bug: after a file
     // disappears from the walked candidate set, it must both disappear from

@@ -420,6 +420,50 @@ pub fn hash_has_vector_with_fingerprint(conn: &Connection, hash: &str, fingerpri
         > 0
 }
 
+/// Distinct content hashes for a set of collection-relative paths (any `active`
+/// state — a just-deactivated document's row still carries its hash). Used
+/// after `deactivate_missing_documents` to find the candidate hashes whose
+/// vectors may now be reclaimable.
+pub fn hashes_for_paths(
+    conn: &Connection,
+    collection: &str,
+    paths: &[String],
+) -> Result<Vec<String>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    // SQLite caps bound parameters at 999 by default; chunk so the collection
+    // param plus each chunk's paths always stays comfortably under that limit
+    // (mirrors `deactivate_missing_documents`, which feeds this function).
+    const CHUNK_SIZE: usize = 500;
+    let mut hashes = std::collections::HashSet::new();
+    for chunk in paths.chunks(CHUNK_SIZE) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT DISTINCT hash FROM documents WHERE collection = ? AND path IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let bind_values = std::iter::once(collection).chain(chunk.iter().map(String::as_str));
+        let chunk_hashes = stmt
+            .query_map(params_from_iter(bind_values), |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        hashes.extend(chunk_hashes);
+    }
+    Ok(hashes.into_iter().collect())
+}
+
+/// True if `hash` is still referenced by at least one active document, in any
+/// collection — content is deduplicated globally by hash, so a hash must only
+/// be reclaimed once no active document anywhere still needs it.
+pub fn hash_referenced_by_active_document(conn: &Connection, hash: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM documents WHERE hash = ?1 AND active = 1",
+        params![hash],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Delete all content_vectors rows for a hash — used to supersede stale vectors
 /// before inserting the re-embedded rows. Callers must also evict the
 /// corresponding vids from the HNSW index (`Store::evict_hnsw_vectors`) using
@@ -643,10 +687,12 @@ pub fn collection_doc_stats(conn: &Connection, collection: &str) -> Result<(i64,
 /// Soft-delete active documents whose `path` is no longer among `current_paths`
 /// — files removed or renamed on disk since the collection was last indexed.
 /// Sets `active = 0` rather than deleting the row: every read path already
-/// filters `WHERE active = 1`, so this alone makes the document unreachable,
-/// while leaving its `content`/`content_vectors`/HNSW vids in place (usearch
-/// has no API to remove a single vector from the graph). Those vectors are
-/// reclaimed on the next `embed --rebuild`.
+/// filters `WHERE active = 1`, so this alone makes the document unreachable.
+/// Content is deduplicated globally by hash, so this function does not touch
+/// `content`/`content_vectors`/HNSW itself — the caller must check, via
+/// `hashes_for_paths` + `hash_referenced_by_active_document`, whether each
+/// affected hash is now unreferenced by any active document in any
+/// collection before reclaiming its vectors.
 ///
 /// Returns the deactivated collection-relative paths so the caller can sweep
 /// the matching Tantivy entries — this module has no Tantivy handle.

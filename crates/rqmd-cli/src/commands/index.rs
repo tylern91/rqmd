@@ -679,6 +679,31 @@ fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: boo
                 eprintln!("  WARN: failed to remove stale FTS entry for {filepath}: {e:#}");
             }
         }
+
+        // A removed document's hash may still be in active use by another
+        // document — content is deduplicated globally by hash — so only
+        // reclaim hashes with no remaining active reference anywhere.
+        let candidate_hashes = db::hashes_for_paths(&s.db, &col.name, &removed)
+            .context("look up hashes for removed documents")?;
+        let mut orphaned_hashes = Vec::new();
+        for hash in candidate_hashes {
+            if !db::hash_referenced_by_active_document(&s.db, &hash)? {
+                let vids = db::vids_for_hash(&s.db, &hash)?;
+                s.evict_hnsw_vectors(&vids)?;
+                orphaned_hashes.push(hash);
+            }
+        }
+        if !orphaned_hashes.is_empty() {
+            // Flush is the durability barrier: HNSW must be persisted before
+            // the DB rows pointing at those vids are deleted.
+            s.flush()?;
+            let tx = s.db.transaction()?;
+            for hash in &orphaned_hashes {
+                db::delete_vectors_for_hash(&tx, hash).context("delete orphaned vectors")?;
+            }
+            tx.commit().context("commit orphaned vector cleanup")?;
+        }
+
         removed.len()
     } else {
         0
@@ -899,5 +924,83 @@ mod tests {
     fn truncate_context_preview_leaves_short_context_untouched() {
         let ctx = "short context";
         assert_eq!(truncate_context_preview(ctx), ctx);
+    }
+
+    /// End-to-end regression for the orphan-vector cleanup wired into
+    /// `update_one_collection`'s prune block (not just the `rqmd-core` helpers
+    /// it calls) — drives the real walk + prune path so a wiring bug (wrong
+    /// variable, skipped transaction, wrong flush ordering) would be caught
+    /// here even though `rqmd-core`'s own integration test only exercises the
+    /// helpers directly.
+    #[test]
+    fn update_one_collection_evicts_orphaned_vectors_but_keeps_shared_hash() {
+        let index_dir = tempfile::tempdir().unwrap();
+        let keep_src = tempfile::tempdir().unwrap();
+        let coll_src = tempfile::tempdir().unwrap();
+
+        let shared_body = "# Shared\nshared orphan-check content";
+        let unique_body = "# Unique\nunique orphan-check content";
+        std::fs::write(keep_src.path().join("shared.md"), shared_body).unwrap();
+        std::fs::write(coll_src.path().join("shared.md"), shared_body).unwrap();
+        std::fs::write(coll_src.path().join("unique.md"), unique_body).unwrap();
+
+        let mut s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+
+        let keep_col = Collection {
+            name: "keep".into(),
+            path: keep_src.path().to_string_lossy().to_string(),
+            pattern: "**/*.md".into(),
+            ignore: vec![],
+            include_by_default: true,
+            update_command: None,
+            allow_hidden: false,
+        };
+        let coll_col = Collection {
+            name: "coll".into(),
+            path: coll_src.path().to_string_lossy().to_string(),
+            pattern: "**/*.md".into(),
+            ignore: vec![],
+            include_by_default: true,
+            update_command: None,
+            allow_hidden: false,
+        };
+        db::upsert_collection(&s.db, &keep_col).unwrap();
+        db::upsert_collection(&s.db, &coll_col).unwrap();
+
+        // Initial walk indexes both collections' files as active documents.
+        update_one_collection(&mut s, &keep_col, false).unwrap();
+        update_one_collection(&mut s, &coll_col, false).unwrap();
+
+        let shared_hash =
+            db::hashes_for_paths(&s.db, "keep", &["shared.md".to_string()]).unwrap()[0].clone();
+        let unique_hash =
+            db::hashes_for_paths(&s.db, "coll", &["unique.md".to_string()]).unwrap()[0].clone();
+        assert_eq!(
+            db::hashes_for_paths(&s.db, "coll", &["shared.md".to_string()]).unwrap()[0],
+            shared_hash,
+            "both collections' shared.md must hash-dedupe to the same content row"
+        );
+
+        // Seed vectors for both hashes, as `rqmd embed` would have.
+        let now = "2024-01-01T00:00:00Z";
+        db::upsert_vector_meta(&s.db, &shared_hash, 0, 0, "fake", "fp", 1, 100, now).unwrap();
+        db::upsert_vector_meta(&s.db, &unique_hash, 0, 0, "fake", "fp", 1, 101, now).unwrap();
+
+        // Delete only "coll"'s unique.md and re-run its update — shared.md
+        // stays on disk (so the mask still matches ≥1 file and the prune
+        // guard against a 0-file mask/mount glitch doesn't short-circuit),
+        // and "keep" still references shared_hash, so only unique_hash
+        // should be reclaimed.
+        std::fs::remove_file(coll_src.path().join("unique.md")).unwrap();
+        update_one_collection(&mut s, &coll_col, false).unwrap();
+
+        assert!(
+            db::hash_has_any_vector(&s.db, &shared_hash),
+            "shared_hash's vector must survive — 'keep' still actively references it"
+        );
+        assert!(
+            !db::hash_has_any_vector(&s.db, &unique_hash),
+            "unique_hash's vector must be reclaimed — no active document references it anymore"
+        );
     }
 }
