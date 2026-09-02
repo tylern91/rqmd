@@ -17,6 +17,13 @@ pub const CHUNK_OVERLAP_CHARS: usize = 540;
 /// Search window for finding optimal break point (~200 tokens × 4 chars)
 pub const CHUNK_WINDOW_CHARS: usize = 800;
 
+/// Bump on any change to break selection, AST dispatch, or overlap semantics —
+/// anything that changes where a document gets cut without changing
+/// `CHUNK_SIZE_CHARS`/`CHUNK_OVERLAP_CHARS` themselves. Folded into
+/// `store::embed_fingerprint` so such changes are detected and trigger
+/// re-embedding instead of leaving stale chunk boundaries silently embedded.
+pub const CHUNK_STRATEGY_VERSION: u32 = 2;
+
 // ── Break patterns (mirrors BREAK_PATTERNS in store.ts) ──────────────────────
 
 struct BreakPattern {
@@ -80,9 +87,9 @@ static BREAK_PATTERNS: &[BreakPattern] = &[
 ];
 
 #[derive(Debug, Clone)]
-struct BreakPoint {
-    pos: usize,
-    score: i32,
+pub(crate) struct BreakPoint {
+    pub(crate) pos: usize,
+    pub(crate) score: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -160,26 +167,23 @@ fn scan_break_points(text: &str, fences: &[CodeFenceRegion]) -> Vec<BreakPoint> 
 }
 
 /// Find the best break point within [window_start, window_end).
-/// Returns the position of the break, or `window_end` if no point found.
-fn best_break_in_window(
+/// Returns `None` if no candidate falls in the window — callers must decide
+/// their own fallback (previously this returned `window_end`, which a caller
+/// couldn't distinguish from a genuine break found exactly at `window_end`,
+/// and which fed a `.max(ideal_end)` guard that silently discarded any
+/// backward break; see chunk_document).
+pub(crate) fn best_break_in_window(
     break_points: &[BreakPoint],
     window_start: usize,
     window_end: usize,
-) -> usize {
-    let candidates: Vec<&BreakPoint> = break_points
+) -> Option<usize> {
+    break_points
         .iter()
         .filter(|b| b.pos >= window_start && b.pos < window_end)
-        .collect();
-
-    if candidates.is_empty() {
-        return window_end;
-    }
-
-    candidates
-        .iter()
-        .max_by(|a, b| a.score.cmp(&b.score).then(b.pos.cmp(&a.pos)))
+        // Among equal top scores, prefer the latest position — keeps the
+        // chunk closer to CHUNK_SIZE_CHARS instead of cutting early.
+        .max_by(|a, b| a.score.cmp(&b.score).then(a.pos.cmp(&b.pos)))
         .map(|b| b.pos)
-        .unwrap_or(window_end)
 }
 
 // ── Char-boundary helpers ─────────────────────────────────────────────────────
@@ -204,18 +208,19 @@ pub fn snap_char_boundary_backward(text: &str, pos: usize) -> usize {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Split `text` into overlapping chunks of at most CHUNK_SIZE_CHARS characters,
-/// breaking at high-score positions (headings, paragraph breaks, etc.).
-pub fn chunk_document(text: &str) -> Vec<Chunk> {
+/// Shared sliding-window join: given a document and a set of candidate break
+/// points (regardless of how they were derived — regex-based markdown breaks,
+/// or AST declaration-boundary byte offsets), walk forward taking the best
+/// break in each window, falling back to a hard cut at `ideal_end` only when
+/// no candidate exists. See [`chunk_document`] for why a backward break is
+/// accepted rather than discarded.
+pub(crate) fn chunk_from_break_points(text: &str, break_points: &[BreakPoint]) -> Vec<Chunk> {
     if text.len() <= CHUNK_SIZE_CHARS {
         return vec![Chunk {
             text: text.to_string(),
             pos: 0,
         }];
     }
-
-    let fences = scan_code_fences(text);
-    let break_points = scan_break_points(text, &fences);
 
     let mut chunks = Vec::new();
     let mut start = 0;
@@ -230,17 +235,20 @@ pub fn chunk_document(text: &str) -> Vec<Chunk> {
             break;
         }
 
-        // Search for a good break point in the window around the ideal end
+        // Search for a good break point in the window around the ideal end.
+        // A break before ideal_end is accepted, not discarded: window_start is
+        // ideal_end - CHUNK_WINDOW_CHARS/2, i.e. start + 3200 bytes, so even the
+        // earliest possible accepted break still yields a chunk ≥89% of target size.
         let window_start = ideal_end.saturating_sub(CHUNK_WINDOW_CHARS / 2);
         let window_end = (ideal_end + CHUNK_WINDOW_CHARS / 2).min(text.len());
-        let break_at = best_break_in_window(&break_points, window_start, window_end);
+        let break_at =
+            best_break_in_window(break_points, window_start, window_end).unwrap_or(ideal_end);
 
-        let end = break_at.max(ideal_end); // never go backwards
-        let end = end.min(text.len());
+        let end = break_at.min(text.len());
         // Snap forward to the next valid UTF-8 char boundary. CHUNK_SIZE_CHARS is in
         // bytes (chars ≈ bytes for ASCII, but multi-byte chars like em-dash span 2-3
         // bytes), so ideal_end may land mid-char; regex break_at is always on a
-        // boundary, but ideal_end wins when break_at < ideal_end.
+        // boundary, but ideal_end wins when no break point was found.
         let end = snap_char_boundary_forward(text, end);
 
         chunks.push(Chunk {
@@ -257,6 +265,66 @@ pub fn chunk_document(text: &str) -> Vec<Chunk> {
     }
 
     chunks
+}
+
+/// Split `text` into overlapping chunks of at most CHUNK_SIZE_CHARS characters,
+/// breaking at high-score positions (headings, paragraph breaks, etc.).
+pub fn chunk_document(text: &str) -> Vec<Chunk> {
+    if text.len() <= CHUNK_SIZE_CHARS {
+        return vec![Chunk {
+            text: text.to_string(),
+            pos: 0,
+        }];
+    }
+
+    let fences = scan_code_fences(text);
+    let break_points = scan_break_points(text, &fences);
+    chunk_from_break_points(text, &break_points)
+}
+
+/// Chunk `text` from `path`, dispatching to AST-aware declaration-boundary
+/// chunking for source code when the `ast-chunking` feature is compiled in
+/// and `path`'s extension has a supported grammar; otherwise (or if the parse
+/// finds no boundaries) falls back to [`chunk_document`]'s markdown-oriented
+/// chunker so markdown/text/unknown-extension behavior is unchanged.
+pub fn chunk_document_for_path(path: &str, text: &str) -> Vec<Chunk> {
+    #[cfg(feature = "ast-chunking")]
+    {
+        if let Some(chunks) = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(|ext| crate::ast_chunk::chunk_source(text, ext))
+        {
+            return chunks;
+        }
+    }
+    #[cfg(not(feature = "ast-chunking"))]
+    {
+        let _ = path;
+    }
+    chunk_document(text)
+}
+
+/// Whether AST-aware declaration-boundary chunking is compiled into this
+/// binary. `cfg!` resolves against `rqmd-core`'s own feature set at compile
+/// time, so this is accurate regardless of whether the calling crate (e.g.
+/// `rqmd-cli`) declares an `ast-chunking` feature of its own.
+pub fn ast_chunking_compiled() -> bool {
+    cfg!(feature = "ast-chunking")
+}
+
+/// File extensions dispatched to AST chunking when [`ast_chunking_compiled`]
+/// is `true`. Empty when the feature is off — every extension falls back to
+/// [`chunk_document`] in that case.
+pub fn ast_chunking_extensions() -> &'static [&'static str] {
+    #[cfg(feature = "ast-chunking")]
+    {
+        &["ts", "tsx", "js", "jsx", "mjs", "cjs", "java", "py"]
+    }
+    #[cfg(not(feature = "ast-chunking"))]
+    {
+        &[]
+    }
 }
 
 /// Compute just the first chunk of `text` — byte-identical to
@@ -277,9 +345,10 @@ pub fn first_chunk(text: &str) -> String {
     let scan_end = snap_char_boundary_forward(text, window_end);
     let fences = scan_code_fences(&text[..scan_end]);
     let break_points = scan_break_points(&text[..scan_end], &fences);
-    let break_at = best_break_in_window(&break_points, window_start, window_end);
+    let break_at =
+        best_break_in_window(&break_points, window_start, window_end).unwrap_or(ideal_end);
 
-    let end = snap_char_boundary_forward(text, break_at.max(ideal_end).min(text.len()));
+    let end = snap_char_boundary_forward(text, break_at.min(text.len()));
     text[..end].to_string()
 }
 
@@ -440,6 +509,34 @@ mod tests {
             // Verify chunk content doesn't start mid-fence
             let _ = chunk.pos; // just ensure it compiles
         }
+    }
+
+    #[test]
+    fn backward_break_is_taken_instead_of_hard_cut() {
+        // A heading break at byte 3300 falls inside the search window
+        // [3200, 4000) around ideal_end=3600 but *before* it. The chunk must
+        // end at the heading, not be hard-cut at 3600 mid-word.
+        let before = "a".repeat(3300);
+        let heading = "\n# Heading\n";
+        let after = "b".repeat(2000);
+        let text = format!("{before}{heading}{after}");
+
+        let chunks = chunk_document(&text);
+        // The break point is the `\n` that precedes the heading, so the first
+        // chunk ends exactly there (3300 bytes) instead of being hard-cut at
+        // ideal_end (3600).
+        assert_eq!(
+            chunks[0].text.len(),
+            3300,
+            "expected the backward heading break at 3300 to be taken, got chunk len {}",
+            chunks[0].text.len()
+        );
+        // The heading itself starts the next chunk (via overlap), not mid-body.
+        assert!(
+            chunks[1].text.starts_with("\n# Heading\n") || chunks[1].text.contains("# Heading"),
+            "next chunk should pick up at the heading, got: {:?}",
+            &chunks[1].text[..30.min(chunks[1].text.len())]
+        );
     }
 
     #[test]

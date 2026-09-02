@@ -31,7 +31,8 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
     let total_vecs: i64 =
         s.db.query_row("SELECT COUNT(*) FROM content_vectors", [], |r| r.get(0))
             .unwrap_or(0);
-    let docs_needing_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(0);
+    let docs_needing_embed: i64 =
+        db::count_docs_needing_embed(&s.db, &store::expected_fingerprint()).unwrap_or(0);
     let last_modified: Option<String> =
         s.db.query_row(
             "SELECT MAX(modified_at) FROM documents WHERE active=1",
@@ -59,9 +60,15 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
         println!("  Updated:  {}", fmt::format_time_ago(ts));
     }
 
-    // ── AST Chunking (qmd.ts:539-563: rqmd is regex-only so always "not available") ──
+    // ── AST Chunking (qmd.ts:539-563) ─────────────────────────────────────────────
     println!("\n\x1b[1mAST Chunking\x1b[0m");
-    println!("  Status:   \x1b[2mnot available\x1b[0m");
+    if rqmd_core::chunking::ast_chunking_compiled() {
+        let exts = rqmd_core::chunking::ast_chunking_extensions().join(", ");
+        println!("  Status:   \x1b[32menabled\x1b[0m");
+        println!("  Grammars: {exts}");
+    } else {
+        println!("  Status:   \x1b[2mnot available\x1b[0m (build with --features ast-chunking)");
+    }
 
     // ── Collections (qmd.ts:565-586, per-collection multi-line blocks) ───────────
     let cols = db::list_collections(&s.db)?;
@@ -170,7 +177,7 @@ fn print_status_tips(conn: &Connection, cols: &[Collection]) {
             String::new()
         };
         tips.push(format!(
-            "Add context to collections for better search results: {names}{more}"
+            "Add context to collections for clearer `rqmd get`/`rqmd search` output: {names}{more}"
         ));
         tips.push(
             "  \x1b[2mrqmd context add rqmd://<name>/ \"What this collection contains\"\x1b[0m"
@@ -217,14 +224,30 @@ fn print_status_tips(conn: &Connection, cols: &[Collection]) {
 /// If interrupted between the two steps, only the HNSW is updated — the next run
 /// will re-embed the un-written docs, producing new vids that continue from
 /// `index.size()` (set by VectorIndex::load → next_vid = size).
-fn checkpoint(s: &mut rqmd_core::Store, pending: &mut Vec<PendingVectorMeta>) -> Result<()> {
-    if pending.is_empty() {
+///
+/// `pending_deletes` holds hashes whose stale (superseded) `content_vectors` rows
+/// must be dropped. The delete runs inside the same transaction as the new rows'
+/// upsert, and *before* it — `upsert_vector_meta`'s `ON CONFLICT(hash, seq) DO
+/// UPDATE` would otherwise just update the stale row in place instead of the
+/// delete-then-insert swap this depends on. The corresponding HNSW vids must
+/// already have been evicted from the in-memory index by the caller (via
+/// `Store::evict_hnsw_vectors`, using vids captured before this deletes the DB's
+/// only record of them) — that eviction is persisted by the `s.flush()` below.
+fn checkpoint(
+    s: &mut rqmd_core::Store,
+    pending: &mut Vec<PendingVectorMeta>,
+    pending_deletes: &mut HashSet<String>,
+) -> Result<()> {
+    if pending.is_empty() && pending_deletes.is_empty() {
         return Ok(());
     }
     // 1. Persist HNSW first — this is the durability barrier.
     s.flush()?;
     // 2. Write metadata rows in a single transaction.
     let tx = s.db.transaction()?;
+    for hash in pending_deletes.drain() {
+        db::delete_vectors_for_hash(&tx, &hash).context("delete stale vectors for hash")?;
+    }
     for m in pending.drain(..) {
         db::upsert_vector_meta(
             &tx,
@@ -330,7 +353,8 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     } else {
         // Fast path: nothing to do.
         let s = store::open_store_no_backend(index_dir, true)?;
-        let needs_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(1);
+        let needs_embed: i64 =
+            db::count_docs_needing_embed(&s.db, &store::expected_fingerprint()).unwrap_or(1);
         if needs_embed == 0 {
             println!("\x1b[32m✓ All content hashes already have embeddings.\x1b[0m");
             return Ok(());
@@ -370,6 +394,9 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
 
     // Buffer for pending vector metadata — flushed every CHECKPOINT_INTERVAL docs.
     let mut pending: Vec<PendingVectorMeta> = Vec::new();
+    // Hashes whose stale content_vectors rows must be deleted at the next checkpoint,
+    // superseding vectors embedded under a since-changed fingerprint (see `checkpoint`).
+    let mut pending_deletes: HashSet<String> = HashSet::new();
 
     // Track hashes queued in this run to prevent duplicate-hash drift: multiple documents
     // with identical bodies share a hash, and embedding each copy adds a vector to HNSW
@@ -377,17 +404,23 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     // widening the HNSW/DB gap on every run.  Deduping by hash here stops that at source.
     let mut seen_hashes: HashSet<String> = HashSet::new();
 
+    let fingerprint = store::expected_fingerprint();
+
     for col in &cols {
         // Collect all docs for this collection.  We embed only those whose content
-        // hash has no entry in content_vectors (incremental / resumable).
+        // hash has no vector row at the current fingerprint (incremental / resumable;
+        // also catches hashes whose only vectors are stale, so a chunker/model change
+        // gets re-embedded instead of silently skipped).
         let docs = db::list_documents(&s.db, Some(&col.name))?;
         let total = docs.len();
 
-        // Collect only docs whose hash has no vector rows yet (incremental / resumable)
+        // Collect only docs whose hash has no vector row at the current fingerprint yet
         // and whose hash has not already been queued in this run (duplicate-hash guard).
         let mut todo_indices: Vec<usize> = Vec::new();
         for (i, doc) in docs.iter().enumerate() {
-            if !db::hash_has_any_vector(&s.db, &doc.hash) && !seen_hashes.contains(&doc.hash) {
+            if !db::hash_has_vector_with_fingerprint(&s.db, &doc.hash, &fingerprint)
+                && !seen_hashes.contains(&doc.hash)
+            {
                 seen_hashes.insert(doc.hash.clone());
                 todo_indices.push(i);
             }
@@ -419,8 +452,18 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
                 eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
             }
 
+            // This hash has vectors, just not at the current fingerprint (the
+            // todo-selection check above is fingerprint-aware) — supersede them:
+            // evict the old vids from HNSW now, and queue the DB rows for delete
+            // in the same transaction as the new rows' insert (see `checkpoint`).
+            if db::hash_has_any_vector(&s.db, &doc.hash) {
+                let stale_vids = db::vids_for_hash(&s.db, &doc.hash)?;
+                s.evict_hnsw_vectors(&stale_vids)?;
+                pending_deletes.insert(doc.hash.clone());
+            }
+
             // Embed and stage — do NOT write to DB yet.
-            let new_chunks = s.embed_document_chunks(&doc.hash, &body)?;
+            let new_chunks = s.embed_document_chunks(&doc.hash, &doc.path, &body)?;
             let chunk_count = new_chunks.len();
             pending.extend(new_chunks);
             done += 1;
@@ -429,7 +472,7 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
 
             // Checkpoint every N docs so an interrupt only re-embeds the last batch.
             if done.is_multiple_of(CHECKPOINT_INTERVAL) {
-                checkpoint(&mut s, &mut pending)?;
+                checkpoint(&mut s, &mut pending, &mut pending_deletes)?;
             }
         }
 
@@ -448,7 +491,7 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     }
 
     // Final checkpoint for any remaining pending rows.
-    checkpoint(&mut s, &mut pending)?;
+    checkpoint(&mut s, &mut pending, &mut pending_deletes)?;
 
     // Summary — matches qmd's "✓ Done!" line (qmd.ts:1938).
     let elapsed = fmt::format_eta(start.elapsed().as_secs_f64());
@@ -505,7 +548,8 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
 
     // "needs embeddings" notice (qmd.ts:747–748) — printed once after all collections
     // so it isn't repeated N times with the same global count during a multi-collection update.
-    let needs_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(0);
+    let needs_embed: i64 =
+        db::count_docs_needing_embed(&s.db, &store::expected_fingerprint()).unwrap_or(0);
     if needs_embed > 0 {
         println!(
             "\nRun 'rqmd embed' to update embeddings ({needs_embed} unique hashes need vectors)"
@@ -744,7 +788,8 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         print_doctor_orphaned_vector_check(&s.db);
 
         // Recommended next steps.
-        let needs_embed: i64 = db::count_docs_needing_embed(&s.db).unwrap_or(0);
+        let needs_embed: i64 =
+            db::count_docs_needing_embed(&s.db, &store::expected_fingerprint()).unwrap_or(0);
         if needs_embed > 0 {
             println!("\n  Recommended next step");
             println!("    Run 'rqmd embed' to generate embeddings ({needs_embed} hashes pending)");
@@ -753,13 +798,14 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Stale-embedding check for `rqmd doctor`: content_vectors can accumulate rows
-/// from more than one embed_fingerprint after an embed-model or
-/// chunking-constant change, since `rqmd embed` only re-embeds hashes with zero
-/// vectors (see `count_docs_needing_embed`). A single stale fingerprint (no
-/// mixing at all — e.g. right after upgrading, before any new doc has been
-/// embedded) is just as broken as a mix, so the gate below checks for any
-/// mismatch against the current fingerprint, not just `breakdown.len() > 1`.
+/// Stale-embedding check for `rqmd doctor`: an interrupted or not-yet-run
+/// incremental `rqmd embed` can leave `content_vectors` rows under more than
+/// one `embed_fingerprint` after an embed-model or chunking-strategy change —
+/// `rqmd embed` supersedes a hash's stale rows as it re-embeds each one, but
+/// until that finishes, both fingerprints coexist. A single stale fingerprint
+/// (no mixing at all — e.g. right after upgrading, before `rqmd embed` has
+/// run) is just as broken as a mix, so the gate below checks for any mismatch
+/// against the current fingerprint, not just `breakdown.len() > 1`.
 fn print_doctor_stale_fingerprint_check(conn: &Connection) {
     let breakdown = db::fingerprint_breakdown(conn).unwrap_or_default();
     let expected = store::expected_fingerprint();
