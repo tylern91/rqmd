@@ -243,6 +243,9 @@ fn checkpoint(
     }
     // 1. Persist HNSW first — this is the durability barrier.
     s.flush()?;
+    // Capture the allocator's high-water-mark before opening the transaction — `next_vid`
+    // reads through `s`, which the transaction below borrows mutably.
+    let next_vid = s.next_vid();
     // 2. Write metadata rows in a single transaction.
     let tx = s.db.transaction()?;
     for hash in pending_deletes.drain() {
@@ -262,6 +265,15 @@ fn checkpoint(
         )
         .context("upsert vector meta")?;
     }
+    // Persist the true historical high-water-mark next_vid, atomically with the metadata
+    // above — unlike MAX(content_vectors.vid), this floor survives hard-deleted rows, so
+    // `Store::open`'s reconciliation never reissues a vid that once existed.
+    db::set_config(
+        &tx,
+        rqmd_core::store::NEXT_VID_CONFIG_KEY,
+        &next_vid.to_string(),
+    )
+    .context("persist next_vid")?;
     tx.commit().context("commit vector metadata")?;
     Ok(())
 }

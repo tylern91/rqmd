@@ -4,6 +4,20 @@
 
 ---
 
+## [0.13.2] - 2026-09-03
+
+### Fixed
+- `VectorIndex`'s `next_vid` allocator could reissue a vid still held by a live vector: both
+  `load()`'s `size()`-based derivation and `Store::open()`'s `MAX(content_vectors.vid)`
+  reconciliation under-count once a non-highest vid is removed while higher vids stay live,
+  causing `rqmd embed` to fail with `UNIQUE constraint failed: content_vectors.vid` or
+  `usearch add: Duplicate keys not allowed`. `VectorIndex::add()` now self-heals past a
+  collision by advancing `next_vid` and retrying (bounded), and a persisted monotonic
+  `next_vid` high-water-mark in `store_config` gives `Store::open()` a floor that survives
+  hard-deleted `content_vectors` rows, so a historically-issued vid is never reissued.
+
+---
+
 ## [0.13.1] - 2026-09-02
 
 ### Fixed

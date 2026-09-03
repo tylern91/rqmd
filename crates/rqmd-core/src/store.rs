@@ -50,6 +50,10 @@ const STRONG_SIGNAL_MIN_GAP: f32 = 0.15; // qmd STRONG_SIGNAL_MIN_GAP
 const BLEND_HI: f32 = 0.75;
 const BLEND_LO: f32 = 0.25;
 
+/// `store_config` key under which the HNSW allocator's high-water-mark `next_vid` is
+/// persisted on every checkpoint (see `Self::next_vid` and `Self::open`'s reconciliation).
+pub const NEXT_VID_CONFIG_KEY: &str = "next_vid";
+
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 /// The hybrid search engine — opens the SQLite/Tantivy/HNSW triad and exposes
@@ -182,6 +186,16 @@ impl Store {
         // re-issues vids that existing DB rows already hold, causing a UNIQUE constraint abort.
         if let Some(max_vid) = db::max_vector_vid(&db)? {
             hnsw.ensure_next_vid_at_least(max_vid + 1);
+        }
+
+        // Also reconcile against the persisted high-water-mark counter (`db::checkpoint`
+        // writes it on every checkpoint). Unlike `MAX(content_vectors.vid)`, this floor is
+        // monotonic and survives hard-deletes of `content_vectors` rows, so it still holds
+        // after a vid's owning document has been superseded or evicted.
+        if let Some(persisted_next_vid) =
+            db::get_config(&db, NEXT_VID_CONFIG_KEY)?.and_then(|s| s.parse::<u64>().ok())
+        {
+            hnsw.ensure_next_vid_at_least(persisted_next_vid);
         }
 
         let tantivy_meta_path = config.tantivy_dir.join("meta.json");
@@ -419,6 +433,13 @@ impl Store {
     /// Used by `rqmd embed` to detect HNSW/DB divergence.
     pub fn hnsw_size(&self) -> usize {
         self.hnsw.size()
+    }
+
+    /// The HNSW allocator's current high-water-mark `next_vid`. `hnsw` is a private field,
+    /// so this is the only way callers (`checkpoint` in `rqmd-cli`) can persist it to
+    /// `store_config` as a durable floor — see [`NEXT_VID_CONFIG_KEY`].
+    pub fn next_vid(&self) -> u64 {
+        self.hnsw.next_vid()
     }
 
     /// Drop any GGUF model idle for at least `ttl`. Returns how many were released.

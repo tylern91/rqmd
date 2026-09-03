@@ -1649,3 +1649,101 @@ fn supersede_cycle_leaves_exactly_one_fingerprint_and_no_growth() {
         0
     );
 }
+
+#[test]
+fn reopened_store_never_reissues_a_vid_hard_deleted_by_eviction() {
+    // Regression test for the production bug: MAX(content_vectors.vid) only reflects
+    // *active* rows, so once the highest-vid hash is evicted (superseded, or a document
+    // removed entirely) and the store is reopened, the old MAX-based floor under-counts.
+    // `checkpoint()` now also persists the HNSW allocator's true high-water-mark via
+    // `Store::next_vid()`/`NEXT_VID_CONFIG_KEY`, and `Store::open()` reconciles against
+    // it as an additional floor — this must survive the hard delete.
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let tantivy_dir = dir.path().join("tantivy");
+    let hnsw_path = dir.path().join("hnsw.usearch");
+    let make_config = || StoreConfig {
+        db_path: db_path.clone(),
+        tantivy_dir: tantivy_dir.clone(),
+        hnsw_path: hnsw_path.clone(),
+        read_only: false,
+    };
+
+    let mut store = Store::open(make_config(), Box::new(FakeEmbedBackend)).unwrap();
+    let collection = "coll";
+    let rel_path = "a.md";
+    let body = "content whose vectors will be hard-deleted";
+    let hash = content_hash(body);
+
+    upsert_content(&store.db, &hash, body, "2024-01-01T00:00:00Z").unwrap();
+    upsert_document(
+        &store.db,
+        collection,
+        rel_path,
+        "A",
+        &hash,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+
+    let pending = store.embed_document_chunks(&hash, rel_path, body).unwrap();
+    assert!(!pending.is_empty());
+    for m in &pending {
+        upsert_vector_meta(
+            &store.db,
+            &m.hash,
+            m.seq,
+            m.pos,
+            &m.model,
+            &m.fingerprint,
+            m.total_chunks,
+            m.vid,
+            &m.now,
+        )
+        .unwrap();
+    }
+    store.flush().unwrap();
+
+    let highest_vid_ever_issued = store.next_vid();
+
+    // Hard-delete: evict from HNSW and drop the DB rows, exactly like a real supersede
+    // or collection-scoped removal. Also persist the high-water-mark, mirroring what
+    // `checkpoint()` does in production.
+    let vids = rqmd_core::db::vids_for_hash(&store.db, &hash).unwrap();
+    store.evict_hnsw_vectors(&vids).unwrap();
+    rqmd_core::db::delete_vectors_for_hash(&store.db, &hash).unwrap();
+    set_config(
+        &store.db,
+        rqmd_core::store::NEXT_VID_CONFIG_KEY,
+        &store.next_vid().to_string(),
+    )
+    .unwrap();
+    store.flush().unwrap();
+    drop(store);
+
+    // Reopen fresh, exactly like a new `rqmd embed` process starting.
+    let mut reopened = Store::open(make_config(), Box::new(FakeEmbedBackend)).unwrap();
+    let new_body = "brand new content added after reopen";
+    let new_hash = content_hash(new_body);
+    upsert_content(&reopened.db, &new_hash, new_body, "2024-01-02T00:00:00Z").unwrap();
+    upsert_document(
+        &reopened.db,
+        collection,
+        "b.md",
+        "B",
+        &new_hash,
+        "2024-01-02T00:00:00Z",
+    )
+    .unwrap();
+
+    let new_pending = reopened
+        .embed_document_chunks(&new_hash, "b.md", new_body)
+        .unwrap();
+    assert!(
+        new_pending.iter().all(|m| m.vid >= highest_vid_ever_issued),
+        "reopened store must never reissue a vid that was ever handed out, even after \
+         the owning content_vectors rows were hard-deleted: got vids {:?}, floor was {}",
+        new_pending.iter().map(|m| m.vid).collect::<Vec<_>>(),
+        highest_vid_ever_issued
+    );
+}
