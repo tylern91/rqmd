@@ -4,6 +4,18 @@
 
 ---
 
+## [0.13.4] - 2026-09-03
+
+### Fixed
+- `rqmd query`/`vsearch` emitted a false-positive "embeddings are stale" warning whenever any
+  orphaned `content_vectors` row (left behind by document removal, unreachable by every query
+  path) carried an old `embed_fingerprint` — even when every vector actually reachable from an
+  active document was current. `warn_if_fingerprint_stale` now checks a new
+  `fingerprint_breakdown_active` query, scoped to vectors referenced by an active document, so
+  orphaned rows no longer trigger the warning or its misleading `--rebuild` suggestion.
+
+---
+
 ## [0.13.3] - 2026-09-03
 
 ### Fixed
