@@ -283,7 +283,7 @@ impl Store {
         let chunks = chunk_document_for_path(rel_path, body);
         let total = chunks.len();
         let embed_model = self.backend.embed_model_name().to_string();
-        let fingerprint = embed_fingerprint(&embed_model);
+        let fingerprint = embed_fingerprint(&embed_model, rel_path);
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
         let embeddings = self
             .backend
@@ -401,7 +401,7 @@ impl Store {
         body: &str,
     ) -> Result<Vec<PendingVectorMeta>> {
         let embed_model = self.backend.embed_model_name().to_string();
-        let fingerprint = embed_fingerprint(&embed_model);
+        let fingerprint = embed_fingerprint(&embed_model, rel_path);
         let chunks = chunk_document_for_path(rel_path, body);
         let total = chunks.len();
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
@@ -1397,32 +1397,67 @@ fn format_rfc3339(secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// Embedding fingerprint: 6-hex-char hash of model name + chunk constants.
-/// Used to detect stale embeddings after a model or chunking-strategy change.
+/// Whether `chunk_document_for_path(rel_path, _)` would actually dispatch to the
+/// AST chunker for `rel_path` — i.e. the `ast-chunking` feature is compiled in
+/// *and* `rel_path`'s extension is one AST chunking supports. `embed_fingerprint`
+/// uses this to decide whether a document's fingerprint needs the AST marker:
+/// without it, a binary built without `ast-chunking` silently re-chunks source
+/// files with the markdown regex chunker under the *same* fingerprint as an
+/// AST-enabled binary, so the invalidation mechanism never notices the swap
+/// (see the incident that motivated this: PR #64's local verification lost the
+/// feature flag via an in-place binary overwrite, and nothing detected it).
+pub fn embed_fingerprint_applies_ast(rel_path: &str) -> bool {
+    crate::chunking::ast_chunking_compiled()
+        && std::path::Path::new(rel_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| crate::chunking::ast_chunking_extensions().contains(&ext))
+}
+
+/// Embedding fingerprint: 6-hex-char hash of model name + chunk constants, plus
+/// an AST-chunking marker when [`embed_fingerprint_applies_ast`] is true for
+/// `rel_path`. Used to detect stale embeddings after a model or chunking-config
+/// change.
+///
+/// The AST marker is scoped to eligible paths rather than folded in
+/// unconditionally so that enabling/disabling the `ast-chunking` feature does
+/// not invalidate every markdown/text vector in the index — only the source
+/// files the chunker choice actually affects.
 ///
 /// Derives from the real `chunking::CHUNK_SIZE_CHARS`/`CHUNK_OVERLAP_CHARS` constants
 /// rather than hardcoded literals, so a future change to those constants actually
 /// invalidates the fingerprint instead of going undetected.
-fn embed_fingerprint(model: &str) -> String {
-    let sig = format!(
+fn embed_fingerprint(model: &str, rel_path: &str) -> String {
+    let mut sig = format!(
         "model:{model}\nchunk_size_chars:{}\nchunk_overlap_chars:{}\nchunk_strategy_version:{}",
         crate::chunking::CHUNK_SIZE_CHARS,
         crate::chunking::CHUNK_OVERLAP_CHARS,
         crate::chunking::CHUNK_STRATEGY_VERSION,
     );
+    if embed_fingerprint_applies_ast(rel_path) {
+        sig.push_str("\nast_chunking:1");
+    }
     let hash = Sha256::digest(sig.as_bytes());
     hex::encode(&hash[..3]) // 6 hex chars
 }
 
-/// Compute the fingerprint a fresh `rqmd embed` run would produce for the given
-/// embed-model identity, without loading any model weights or contacting
-/// HuggingFace. `embed_model_name` must match whatever the actually-configured
-/// backend's `InferenceBackend::embed_model_name` reports — e.g.
-/// `BackendKind::default_embed_model_name()` for the backend kind currently
-/// selected — not a hardcoded single backend's defaults. Used by `rqmd doctor`
-/// to tell current vectors from stale ones.
+/// Compute the base fingerprint a fresh `rqmd embed` run would produce for the
+/// given embed-model identity on a non-AST-eligible path, without loading any
+/// model weights or contacting HuggingFace. `embed_model_name` must match
+/// whatever the actually-configured backend's `InferenceBackend::embed_model_name`
+/// reports — e.g. `BackendKind::default_embed_model_name()` for the backend kind
+/// currently selected — not a hardcoded single backend's defaults.
 pub fn expected_embed_fingerprint(embed_model_name: &str) -> String {
-    embed_fingerprint(embed_model_name)
+    embed_fingerprint(embed_model_name, "")
+}
+
+/// Compute the fingerprint a fresh `rqmd embed` run would produce for
+/// `rel_path` specifically — the AST-marked variant when `rel_path` is
+/// AST-eligible, otherwise identical to [`expected_embed_fingerprint`]. Used by
+/// `rqmd doctor`/`rqmd embed` to tell current vectors from stale ones on a
+/// per-document basis.
+pub fn expected_embed_fingerprint_for_path(embed_model_name: &str, rel_path: &str) -> String {
+    embed_fingerprint(embed_model_name, rel_path)
 }
 
 #[cfg(test)]
@@ -1643,6 +1678,56 @@ mod tests {
             rqmd_llm::DEFAULT_EMBED_FILE
         ));
         assert_ne!(recorded_fp, &llama_default);
+    }
+
+    /// A non-AST-eligible path (e.g. markdown) must keep today's exact base
+    /// fingerprint regardless of whether `ast-chunking` is compiled in —
+    /// otherwise enabling/disabling the feature would invalidate every
+    /// markdown/text vector in the index, not just the source files the
+    /// chunker choice actually affects.
+    #[test]
+    fn non_ast_eligible_path_keeps_base_fingerprint() {
+        let base = expected_embed_fingerprint("fake-model");
+        let for_md = expected_embed_fingerprint_for_path("fake-model", "docs/readme.md");
+        assert_eq!(
+            for_md, base,
+            "non-eligible paths must not carry the AST marker"
+        );
+    }
+
+    /// An AST-eligible path only diverges from the base fingerprint when the
+    /// `ast-chunking` feature is actually compiled in — the marker describes
+    /// what the binary will *do*, not merely what extension the file has.
+    #[test]
+    fn ast_eligible_path_diverges_from_base_iff_feature_compiled() {
+        let base = expected_embed_fingerprint("fake-model");
+        let for_py = expected_embed_fingerprint_for_path("fake-model", "src/module.py");
+        if crate::chunking::ast_chunking_compiled() {
+            assert_ne!(
+                for_py, base,
+                "AST-eligible paths must diverge once the feature is compiled in"
+            );
+        } else {
+            assert_eq!(
+                for_py, base,
+                "without the feature compiled, no path is AST-eligible"
+            );
+        }
+    }
+
+    /// `embed_fingerprint_applies_ast` is the single eligibility predicate the
+    /// CLI and SQL builder share — assert it agrees with the extension list
+    /// `chunking::ast_chunking_extensions()` publishes, not a restated one.
+    #[test]
+    fn embed_fingerprint_applies_ast_matches_extension_list() {
+        for ext in crate::chunking::ast_chunking_extensions() {
+            assert!(
+                embed_fingerprint_applies_ast(&format!("some/path/file.{ext}")),
+                "extension {ext} is in ast_chunking_extensions() but not treated as eligible"
+            );
+        }
+        assert!(!embed_fingerprint_applies_ast("docs/readme.md"));
+        assert!(!embed_fingerprint_applies_ast("no_extension"));
     }
 
     /// Regression test for silent query-quality degradation: when the active
