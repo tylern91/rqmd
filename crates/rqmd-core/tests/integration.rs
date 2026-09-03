@@ -6,10 +6,10 @@ use rqmd_core::{
     chunking::chunk_document,
     db::{
         collection_context_key, content_hash, count_docs_needing_embed, count_orphaned_vectors,
-        deactivate_missing_documents, docid_from_hash, find_documents_by_needles, get_config,
-        get_context_for_path, get_document_by_docid_prefix, get_document_by_filepath,
-        list_documents, open_db, purge_collection, set_config, upsert_content, upsert_document,
-        upsert_vector_meta,
+        deactivate_missing_documents, docid_from_hash, find_documents_by_needles,
+        fingerprint_breakdown_active, get_config, get_context_for_path,
+        get_document_by_docid_prefix, get_document_by_filepath, list_documents, open_db,
+        purge_collection, set_config, upsert_content, upsert_document, upsert_vector_meta,
     },
     resolve::resolve_multi_get,
     rrf::{reciprocal_rank_fusion, rrf_weights},
@@ -1466,6 +1466,85 @@ fn expected_embed_fingerprint_is_stable_across_calls() {
     let a = rqmd_core::store::expected_embed_fingerprint("fake-model");
     let b = rqmd_core::store::expected_embed_fingerprint("fake-model");
     assert_eq!(a, b);
+}
+
+/// Regression test for the false-positive "embeddings are stale" warning: an
+/// orphaned vector (no active document references its hash) at an old
+/// fingerprint must not appear in `fingerprint_breakdown_active` — it is
+/// unreachable by every query path, so counting it as stale would warn on an
+/// index where nothing active is actually stale.
+#[test]
+fn fingerprint_breakdown_active_excludes_orphaned_vectors() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    let collection = "coll";
+
+    store
+        .index_document_fts_only(collection, "a.md", "A", "alpha body")
+        .unwrap();
+    store.flush().unwrap();
+    let hash = get_document_by_filepath(&store.db, collection, "a.md")
+        .unwrap()
+        .unwrap()
+        .hash;
+
+    upsert_vector_meta(
+        &store.db,
+        &hash,
+        0,
+        0,
+        "model",
+        "stale-fp",
+        1,
+        999,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    assert_eq!(
+        fingerprint_breakdown_active(&store.db).unwrap(),
+        vec![("stale-fp".to_string(), 1)]
+    );
+
+    // Soft-delete the only document referencing this hash — its vector is now
+    // orphaned, and must drop out of the active breakdown entirely.
+    let present: HashSet<String> = HashSet::new();
+    deactivate_missing_documents(&store.db, collection, &present).unwrap();
+    assert_eq!(fingerprint_breakdown_active(&store.db).unwrap(), vec![]);
+}
+
+/// Regression test guarding the fix itself: an *active* document at a stale
+/// fingerprint must still be detected — confirms the false positive was fixed
+/// by scoping to active documents, not by disabling staleness detection.
+#[test]
+fn fingerprint_breakdown_active_still_reports_stale_active_document() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    let collection = "coll";
+
+    store
+        .index_document_fts_only(collection, "a.md", "A", "alpha body")
+        .unwrap();
+    store.flush().unwrap();
+    let hash = get_document_by_filepath(&store.db, collection, "a.md")
+        .unwrap()
+        .unwrap()
+        .hash;
+
+    upsert_vector_meta(
+        &store.db,
+        &hash,
+        0,
+        0,
+        "model",
+        "stale-fp",
+        1,
+        999,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+
+    let breakdown = fingerprint_breakdown_active(&store.db).unwrap();
+    assert_eq!(breakdown, vec![("stale-fp".to_string(), 1)]);
 }
 
 #[test]

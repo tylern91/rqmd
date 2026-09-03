@@ -77,14 +77,19 @@ pub fn expected_fingerprint() -> String {
     core_store::expected_embed_fingerprint(&name)
 }
 
-/// Warn once if any content_vectors row was produced by a different model or
-/// chunking config than the one active now. A single stale fingerprint (no
+/// Warn once if any content_vectors row *reachable from an active document*
+/// was produced by a different model or chunking config than the one active
+/// now. Scoped to active-document vectors (`db::fingerprint_breakdown_active`,
+/// not `db::fingerprint_breakdown`) — orphaned vectors left behind by document
+/// removal are unreachable by every query path and carry a stale fingerprint
+/// indefinitely, so counting them here would warn on an index with nothing
+/// actually stale. A single stale fingerprint among active vectors (no
 /// mixing) is exactly what upgrading past a chunking/model change looks like
 /// before the next `embed --rebuild` — checking `breakdown.len() > 1` alone
 /// would miss it.
 pub fn warn_if_fingerprint_stale(s: &Store) {
     let expected = expected_fingerprint();
-    let breakdown = db::fingerprint_breakdown(&s.db).unwrap_or_default();
+    let breakdown = db::fingerprint_breakdown_active(&s.db).unwrap_or_default();
     if breakdown.iter().any(|(fp, _)| fp != &expected) {
         eprintln!(
             "\x1b[33mrqmd: warning: embeddings are stale (model or chunking config changed \

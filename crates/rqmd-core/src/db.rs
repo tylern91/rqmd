@@ -508,6 +508,27 @@ pub fn fingerprint_breakdown(conn: &Connection) -> Result<Vec<(String, i64)>> {
     Ok(rows)
 }
 
+/// Same as [`fingerprint_breakdown`], but scoped to vectors reachable from an
+/// active document — the same predicate as [`count_orphaned_vectors`]. Staleness
+/// detection must use this, not `fingerprint_breakdown`: an orphaned vector at
+/// an old fingerprint is unreachable by any query, so counting it as stale
+/// produces a false-positive warning that survives every `embed`/`update` run
+/// until a full `--rebuild`.
+pub fn fingerprint_breakdown_active(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT embed_fingerprint, COUNT(*) FROM content_vectors \
+         WHERE embed_fingerprint != '' \
+         AND hash IN (SELECT hash FROM documents WHERE active = 1) \
+         GROUP BY embed_fingerprint ORDER BY COUNT(*) DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// Insert or update a chunk's vector metadata.
 /// `vid` is the usearch key (caller assigns it from the HNSW index).
 #[allow(clippy::too_many_arguments)]
