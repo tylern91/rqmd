@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+---
+
+## [0.13.4] - 2026-09-03
+
 ### Fixed
 - `rqmd query`/`vsearch` emitted a false-positive "embeddings are stale" warning whenever any
   orphaned `content_vectors` row (left behind by document removal, unreachable by every query
