@@ -10,6 +10,14 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 use rqmd_llm::EMBED_DIM;
 
+/// usearch's high-level wrapper rejects a re-added key with this message rather than a typed
+/// error variant, so string-matching is the only way to distinguish "vid already taken" (safe
+/// to retry with a fresh vid) from other `add` failures (e.g. OOM/reserve failure, corruption)
+/// that must propagate immediately instead of spinning through [`VectorIndex::add`]'s retry loop.
+fn is_duplicate_key_error<E: std::fmt::Display>(e: &E) -> bool {
+    e.to_string().contains("Duplicate keys")
+}
+
 pub struct VectorIndex {
     inner: Index,
     next_vid: u64,
@@ -89,21 +97,40 @@ impl VectorIndex {
     }
 
     /// Add a vector. Returns the assigned vid.
+    ///
+    /// Self-healing: `next_vid` can under-count relative to usearch's permanently-tombstoned
+    /// keys (removed vids are never reusable — see [`Self::remove`]), so a duplicate-key
+    /// rejection here means `next_vid` drifted behind reality, not that the caller did
+    /// anything wrong. Advance past the collision and retry, bounded, rather than failing
+    /// a legitimate add over stale bookkeeping.
     pub fn add(&mut self, embedding: &[f32]) -> Result<u64> {
         if self.read_only {
             bail!("cannot add to a read-only (mmap'd) VectorIndex");
         }
-        let vid = self.next_vid;
-        if self.inner.capacity() <= self.inner.size() {
-            self.inner
-                .reserve(self.inner.capacity() * 2 + 1)
-                .map_err(|e| anyhow!("usearch reserve grow: {e}"))?;
+        const MAX_COLLISION_RETRIES: u32 = 1024;
+        for _ in 0..MAX_COLLISION_RETRIES {
+            let vid = self.next_vid;
+            if self.inner.capacity() <= self.inner.size() {
+                self.inner
+                    .reserve(self.inner.capacity() * 2 + 1)
+                    .map_err(|e| anyhow!("usearch reserve grow: {e}"))?;
+            }
+            match self.inner.add(vid, embedding) {
+                Ok(()) => {
+                    self.next_vid += 1;
+                    return Ok(vid);
+                }
+                Err(e) if is_duplicate_key_error(&e) => {
+                    self.next_vid += 1;
+                }
+                Err(e) => return Err(anyhow!("usearch add: {e}")),
+            }
         }
-        self.inner
-            .add(vid, embedding)
-            .map_err(|e| anyhow!("usearch add: {e}"))?;
-        self.next_vid += 1;
-        Ok(vid)
+        bail!(
+            "usearch add: gave up after {MAX_COLLISION_RETRIES} vid collisions \
+             starting from next_vid={}",
+            self.next_vid
+        )
     }
 
     /// Raise `next_vid` to at least `floor` without adding a vector.
@@ -116,6 +143,14 @@ impl VectorIndex {
         if floor > self.next_vid {
             self.next_vid = floor;
         }
+    }
+
+    /// The next vid this index will assign on `add`/`ensure_next_vid_at_least`'s effective
+    /// floor — the true historical high-water-mark, unlike `size()` which drops on removal.
+    /// Exposed so callers (e.g. `Store::checkpoint`) can persist it as a durable floor that
+    /// survives hard-deleted `content_vectors` rows.
+    pub fn next_vid(&self) -> u64 {
+        self.next_vid
     }
 
     /// Add with a specific vid (used when rebuilding from rusqlite).
@@ -253,6 +288,48 @@ mod tests {
             "removed vid must not appear in search results"
         );
         assert!(results.iter().any(|(vid, _)| *vid == vid_b));
+    }
+
+    /// Reproduces the production bug: `next_vid = size()` (set by `load()`) is a *count* of
+    /// live vectors, not "one past the highest key ever assigned". Removing a non-highest
+    /// vid leaves a gap -- size() drops below the highest still-live key -- so after a
+    /// save/reload cycle, the next `add()` can be assigned a vid that a still-live vector
+    /// already holds. Without the retry loop this fails with "Duplicate keys not allowed";
+    /// with it, `add` self-heals by advancing past the collision.
+    #[test]
+    fn add_self_heals_past_a_collision_left_by_load_after_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hnsw.usearch");
+
+        let mut index = VectorIndex::new().unwrap();
+        let a: Vec<f32> = (0..EMBED_DIM).map(|i| i as f32 * 0.001).collect();
+        let b: Vec<f32> = (0..EMBED_DIM)
+            .map(|i| (EMBED_DIM - i) as f32 * 0.001)
+            .collect();
+        let c: Vec<f32> = (0..EMBED_DIM).map(|i| i as f32 * 0.0015).collect();
+        let vid_a = index.add(&a).unwrap(); // vid 0 -- removed below
+        let vid_b = index.add(&b).unwrap(); // vid 1 -- stays live
+        let vid_c = index.add(&c).unwrap(); // vid 2 -- stays live, still occupies key 2
+        index.remove(vid_a).unwrap();
+        index.save(&path).unwrap();
+
+        // Reload: size() == 2 (only vid_b/vid_c live), so next_vid resets to 2 -- colliding
+        // with the still-live vid_c, not a removed key.
+        let mut reloaded = VectorIndex::load(&path).unwrap();
+        assert_eq!(reloaded.next_vid, 2);
+
+        let d: Vec<f32> = (0..EMBED_DIM).map(|i| i as f32 * 0.002).collect();
+        let vid_d = reloaded.add(&d).unwrap();
+        assert_ne!(vid_d, vid_b, "must not collide with a still-live vid");
+        assert_ne!(vid_d, vid_c, "must not collide with a still-live vid");
+        assert!(
+            vid_d > vid_c,
+            "must advance past every live key, never reuse one"
+        );
+
+        // The healed index still works correctly for search.
+        let results = reloaded.search(&d, 10).unwrap();
+        assert!(results.iter().any(|(vid, _)| *vid == vid_d));
     }
 
     #[test]
