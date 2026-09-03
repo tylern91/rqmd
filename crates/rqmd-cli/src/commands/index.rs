@@ -5,7 +5,9 @@ use std::path::Path;
 use std::time::Instant;
 use walkdir::WalkDir;
 
-use rqmd_core::{Collection, IndexOutcome, PendingVectorMeta, db, snap_char_boundary_backward};
+use rqmd_core::{
+    Collection, IndexLock, IndexOutcome, PendingVectorMeta, db, snap_char_boundary_backward,
+};
 
 use crate::{document, exclusions, format as fmt, store};
 
@@ -317,6 +319,10 @@ fn render_embed_progress_line(
 }
 
 pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> Result<()> {
+    // Held for the whole command: `Store::open`'s next_vid floor and the
+    // HNSW file are both unguarded against a second concurrent writer.
+    let _lock = IndexLock::acquire(index_dir)?;
+
     let cols = {
         let s = store::open_store_no_backend(index_dir, true)?;
         match collection {
@@ -514,6 +520,11 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
 }
 
 pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
+    // Shares IndexLock with run_embed: an `update` mutating `documents` rows
+    // mid-way through a concurrent `embed`'s snapshot is a separate hazard
+    // from the vid race, but the two commands never need to run at once.
+    let _lock = IndexLock::acquire(index_dir)?;
+
     // Re-walk each collection's directory and re-index changed files.
     let cols = {
         let s = store::open_store_no_backend(index_dir, true)?;
