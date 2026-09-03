@@ -4,6 +4,24 @@
 
 ---
 
+## [0.14.0] - 2026-09-03
+
+### Fixed
+- `embed_fingerprint`: made path-scoped and AST-chunking-feature-aware. Previously it hashed
+  only `model` + chunk-size/overlap/strategy-version, so a binary built without the
+  `ast-chunking` cargo feature could silently re-chunk source files with the markdown regex
+  chunker under the *same* fingerprint an AST-enabled binary would use — the staleness-detection
+  mechanism had no way to see the change. The fingerprint now appends an AST marker only for
+  paths with an AST-eligible extension (`ts`, `tsx`, `js`, `jsx`, `mjs`, `cjs`, `java`, `py`)
+  when the feature is compiled in.
+  - **Markdown and text vectors are unaffected and will not be re-embedded** — the base
+    fingerprint is byte-identical to before.
+  - **Source-code vectors under an AST-eligible extension will re-embed** the next time
+    `rqmd embed` runs, since they now compute a different fingerprint (~48.7k vectors observed
+    on the reference index, ~6h incremental re-embed).
+
+---
+
 ## [0.13.4] - 2026-09-03
 
 ### Fixed

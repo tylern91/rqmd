@@ -1567,7 +1567,10 @@ fn count_docs_needing_embed_counts_stale_fingerprint_as_pending() {
     let current = rqmd_core::store::expected_embed_fingerprint("fake");
 
     // No vectors at all yet — pending.
-    assert_eq!(count_docs_needing_embed(&store.db, &current).unwrap(), 1);
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &current, &current).unwrap(),
+        1
+    );
 
     // A vector exists, but under a stale fingerprint — still pending.
     upsert_vector_meta(
@@ -1583,7 +1586,7 @@ fn count_docs_needing_embed_counts_stale_fingerprint_as_pending() {
     )
     .unwrap();
     assert_eq!(
-        count_docs_needing_embed(&store.db, &current).unwrap(),
+        count_docs_needing_embed(&store.db, &current, &current).unwrap(),
         1,
         "a hash whose only vectors are stale must still count as pending"
     );
@@ -1601,7 +1604,110 @@ fn count_docs_needing_embed_counts_stale_fingerprint_as_pending() {
         "2024-01-01T00:00:00Z",
     )
     .unwrap();
-    assert_eq!(count_docs_needing_embed(&store.db, &current).unwrap(), 0);
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &current, &current).unwrap(),
+        0
+    );
+}
+
+/// A `.java` doc is pending under the base fingerprint but not under the AST
+/// one, and a `.md` doc is the inverse — `count_docs_needing_embed` must pick
+/// the right expected fingerprint per document's path, not a single global one.
+#[test]
+fn count_docs_needing_embed_is_path_aware_for_ast_eligibility() {
+    let dir = TempDir::new().unwrap();
+    let store = test_store(&dir);
+    let collection = "coll";
+
+    upsert_content(
+        &store.db,
+        "hash-java",
+        "class Foo {}",
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    upsert_document(
+        &store.db,
+        collection,
+        "Foo.java",
+        "Foo",
+        "hash-java",
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    upsert_content(&store.db, "hash-md", "# Title", "2024-01-01T00:00:00Z").unwrap();
+    upsert_document(
+        &store.db,
+        collection,
+        "readme.md",
+        "Readme",
+        "hash-md",
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+
+    let base = rqmd_core::store::expected_embed_fingerprint("fake");
+    let ast = rqmd_core::store::expected_embed_fingerprint_for_path("fake", "Foo.java");
+
+    // Nothing embedded yet — both docs pending under either signature.
+    assert_eq!(count_docs_needing_embed(&store.db, &base, &ast).unwrap(), 2);
+
+    // Embed the markdown doc under the base fingerprint — it's the correct one
+    // for a non-eligible path, so it must stop counting as pending.
+    upsert_vector_meta(
+        &store.db,
+        "hash-md",
+        0,
+        0,
+        "fake",
+        &base,
+        1,
+        1,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    assert_eq!(count_docs_needing_embed(&store.db, &base, &ast).unwrap(), 1);
+
+    // Embedding the java doc under the *base* fingerprint (wrong for an
+    // AST-eligible path when the feature is compiled in) must not clear it
+    // unless base == ast (feature not compiled).
+    upsert_vector_meta(
+        &store.db,
+        "hash-java",
+        0,
+        0,
+        "fake",
+        &base,
+        1,
+        2,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    let still_pending = count_docs_needing_embed(&store.db, &base, &ast).unwrap();
+    if base == ast {
+        assert_eq!(still_pending, 0);
+    } else {
+        assert_eq!(
+            still_pending, 1,
+            ".java doc embedded under the base fingerprint must still count as pending \
+             once the AST fingerprint differs"
+        );
+    }
+
+    // Embed it under the AST-correct fingerprint — now fully current.
+    upsert_vector_meta(
+        &store.db,
+        "hash-java",
+        0,
+        0,
+        "fake",
+        &ast,
+        1,
+        3,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    assert_eq!(count_docs_needing_embed(&store.db, &base, &ast).unwrap(), 0);
 }
 
 #[test]
@@ -1724,7 +1830,7 @@ fn supersede_cycle_leaves_exactly_one_fingerprint_and_no_growth() {
         &current_fingerprint
     ));
     assert_eq!(
-        count_docs_needing_embed(&store.db, &current_fingerprint).unwrap(),
+        count_docs_needing_embed(&store.db, &current_fingerprint, &current_fingerprint).unwrap(),
         0
     );
 }

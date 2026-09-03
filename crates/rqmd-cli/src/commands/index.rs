@@ -33,8 +33,12 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
     let total_vecs: i64 =
         s.db.query_row("SELECT COUNT(*) FROM content_vectors", [], |r| r.get(0))
             .unwrap_or(0);
-    let docs_needing_embed: i64 =
-        db::count_docs_needing_embed(&s.db, &store::expected_fingerprint()).unwrap_or(0);
+    let docs_needing_embed: i64 = db::count_docs_needing_embed(
+        &s.db,
+        &store::expected_fingerprint(),
+        &store::expected_ast_fingerprint(),
+    )
+    .unwrap_or(0);
     let last_modified: Option<String> =
         s.db.query_row(
             "SELECT MAX(modified_at) FROM documents WHERE active=1",
@@ -371,8 +375,12 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     } else {
         // Fast path: nothing to do.
         let s = store::open_store_no_backend(index_dir, true)?;
-        let needs_embed: i64 =
-            db::count_docs_needing_embed(&s.db, &store::expected_fingerprint()).unwrap_or(1);
+        let needs_embed: i64 = db::count_docs_needing_embed(
+            &s.db,
+            &store::expected_fingerprint(),
+            &store::expected_ast_fingerprint(),
+        )
+        .unwrap_or(1);
         if needs_embed == 0 {
             println!("\x1b[32m✓ All content hashes already have embeddings.\x1b[0m");
             return Ok(());
@@ -422,8 +430,6 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     // widening the HNSW/DB gap on every run.  Deduping by hash here stops that at source.
     let mut seen_hashes: HashSet<String> = HashSet::new();
 
-    let fingerprint = store::expected_fingerprint();
-
     for col in &cols {
         // Collect all docs for this collection.  We embed only those whose content
         // hash has no vector row at the current fingerprint (incremental / resumable;
@@ -436,6 +442,7 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
         // and whose hash has not already been queued in this run (duplicate-hash guard).
         let mut todo_indices: Vec<usize> = Vec::new();
         for (i, doc) in docs.iter().enumerate() {
+            let fingerprint = store::expected_fingerprint_for_path(&doc.path);
             if !db::hash_has_vector_with_fingerprint(&s.db, &doc.hash, &fingerprint)
                 && !seen_hashes.contains(&doc.hash)
             {
@@ -571,8 +578,12 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
 
     // "needs embeddings" notice (qmd.ts:747–748) — printed once after all collections
     // so it isn't repeated N times with the same global count during a multi-collection update.
-    let needs_embed: i64 =
-        db::count_docs_needing_embed(&s.db, &store::expected_fingerprint()).unwrap_or(0);
+    let needs_embed: i64 = db::count_docs_needing_embed(
+        &s.db,
+        &store::expected_fingerprint(),
+        &store::expected_ast_fingerprint(),
+    )
+    .unwrap_or(0);
     if needs_embed > 0 {
         println!(
             "\nRun 'rqmd embed' to update embeddings ({needs_embed} unique hashes need vectors)"
@@ -836,8 +847,12 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         print_doctor_orphaned_vector_check(&s.db);
 
         // Recommended next steps.
-        let needs_embed: i64 =
-            db::count_docs_needing_embed(&s.db, &store::expected_fingerprint()).unwrap_or(0);
+        let needs_embed: i64 = db::count_docs_needing_embed(
+            &s.db,
+            &store::expected_fingerprint(),
+            &store::expected_ast_fingerprint(),
+        )
+        .unwrap_or(0);
         if needs_embed > 0 {
             println!("\n  Recommended next step");
             println!("    Run 'rqmd embed' to generate embeddings ({needs_embed} hashes pending)");
@@ -848,21 +863,22 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
 
 /// Stale-embedding check for `rqmd doctor`: an interrupted or not-yet-run
 /// incremental `rqmd embed` can leave `content_vectors` rows under more than
-/// one `embed_fingerprint` after an embed-model or chunking-strategy change —
+/// the expected fingerprints after an embed-model or chunking-strategy change —
 /// `rqmd embed` supersedes a hash's stale rows as it re-embeds each one, but
-/// until that finishes, both fingerprints coexist. A single stale fingerprint
-/// (no mixing at all — e.g. right after upgrading, before `rqmd embed` has
-/// run) is just as broken as a mix, so the gate below checks for any mismatch
-/// against the current fingerprint, not just `breakdown.len() > 1`.
+/// until that finishes, stale fingerprints coexist with current ones. Base and
+/// AST-marked are *both* current — a path-scoped marker means eligible and
+/// non-eligible paths legitimately embed under different fingerprints — so the
+/// gate checks membership in `{base, ast}`, not equality with a single value.
 fn print_doctor_stale_fingerprint_check(conn: &Connection) {
     let breakdown = db::fingerprint_breakdown(conn).unwrap_or_default();
-    let expected = store::expected_fingerprint();
-    if breakdown.iter().any(|(fp, _)| fp != &expected) {
+    let base = store::expected_fingerprint();
+    let ast = store::expected_ast_fingerprint();
+    if breakdown.iter().any(|(fp, _)| fp != &base && fp != &ast) {
         println!(
             "\n  \x1b[33m⚠ Stale embedding fingerprint(s) detected\x1b[0m — vectors were generated by a different model/chunking config than the one active now:"
         );
         for (fp, count) in &breakdown {
-            let marker = if *fp == expected {
+            let marker = if *fp == base || *fp == ast {
                 " (current)"
             } else {
                 " (stale)"

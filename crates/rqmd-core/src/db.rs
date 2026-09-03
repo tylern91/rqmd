@@ -373,23 +373,52 @@ pub fn has_vector(conn: &Connection, hash: &str, seq: i64, fingerprint: &str) ->
 }
 
 /// Count distinct content hashes still needing embedding: active documents with
-/// NON-EMPTY content whose hash has no content_vectors row at `fingerprint` — the
-/// current `embed_fingerprint` (see `store::expected_fingerprint`). The
+/// NON-EMPTY content whose hash has no content_vectors row at the fingerprint
+/// that document's path currently expects — `ast_fingerprint` for a path
+/// matching `chunking::ast_chunking_extensions()`, `base_fingerprint` otherwise
+/// (see `store::expected_fingerprint`/`expected_fingerprint_for_path`). The
 /// `length(c.doc) > 0` filter mirrors run_embed's `if body.is_empty() { continue; }`
 /// skip — without it, empty files (hash = SHA-256 of "") count as pending forever
 /// but never embed. A hash with vectors only under a *stale* fingerprint counts
 /// as pending, since it still needs a re-embed.
-pub fn count_docs_needing_embed(conn: &Connection, fingerprint: &str) -> rusqlite::Result<i64> {
-    conn.query_row(
+pub fn count_docs_needing_embed(
+    conn: &Connection,
+    base_fingerprint: &str,
+    ast_fingerprint: &str,
+) -> rusqlite::Result<i64> {
+    let extensions = crate::chunking::ast_chunking_extensions();
+    if extensions.is_empty() {
+        return conn.query_row(
+            "SELECT COUNT(DISTINCT d.hash) FROM documents d \
+             JOIN content c ON c.hash = d.hash \
+             WHERE d.active = 1 AND length(c.doc) > 0 \
+             AND NOT EXISTS (\
+                 SELECT 1 FROM content_vectors cv \
+                 WHERE cv.hash = d.hash AND cv.embed_fingerprint = ?1\
+             )",
+            params![base_fingerprint],
+            |r| r.get(0),
+        );
+    }
+
+    let eligible_clause = extensions
+        .iter()
+        .map(|ext| format!("lower(d.path) LIKE '%.{ext}'"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let sql = format!(
         "SELECT COUNT(DISTINCT d.hash) FROM documents d \
          JOIN content c ON c.hash = d.hash \
          WHERE d.active = 1 AND length(c.doc) > 0 \
-         AND d.hash NOT IN (\
-             SELECT hash FROM content_vectors WHERE embed_fingerprint = ?1\
-         )",
-        params![fingerprint],
-        |r| r.get(0),
-    )
+         AND NOT EXISTS (\
+             SELECT 1 FROM content_vectors cv \
+             WHERE cv.hash = d.hash \
+             AND cv.embed_fingerprint = CASE WHEN {eligible_clause} THEN ?2 ELSE ?1 END\
+         )"
+    );
+    conn.query_row(&sql, params![base_fingerprint, ast_fingerprint], |r| {
+        r.get(0)
+    })
 }
 
 /// Check whether a content hash has at least one vector row under any fingerprint
