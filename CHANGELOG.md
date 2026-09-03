@@ -4,6 +4,17 @@
 
 ---
 
+## [0.13.3] - 2026-09-03
+
+### Fixed
+- Two concurrent `rqmd embed`/`rqmd update` processes opening the same index could compute
+  the same `next_vid` floor and then allocate vids independently, corrupting `content_vectors`
+  and the HNSW graph. A new advisory `IndexLock` (mkdir-atomic + PID-liveness check) now
+  serializes writers for the lifetime of `run_embed`/`run_update`: a live second holder fails
+  fast naming the blocking PID, and a dead holder's lock is automatically reclaimed.
+
+---
+
 ## [0.13.2] - 2026-09-03
 
 ### Fixed
