@@ -17,7 +17,7 @@ name = "rqmd"
 path = "src/main.rs"
 
 [features]
-default = ["metal"]
+default = ["metal", "ast-chunking"]
 # GPU acceleration (passed through to rqmd-llm / llama-cpp-2)
 metal  = ["rqmd-llm/metal"]    # Apple Silicon (default on)
 cuda   = ["rqmd-llm/cuda"]     # NVIDIA CUDA
