@@ -4,6 +4,18 @@
 
 ---
 
+## [0.15.0] - 2026-09-04
+
+### Changed
+- `rqmd-cli`: `ast-chunking` is now a **default** feature. Every published release binary
+  has always built with default features only (`cargo build --profile dist -p rqmd-cli
+  --locked` in `publish-assets.yml`), so no official release — and no `brew install rqmd` —
+  has ever shipped AST-aware chunking; `rqmd status` reported `AST Chunking: not available`
+  on every install regardless of local rebuilds. Adds five tree-sitter grammar dependencies
+  (`tree-sitter`, `-typescript`, `-javascript`, `-java`, `-python`) to the default build,
+  increasing compile time. Opt out with `--no-default-features` if you don't need
+  declaration-boundary chunking for source code.
+
 ## [0.14.0] - 2026-09-03
 
 ### Fixed

@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-cli"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-core"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "globset",
@@ -2677,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-llm"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -2695,7 +2695,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-mcp"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3691,9 +3691,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-language"
-version = "0.1.8"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca0d1bf6fdd806e43ae5198f82f527056d359def39e54e67a0f478ac09dac081"
+checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 
 [[package]]
 name = "tree-sitter-python"
