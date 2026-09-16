@@ -128,6 +128,9 @@ enum Commands {
         /// Clear all vectors and re-embed from scratch (repairs a diverged index)
         #[arg(long)]
         rebuild: bool,
+        /// Reclaim orphaned vectors and unreferenced content — no model, no re-embed
+        #[arg(long, conflicts_with_all = ["rebuild", "collection"])]
+        cleanup: bool,
     },
     /// Re-index all collections
     Update {
@@ -377,7 +380,14 @@ fn main() -> Result<()> {
         Commands::Embed {
             collection,
             rebuild,
-        } => commands::index::run_embed(&index_dir, collection.as_deref(), rebuild),
+            cleanup,
+        } => {
+            if cleanup {
+                commands::index::run_cleanup(&index_dir)
+            } else {
+                commands::index::run_embed(&index_dir, collection.as_deref(), rebuild)
+            }
+        }
         Commands::Update { collection } => {
             commands::index::run_update(&index_dir, collection.as_deref())
         }
@@ -403,5 +413,26 @@ fn main() -> Result<()> {
                 allow_non_loopback,
             ),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embed_cleanup_conflicts_with_rebuild_and_collection() {
+        assert!(
+            Cli::try_parse_from(["rqmd", "embed", "--cleanup", "--rebuild"]).is_err(),
+            "--cleanup --rebuild must fail at parse time"
+        );
+        assert!(
+            Cli::try_parse_from(["rqmd", "embed", "--cleanup", "-c", "foo"]).is_err(),
+            "--cleanup -c foo must fail at parse time"
+        );
+        assert!(
+            Cli::try_parse_from(["rqmd", "embed", "--cleanup"]).is_ok(),
+            "--cleanup alone must parse"
+        );
     }
 }
