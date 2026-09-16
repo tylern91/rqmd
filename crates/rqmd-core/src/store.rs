@@ -244,7 +244,20 @@ impl Store {
 
         self.fts.reader.reload().context("reload fts reader")?;
         self.hnsw = if self.hnsw_path.exists() {
-            VectorIndex::view(&self.hnsw_path).context("reload hnsw view")?
+            // A torn/zero-length file (another process crashed mid-flush) must not
+            // wedge this reader — mirror `Store::open`'s warn-and-fall-back-to-empty
+            // behavior instead of propagating the error.
+            match VectorIndex::view(&self.hnsw_path) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    eprintln!(
+                        "rqmd: warning: HNSW index at '{}' could not be reloaded ({e:#}). \
+                         Vector search will return no results until the index is rebuilt.",
+                        self.hnsw_path.display()
+                    );
+                    VectorIndex::new()?
+                }
+            }
         } else {
             VectorIndex::new()?
         };
@@ -459,7 +472,9 @@ impl Store {
     pub fn flush(&mut self) -> Result<()> {
         self.fts.commit().context("fts commit")?;
         if self.hnsw_dirty {
-            self.hnsw.save(&self.hnsw_path).context("hnsw save")?;
+            self.hnsw
+                .save_atomic(&self.hnsw_path)
+                .context("hnsw save")?;
             self.hnsw_dirty = false;
         }
         Ok(())
