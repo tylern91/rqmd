@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
-use rqmd_core::{Collection, db};
+use rqmd_core::{Collection, IndexLock, db};
 
 use crate::{CollectionCommand, document, exclusions, format as fmt, store};
 
@@ -188,6 +188,11 @@ fn list(index_dir: &Path) -> Result<()> {
 }
 
 fn remove(index_dir: &Path, name: &str) -> Result<()> {
+    // Shares IndexLock with embed/update: purging a collection mutates
+    // `documents`/`content_vectors` the same way a concurrent embed's vid
+    // allocation does, and the two must not race.
+    let _lock = IndexLock::acquire(index_dir)?;
+
     // Write access (not the usual read_only=true for a metadata-only op): the sweep
     // below deletes rows and Tantivy entries, and flush() needs a non-view HNSW handle.
     let mut s = store::open_store_no_backend(index_dir, false)?;
@@ -206,6 +211,13 @@ fn remove(index_dir: &Path, name: &str) -> Result<()> {
             eprintln!("  WARN: failed to remove stale FTS entry for {filepath}: {e:#}");
         }
     }
+    // purge_collection deletes the document rows before we can capture which vids
+    // it orphaned, so this evicts them from HNSW after the fact by re-querying —
+    // the leak this closes: a purge previously left live vectors that
+    // `count_orphaned_vectors` couldn't see, unlike `run_update`'s equivalent sweep.
+    // `reclaim_orphaned_vectors` only flushes when it finds something to evict, so
+    // an explicit flush still follows to commit the FTS removals above either way.
+    s.reclaim_orphaned_vectors()?;
     s.flush()?;
 
     println!(
@@ -288,5 +300,59 @@ mod tests {
     fn ensure_is_dir_accepts_a_directory() {
         let dir = tempfile::tempdir().unwrap();
         assert!(ensure_is_dir(dir.path()).is_ok());
+    }
+
+    fn seed_collection(index_dir: &Path, name: &str, path: &str) {
+        let s = store::open_store_no_backend(index_dir, false).unwrap();
+        db::upsert_collection(
+            &s.db,
+            &Collection {
+                name: name.into(),
+                path: path.into(),
+                pattern: "**/*.md".into(),
+                ignore: vec![],
+                include_by_default: true,
+                update_command: None,
+                allow_hidden: false,
+            },
+        )
+        .unwrap();
+    }
+
+    /// Regression for the confirmed leak: `remove` purged a collection's rows
+    /// and flushed, but never evicted the purged hash's vectors from HNSW —
+    /// `count_orphaned_vectors` can't see a vector still live in HNSW, so the
+    /// leak was invisible to `doctor` too. A hash shared with a surviving
+    /// collection must not be evicted.
+    #[test]
+    fn remove_evicts_orphaned_vectors_but_keeps_hash_shared_with_another_collection() {
+        let index_dir = tempfile::tempdir().unwrap();
+        let now = "2026-01-01T00:00:00Z";
+
+        seed_collection(index_dir.path(), "keep", "/keep");
+        seed_collection(index_dir.path(), "gone", "/gone");
+
+        let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+        db::upsert_content(&s.db, "shared_hash", "shared body", now).unwrap();
+        db::upsert_content(&s.db, "unique_hash", "unique body", now).unwrap();
+        db::upsert_document(&s.db, "keep", "shared.md", "S", "shared_hash", now).unwrap();
+        db::upsert_document(&s.db, "gone", "shared.md", "S", "shared_hash", now).unwrap();
+        db::upsert_document(&s.db, "gone", "unique.md", "U", "unique_hash", now).unwrap();
+        db::upsert_vector_meta(&s.db, "shared_hash", 0, 0, "m", "fp", 1, 900, now).unwrap();
+        db::upsert_vector_meta(&s.db, "unique_hash", 0, 0, "m", "fp", 1, 901, now).unwrap();
+        drop(s);
+
+        remove(index_dir.path(), "gone").unwrap();
+
+        let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
+        assert!(
+            db::hash_has_any_vector(&s.db, "shared_hash"),
+            "shared_hash's vector must survive — 'keep' still references it"
+        );
+        assert!(
+            !db::hash_has_any_vector(&s.db, "unique_hash"),
+            "unique_hash's vector must be reclaimed once 'gone' is purged"
+        );
+        assert_eq!(db::count_orphaned_vectors(&s.db).unwrap(), 0);
     }
 }
