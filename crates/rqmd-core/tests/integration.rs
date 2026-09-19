@@ -1231,24 +1231,11 @@ fn orphan_vector_cleanup_evicts_only_hashes_with_no_remaining_active_reference()
     let removed = deactivate_missing_documents(&store.db, "coll", &present).unwrap();
     assert_eq!(removed.len(), 2);
 
-    let candidate_hashes = rqmd_core::db::hashes_for_paths(&store.db, "coll", &removed).unwrap();
-    let mut orphaned = Vec::new();
-    for hash in candidate_hashes {
-        if !rqmd_core::db::hash_referenced_by_active_document(&store.db, &hash).unwrap() {
-            let vids = rqmd_core::db::vids_for_hash(&store.db, &hash).unwrap();
-            store.evict_hnsw_vectors(&vids).unwrap();
-            orphaned.push(hash);
-        }
-    }
+    let swept = store.reclaim_orphaned_vectors().unwrap();
     assert_eq!(
-        orphaned,
-        vec![unique_hash.clone()],
-        "shared_hash must not be evicted — `keep` still actively references it"
+        swept, 1,
+        "only unique_hash's vector is orphaned — shared_hash still has `keep`'s active reference"
     );
-    for hash in &orphaned {
-        rqmd_core::db::delete_vectors_for_hash(&store.db, hash).unwrap();
-    }
-    store.flush().unwrap();
 
     assert!(
         rqmd_core::db::hash_has_any_vector(&store.db, &shared_hash),

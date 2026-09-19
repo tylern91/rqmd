@@ -498,6 +498,36 @@ impl Store {
         Ok(())
     }
 
+    /// Evict every currently-orphaned vector from HNSW and delete its
+    /// `content_vectors` row. Shares `db::orphaned_vector_hashes`'s predicate
+    /// with `rqmd doctor`'s orphan count, so the two can never disagree on
+    /// what counts as orphaned. Safe to call repeatedly (a no-op once nothing
+    /// is orphaned) and safe to call from any write path — `rqmd update`'s
+    /// post-collection sweep, `embed --cleanup`, and callers under test all
+    /// share this instead of re-deriving the eviction logic. Returns the
+    /// number of `content_vectors` rows deleted.
+    pub fn reclaim_orphaned_vectors(&mut self) -> Result<usize> {
+        let orphaned_hashes =
+            crate::db::orphaned_vector_hashes(&self.db).context("list orphaned hashes")?;
+        if orphaned_hashes.is_empty() {
+            return Ok(0);
+        }
+        for hash in &orphaned_hashes {
+            let vids = crate::db::vids_for_hash(&self.db, hash)?;
+            self.evict_hnsw_vectors(&vids)?;
+        }
+        // Durability barrier: HNSW must be persisted before the DB rows
+        // pointing at those vids are deleted.
+        self.flush()?;
+        let mut swept = 0usize;
+        let tx = self.db.transaction()?;
+        for hash in &orphaned_hashes {
+            swept += crate::db::delete_vectors_for_hash(&tx, hash)?;
+        }
+        tx.commit().context("commit orphaned vector sweep")?;
+        Ok(swept)
+    }
+
     /// Remove a single filepath's entry from the Tantivy index (no-op if
     /// absent). `fts` is a private field, so this is the only way callers in
     /// other crates (`rqmd update`'s stale-document sweep, `collection

@@ -23,7 +23,7 @@ This README covers the essentials. Everything else lives in `docs/`:
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How it works, design decisions, score interpretation, workspace layout |
 | [docs/CRATE-API.md](docs/CRATE-API.md) | Rust API for `rqmd-core`, `rqmd-llm`, `rqmd-mcp` |
 | [docs/MIGRATING.md](docs/MIGRATING.md) | Differences from qmd + migration guide |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | cmake version issues, slow/failing model downloads, ORT reranking fallback |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | cmake version issues, slow/failing model downloads, ORT reranking fallback, orphaned vectors / reclaiming disk |
 
 Also: [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [DISCLAIMER.md](DISCLAIMER.md)
 
@@ -105,6 +105,7 @@ rqmd mcp --http --port 8181         # Streamable HTTP transport
 | `rqmd search <text>` | BM25 keyword search only |
 | `rqmd vsearch <text>` | Vector similarity only |
 | `rqmd embed` / `rqmd update` | Generate embeddings / re-index changed files |
+| `rqmd embed --cleanup` | Reclaim orphaned vectors and unreferenced content (no model, no re-embed) |
 | `rqmd mcp` | Start the MCP server |
 | `rqmd collection add <path>` | Add a directory as a collection |
 | `rqmd doctor` | Diagnose config, index, model, and device issues |

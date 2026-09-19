@@ -535,20 +535,7 @@ pub fn run_cleanup(index_dir: &Path) -> Result<()> {
     let mut s = store::open_store_no_backend(index_dir, false)?;
 
     // 1. Sweep orphaned vectors — evict from HNSW first, then drop their rows.
-    let orphaned_hashes = db::orphaned_vector_hashes(&s.db).context("list orphaned hashes")?;
-    let mut swept_vectors = 0usize;
-    if !orphaned_hashes.is_empty() {
-        for hash in &orphaned_hashes {
-            let vids = db::vids_for_hash(&s.db, hash)?;
-            s.evict_hnsw_vectors(&vids)?;
-        }
-        s.flush()?; // durability barrier: HNSW persisted before DB rows deleted
-        let tx = s.db.transaction()?;
-        for hash in &orphaned_hashes {
-            swept_vectors += db::delete_vectors_for_hash(&tx, hash)?;
-        }
-        tx.commit().context("commit orphaned vector sweep")?;
-    }
+    let swept_vectors = s.reclaim_orphaned_vectors()?;
 
     // 2. Delete content referenced by no document at all (active or not).
     let swept_content = db::delete_unreferenced_content(&s.db).context("sweep content")?;
@@ -626,6 +613,12 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
 
         update_one_collection(&mut s, col, is_tty)?;
     }
+
+    // A removed document's hash may still be in active use by another document
+    // — content is deduplicated globally by hash — so the sweep runs once,
+    // globally, after every collection's deactivation pass has landed, rather
+    // than per-collection against a partial view of which hashes are still active.
+    s.reclaim_orphaned_vectors()?;
 
     // "needs embeddings" notice (qmd.ts:747–748) — printed once after all collections
     // so it isn't repeated N times with the same global count during a multi-collection update.
@@ -763,30 +756,6 @@ fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: boo
             if let Err(e) = s.remove_from_fts(&filepath) {
                 eprintln!("  WARN: failed to remove stale FTS entry for {filepath}: {e:#}");
             }
-        }
-
-        // A removed document's hash may still be in active use by another
-        // document — content is deduplicated globally by hash — so only
-        // reclaim hashes with no remaining active reference anywhere.
-        let candidate_hashes = db::hashes_for_paths(&s.db, &col.name, &removed)
-            .context("look up hashes for removed documents")?;
-        let mut orphaned_hashes = Vec::new();
-        for hash in candidate_hashes {
-            if !db::hash_referenced_by_active_document(&s.db, &hash)? {
-                let vids = db::vids_for_hash(&s.db, &hash)?;
-                s.evict_hnsw_vectors(&vids)?;
-                orphaned_hashes.push(hash);
-            }
-        }
-        if !orphaned_hashes.is_empty() {
-            // Flush is the durability barrier: HNSW must be persisted before
-            // the DB rows pointing at those vids are deleted.
-            s.flush()?;
-            let tx = s.db.transaction()?;
-            for hash in &orphaned_hashes {
-                db::delete_vectors_for_hash(&tx, hash).context("delete orphaned vectors")?;
-            }
-            tx.commit().context("commit orphaned vector cleanup")?;
         }
 
         removed.len()
@@ -1016,12 +985,13 @@ mod tests {
         assert_eq!(truncate_context_preview(ctx), ctx);
     }
 
-    /// End-to-end regression for the orphan-vector cleanup wired into
-    /// `update_one_collection`'s prune block (not just the `rqmd-core` helpers
-    /// it calls) — drives the real walk + prune path so a wiring bug (wrong
-    /// variable, skipped transaction, wrong flush ordering) would be caught
-    /// here even though `rqmd-core`'s own integration test only exercises the
-    /// helpers directly.
+    /// End-to-end regression for `run_update`'s global orphan-vector sweep
+    /// (not just the `rqmd-core` helper it calls) — drives the real walk +
+    /// prune path, then the same `reclaim_orphaned_vectors` call `run_update`
+    /// makes once after every collection's deactivation pass has landed, so a
+    /// wiring bug (wrong variable, skipped transaction, wrong flush ordering)
+    /// would be caught here even though `rqmd-core`'s own integration test
+    /// only exercises the helper directly.
     #[test]
     fn update_one_collection_evicts_orphaned_vectors_but_keeps_shared_hash() {
         let index_dir = tempfile::tempdir().unwrap();
@@ -1083,6 +1053,7 @@ mod tests {
         // should be reclaimed.
         std::fs::remove_file(coll_src.path().join("unique.md")).unwrap();
         update_one_collection(&mut s, &coll_col, false).unwrap();
+        s.reclaim_orphaned_vectors().unwrap();
 
         assert!(
             db::hash_has_any_vector(&s.db, &shared_hash),
