@@ -15,7 +15,10 @@ only touches BM25 and bookkeeping, so it stays usable without a model loaded.
 and the resulting vectors are added to the HNSW index. `rqmd doctor` can
 detect when the chunking parameters or embed model have changed since the
 last embed run by comparing a stored fingerprint (below) against the current
-configuration.
+configuration — that staleness is what `--rebuild` remedies. `--cleanup` is
+a separate, DB-only reclamation path: it sweeps orphaned vectors and content
+rows that no document references, without loading a model or touching the
+fingerprint.
 
 **Query**: `rqmd search` and `rqmd vsearch` each run a single retrieval mode
 directly. `rqmd query` (and the MCP `query` tool) additionally runs LLM-based

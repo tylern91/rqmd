@@ -811,10 +811,7 @@ pub fn purge_collection(conn: &Connection, name: &str) -> Result<Vec<String>> {
         "DELETE FROM content_vectors WHERE hash NOT IN (SELECT hash FROM documents)",
         [],
     )?;
-    conn.execute(
-        "DELETE FROM content WHERE hash NOT IN (SELECT hash FROM documents)",
-        [],
-    )?;
+    delete_unreferenced_content(conn)?;
 
     conn.execute(
         "DELETE FROM store_collections WHERE name = ?1",
@@ -822,6 +819,18 @@ pub fn purge_collection(conn: &Connection, name: &str) -> Result<Vec<String>> {
     )?;
 
     Ok(filepaths)
+}
+
+/// Delete `content` rows referenced by no `documents` row at all — not even a
+/// soft-deleted one. Safe unconditionally: `documents.hash REFERENCES
+/// content(hash)`, so a row surviving this delete is exactly the set some
+/// document (active or not) still points to.
+pub fn delete_unreferenced_content(conn: &Connection) -> Result<usize> {
+    let n = conn.execute(
+        "DELETE FROM content WHERE hash NOT IN (SELECT hash FROM documents)",
+        [],
+    )?;
+    Ok(n)
 }
 
 /// Remove all content_vectors rows for a collection's documents.
@@ -838,20 +847,35 @@ pub fn clear_vectors_for_collection(conn: &Connection, collection: &str) -> Resu
     Ok(n)
 }
 
+const ORPHANED_VECTOR_PREDICATE: &str = "hash NOT IN (SELECT hash FROM documents WHERE active = 1)";
+
 /// Count `content_vectors` rows whose hash has no active document referencing
 /// it — orphaned by [`deactivate_missing_documents`]'s soft-delete prune.
 /// These vectors are unreachable (every vector→document join requires an
-/// active document) but not physically freed from the HNSW file; only
-/// `embed --rebuild` reclaims that space. Surfaced by `rqmd doctor` so the
+/// active document) but not physically freed from the HNSW file; `embed
+/// --cleanup` reclaims that space. Surfaced by `rqmd doctor` so the
 /// accumulation isn't silent.
 pub fn count_orphaned_vectors(conn: &Connection) -> Result<i64> {
     conn.query_row(
-        "SELECT COUNT(*) FROM content_vectors \
-         WHERE hash NOT IN (SELECT hash FROM documents WHERE active = 1)",
+        &format!("SELECT COUNT(*) FROM content_vectors WHERE {ORPHANED_VECTOR_PREDICATE}"),
         [],
         |row| row.get(0),
     )
     .context("count orphaned vectors")
+}
+
+/// Return the distinct hashes backing `count_orphaned_vectors`' count, for
+/// `embed --cleanup` to sweep. Shares the same predicate so the two can never
+/// disagree on what counts as orphaned.
+pub fn orphaned_vector_hashes(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT hash FROM content_vectors WHERE {ORPHANED_VECTOR_PREDICATE}"
+    ))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("orphaned vector hashes")?;
+    Ok(rows)
 }
 
 pub fn rename_collection(conn: &Connection, old: &str, new: &str) -> Result<()> {
@@ -899,6 +923,21 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "INSERT OR REPLACE INTO store_config(key, value) VALUES (?1, ?2)",
         params![key, value],
     )?;
+    Ok(())
+}
+
+/// Raise the persisted `next_vid` floor to `at_least`, never lower it.
+/// Unlike `set_config`'s blind `INSERT OR REPLACE`, this defends against
+/// writing a stale (lower) value over a floor another process already
+/// advanced — the `3a67f85`/#62 regression class.
+pub fn persist_next_vid_floor(conn: &Connection, at_least: u64) -> Result<()> {
+    let key = crate::store::NEXT_VID_CONFIG_KEY;
+    let current = get_config(conn, key)?
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    if at_least > current {
+        set_config(conn, key, &at_least.to_string())?;
+    }
     Ok(())
 }
 
@@ -1026,5 +1065,61 @@ mod tests {
             .unwrap()
             .expect("plain prefix still matches");
         assert_eq!(found.path, "plain.md");
+    }
+
+    #[test]
+    fn orphaned_vector_hashes_matches_count_orphaned_vectors() {
+        let conn = test_conn();
+        insert_doc(&conn, "active_hash", "active.md");
+        upsert_content(&conn, "orphan_hash", "body", "2026-01-01T00:00:00Z").unwrap();
+        let now = "2026-01-01T00:00:00Z";
+        upsert_vector_meta(&conn, "active_hash", 0, 0, "m", "fp", 1, 1, now).unwrap();
+        upsert_vector_meta(&conn, "orphan_hash", 0, 0, "m", "fp", 1, 2, now).unwrap();
+
+        assert_eq!(count_orphaned_vectors(&conn).unwrap(), 1);
+        assert_eq!(
+            orphaned_vector_hashes(&conn).unwrap(),
+            vec!["orphan_hash".to_string()]
+        );
+    }
+
+    #[test]
+    fn delete_unreferenced_content_keeps_content_referenced_by_inactive_document() {
+        let conn = test_conn();
+        insert_doc(&conn, "referenced_hash", "kept.md");
+        conn.execute("UPDATE documents SET active = 0 WHERE path = 'kept.md'", [])
+            .unwrap();
+        upsert_content(&conn, "unreferenced_hash", "body", "2026-01-01T00:00:00Z").unwrap();
+
+        let deleted = delete_unreferenced_content(&conn).unwrap();
+        assert_eq!(deleted, 1);
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM content", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            remaining, 1,
+            "content still referenced by a soft-deleted document must survive"
+        );
+    }
+
+    #[test]
+    fn persist_next_vid_floor_never_lowers_an_existing_value() {
+        let conn = test_conn();
+        persist_next_vid_floor(&conn, 100).unwrap();
+        persist_next_vid_floor(&conn, 50).unwrap();
+        assert_eq!(
+            get_config(&conn, crate::store::NEXT_VID_CONFIG_KEY)
+                .unwrap()
+                .unwrap(),
+            "100",
+            "a lower value must never regress the persisted floor"
+        );
+        persist_next_vid_floor(&conn, 150).unwrap();
+        assert_eq!(
+            get_config(&conn, crate::store::NEXT_VID_CONFIG_KEY)
+                .unwrap()
+                .unwrap(),
+            "150"
+        );
     }
 }

@@ -273,13 +273,10 @@ fn checkpoint(
     }
     // Persist the true historical high-water-mark next_vid, atomically with the metadata
     // above — unlike MAX(content_vectors.vid), this floor survives hard-deleted rows, so
-    // `Store::open`'s reconciliation never reissues a vid that once existed.
-    db::set_config(
-        &tx,
-        rqmd_core::store::NEXT_VID_CONFIG_KEY,
-        &next_vid.to_string(),
-    )
-    .context("persist next_vid")?;
+    // `Store::open`'s reconciliation never reissues a vid that once existed. Uses the
+    // floor-defending helper rather than a blind overwrite (the `3a67f85`/#62 regression
+    // class).
+    db::persist_next_vid_floor(&tx, next_vid).context("persist next_vid")?;
     tx.commit().context("commit vector metadata")?;
     Ok(())
 }
@@ -436,7 +433,6 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
         // also catches hashes whose only vectors are stale, so a chunker/model change
         // gets re-embedded instead of silently skipped).
         let docs = db::list_documents(&s.db, Some(&col.name))?;
-        let total = docs.len();
 
         // Collect only docs whose hash has no vector row at the current fingerprint yet
         // and whose hash has not already been queued in this run (duplicate-hash guard).
@@ -502,9 +498,6 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
         }
 
         total_new_docs += done;
-
-        // Collection done — any remaining rows come after the outer loop's final checkpoint.
-        let _total = total; // suppress unused warning
     }
 
     // Final 100% bar before the summary line.
@@ -522,6 +515,64 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     let elapsed = fmt::format_eta(start.elapsed().as_secs_f64());
     println!(
         "\n\x1b[32m✓ Done!\x1b[0m Embedded \x1b[1m{total_new_chunks}\x1b[0m chunks from \x1b[1m{total_new_docs}\x1b[0m documents in \x1b[1m{elapsed}\x1b[0m"
+    );
+    Ok(())
+}
+
+/// `rqmd embed --cleanup`: reclaim space without loading a model or touching
+/// the corpus. Three DB-side steps, all reversible only by re-embedding:
+/// evict orphaned vectors from HNSW and delete their rows, delete `content`
+/// rows no document (active or not) references at all, then `VACUUM` to
+/// hand the freed pages back to the filesystem.
+pub fn run_cleanup(index_dir: &Path) -> Result<()> {
+    let _lock = IndexLock::acquire(index_dir)?;
+
+    let hnsw_path = store::store_config(index_dir, false).hnsw_path;
+    let db_path = index_dir.join("index.sqlite");
+    let before_hnsw = std::fs::metadata(&hnsw_path).map(|m| m.len()).unwrap_or(0);
+    let before_db = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+
+    let mut s = store::open_store_no_backend(index_dir, false)?;
+
+    // 1. Sweep orphaned vectors — evict from HNSW first, then drop their rows.
+    let orphaned_hashes = db::orphaned_vector_hashes(&s.db).context("list orphaned hashes")?;
+    let mut swept_vectors = 0usize;
+    if !orphaned_hashes.is_empty() {
+        for hash in &orphaned_hashes {
+            let vids = db::vids_for_hash(&s.db, hash)?;
+            s.evict_hnsw_vectors(&vids)?;
+        }
+        s.flush()?; // durability barrier: HNSW persisted before DB rows deleted
+        let tx = s.db.transaction()?;
+        for hash in &orphaned_hashes {
+            swept_vectors += db::delete_vectors_for_hash(&tx, hash)?;
+        }
+        tx.commit().context("commit orphaned vector sweep")?;
+    }
+
+    // 2. Delete content referenced by no document at all (active or not).
+    let swept_content = db::delete_unreferenced_content(&s.db).context("sweep content")?;
+
+    // 3. Return freed pages to the filesystem. Outside any transaction — VACUUM
+    // cannot run inside one.
+    s.db.execute_batch("VACUUM")
+        .context("vacuum index.sqlite")?;
+
+    let after_hnsw = std::fs::metadata(&hnsw_path).map(|m| m.len()).unwrap_or(0);
+    let after_db = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+
+    println!(
+        "\x1b[32m✓ Cleanup done.\x1b[0m Swept {swept_vectors} orphaned vector(s), {swept_content} unreferenced content row(s)."
+    );
+    println!(
+        "  hnsw.usearch: {} -> {}",
+        fmt_bytes(before_hnsw),
+        fmt_bytes(after_hnsw)
+    );
+    println!(
+        "  index.sqlite: {} -> {}",
+        fmt_bytes(before_db),
+        fmt_bytes(after_db)
     );
     Ok(())
 }
@@ -893,15 +944,15 @@ fn print_doctor_stale_fingerprint_check(conn: &Connection) {
 /// documents whose file was removed or renamed (active=0) rather than
 /// hard-deleting, so their content_vectors/HNSW vids survive but become
 /// unreachable — every vector→document join requires an active document. Say
-/// this plainly rather than implying the space is freed; only `embed
-/// --rebuild` reclaims it.
+/// this plainly rather than implying the space is freed; `embed --cleanup`
+/// reclaims it without a full re-embed.
 fn print_doctor_orphaned_vector_check(conn: &Connection) {
     let orphaned_vectors = db::count_orphaned_vectors(conn).unwrap_or(0);
     if orphaned_vectors > 0 {
         println!(
             "\n  \x1b[33m⚠ {orphaned_vectors} orphaned vector(s)\x1b[0m — left behind by documents removed or renamed since their last embed. Unreachable in search but not yet freed from the HNSW file."
         );
-        println!("    Run 'rqmd embed --rebuild' to reclaim the space");
+        println!("    Run 'rqmd embed --cleanup' to reclaim the space");
     }
 }
 
@@ -1041,5 +1092,81 @@ mod tests {
             !db::hash_has_any_vector(&s.db, &unique_hash),
             "unique_hash's vector must be reclaimed — no active document references it anymore"
         );
+    }
+
+    /// `run_cleanup` end-to-end: a shared hash referenced by an active
+    /// document must survive the sweep even though its sibling document was
+    /// removed, and a second cleanup pass must be a no-op (idempotent).
+    #[test]
+    fn run_cleanup_sweeps_orphans_keeps_shared_hash_and_is_idempotent() {
+        let index_dir = tempfile::tempdir().unwrap();
+
+        {
+            let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+            let now = "2026-01-01T00:00:00Z";
+            db::upsert_content(&s.db, "shared_hash", "shared body", now).unwrap();
+            db::upsert_document(&s.db, "col", "a.md", "A", "shared_hash", now).unwrap();
+            db::upsert_document(&s.db, "col", "b.md", "B", "shared_hash", now).unwrap();
+            db::upsert_content(&s.db, "orphan_hash", "orphan body", now).unwrap();
+            db::upsert_document(&s.db, "col", "c.md", "C", "orphan_hash", now).unwrap();
+            db::upsert_vector_meta(&s.db, "shared_hash", 0, 0, "m", "fp", 1, 900, now).unwrap();
+            db::upsert_vector_meta(&s.db, "orphan_hash", 0, 0, "m", "fp", 1, 901, now).unwrap();
+            // Soft-delete c.md so orphan_hash is orphaned but still row-referenced.
+            conn_deactivate(&s.db, "c.md");
+        }
+
+        run_cleanup(index_dir.path()).unwrap();
+
+        {
+            let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
+            assert_eq!(db::count_orphaned_vectors(&s.db).unwrap(), 0);
+            assert!(
+                db::hash_has_any_vector(&s.db, "shared_hash"),
+                "shared_hash is still actively referenced and must keep its vector"
+            );
+            assert!(!db::hash_has_any_vector(&s.db, "orphan_hash"));
+        }
+
+        // Second pass is a no-op: nothing left to sweep.
+        run_cleanup(index_dir.path()).unwrap();
+        let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
+        assert_eq!(db::count_orphaned_vectors(&s.db).unwrap(), 0);
+    }
+
+    /// Content referenced by no document at all is deleted; content still
+    /// referenced by a soft-deleted (inactive) document survives — cleanup
+    /// must not touch anything a document row still points to.
+    #[test]
+    fn run_cleanup_deletes_unreferenced_content_but_keeps_inactive_referenced_content() {
+        let index_dir = tempfile::tempdir().unwrap();
+        let now = "2026-01-01T00:00:00Z";
+
+        {
+            let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+            db::upsert_content(&s.db, "kept_hash", "kept body", now).unwrap();
+            db::upsert_document(&s.db, "col", "kept.md", "K", "kept_hash", now).unwrap();
+            conn_deactivate(&s.db, "kept.md");
+            db::upsert_content(&s.db, "gone_hash", "gone body", now).unwrap();
+        }
+
+        run_cleanup(index_dir.path()).unwrap();
+
+        let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
+        let count: i64 =
+            s.db.query_row("SELECT COUNT(*) FROM content", [], |r| r.get(0))
+                .unwrap();
+        assert_eq!(
+            count, 1,
+            "only the fully-unreferenced hash should be deleted"
+        );
+        let remaining_hash: String =
+            s.db.query_row("SELECT hash FROM content", [], |r| r.get(0))
+                .unwrap();
+        assert_eq!(remaining_hash, "kept_hash");
+    }
+
+    fn conn_deactivate(conn: &Connection, path: &str) {
+        conn.execute("UPDATE documents SET active = 0 WHERE path = ?1", [path])
+            .unwrap();
     }
 }

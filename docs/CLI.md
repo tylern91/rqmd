@@ -14,6 +14,7 @@
 | `rqmd multi-get <glob>` | Retrieve multiple documents |
 | `rqmd ls [collection[/path]]` | List collections or files |
 | `rqmd embed [-c collection] [--rebuild]` | Generate embeddings (`--rebuild`: clear vectors and re-embed from scratch) |
+| `rqmd embed --cleanup` | Reclaim orphaned vectors and unreferenced content — no model, no re-embed |
 | `rqmd update [-c collection]` | Re-index: reports new, updated, unchanged, and removed (soft-deleted) document counts |
 | `rqmd status` | Index health and collection summary |
 | `rqmd doctor` | Diagnose config, index, model, and device issues |

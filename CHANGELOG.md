@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+- `rqmd embed --cleanup`: reclaims orphaned `content_vectors` rows and `content` rows
+  referenced by no document, then `VACUUM`s the database. No model load, no re-embed —
+  unlike `--rebuild`, which remains the remedy for a stale chunking/model fingerprint.
+
 ---
 
 ## [0.15.0] - 2026-09-04
