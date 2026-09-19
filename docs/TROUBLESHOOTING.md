@@ -36,3 +36,22 @@ specific token instead of the cached one.
 
 `OrtBackend` handles embeddings only. Reranking uses `LlamaCppBackend`
 automatically as a fallback.
+
+## `rqmd doctor` reports orphaned vectors
+
+An orphaned vector is a `content_vectors` row whose hash has no active
+document referencing it — left behind when a file is removed or renamed.
+It's unreachable in search, but still occupies disk until reclaimed.
+
+Run `rqmd embed --cleanup` to reclaim it: it sweeps orphaned vectors, deletes
+`content` rows referenced by no document, and `VACUUM`s the database — no
+model load, no re-embed, done in seconds regardless of corpus size.
+
+`hnsw.usearch` will **not** shrink afterward — usearch has no compaction
+API, so freed vector slots are reused rather than returned to the
+filesystem. Only `index.sqlite` visibly drops in size; that's expected.
+
+**`--rebuild` is for a stale fingerprint, not for orphans.** It re-embeds
+everything under the current model/chunker and is the right tool when
+`doctor` reports a stale `embed_fingerprint`, not when it reports orphaned
+vectors.
