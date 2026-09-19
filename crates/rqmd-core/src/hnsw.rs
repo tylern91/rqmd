@@ -83,6 +83,13 @@ impl VectorIndex {
     }
 
     /// Save the index to disk for persistence across restarts.
+    ///
+    /// Writes in place: `usearch::Index::save` is `fopen(path, "wb")` /
+    /// `fwrite` / `fclose` with no fsync, so a crash mid-write can truncate
+    /// or corrupt an existing file at `path`. Prefer [`Self::save_atomic`]
+    /// whenever a live file at `path` must survive a crash — this method
+    /// remains only for callers writing a path with nothing to lose (e.g. a
+    /// fresh temp file `save_atomic` itself writes to).
     pub fn save(&self, path: &Path) -> Result<()> {
         if self.read_only {
             bail!("cannot save a read-only (mmap'd) VectorIndex");
@@ -93,6 +100,52 @@ impl VectorIndex {
         self.inner
             .save(path.to_str().ok_or_else(|| anyhow!("invalid path"))?)
             .map_err(|e| anyhow!("usearch save: {e}"))?;
+        Ok(())
+    }
+
+    /// Save the index to `path` durably: write to a sibling temp file, fsync
+    /// it, rename it over `path` (an atomic replace on the same filesystem),
+    /// then fsync the parent directory so the rename itself survives a
+    /// crash.
+    ///
+    /// `usearch::Index::save` never calls `fsync`/`fdatasync` — a bare
+    /// `save(path)` can leave a torn or zero-length file at `path` if the
+    /// process crashes mid-write, since data can still be sitting in the
+    /// page cache when the crash happens. Writing to a temp file first means
+    /// a crash during the write only leaves a stray temp file; the rename
+    /// only happens once the new content is confirmed durable, so `path`
+    /// itself is never observed in a partially-written state.
+    pub fn save_atomic(&self, path: &Path) -> Result<()> {
+        if self.read_only {
+            bail!("cannot save a read-only (mmap'd) VectorIndex");
+        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).ok();
+
+        let tmp_path = parent.join(format!(
+            ".{}.tmp-{}",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("hnsw.usearch"),
+            std::process::id()
+        ));
+
+        self.save(&tmp_path)?;
+
+        std::fs::File::open(&tmp_path)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| anyhow!("fsync temp hnsw file {}: {e}", tmp_path.display()))?;
+
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| anyhow!("rename {} -> {}: {e}", tmp_path.display(), path.display()))?;
+
+        std::fs::File::open(parent)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| anyhow!("fsync parent dir {}: {e}", parent.display()))?;
+
         Ok(())
     }
 
@@ -330,6 +383,74 @@ mod tests {
         // The healed index still works correctly for search.
         let results = reloaded.search(&d, 10).unwrap();
         assert!(results.iter().any(|(vid, _)| *vid == vid_d));
+    }
+
+    #[test]
+    fn save_atomic_produces_a_loadable_file_with_no_leftover_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hnsw.usearch");
+
+        let mut index = VectorIndex::new().unwrap();
+        let embedding: Vec<f32> = (0..EMBED_DIM).map(|i| i as f32 * 0.001).collect();
+        let vid = index.add(&embedding).unwrap();
+        index.save_atomic(&path).unwrap();
+
+        assert!(path.exists());
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "save_atomic must leave no stray temp file behind"
+        );
+
+        let loaded = VectorIndex::load(&path).unwrap();
+        let fetched = loaded.get_vector(vid).unwrap();
+        for (a, b) in fetched.iter().zip(embedding.iter()) {
+            assert!((a - b).abs() < 1e-4, "expected {b}, got {a}");
+        }
+    }
+
+    #[test]
+    fn save_atomic_overwrites_an_existing_file_without_truncating_it_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hnsw.usearch");
+
+        let mut first = VectorIndex::new().unwrap();
+        let a: Vec<f32> = (0..EMBED_DIM).map(|i| i as f32 * 0.001).collect();
+        first.add(&a).unwrap();
+        first.save_atomic(&path).unwrap();
+        let first_len = std::fs::metadata(&path).unwrap().len();
+        assert!(first_len > 0);
+
+        let mut second = VectorIndex::new().unwrap();
+        let b: Vec<f32> = (0..EMBED_DIM)
+            .map(|i| (EMBED_DIM - i) as f32 * 0.001)
+            .collect();
+        let vid_b = second.add(&b).unwrap();
+        second.save_atomic(&path).unwrap();
+
+        // The rename swaps in the new content wholesale — never a partial
+        // in-place overwrite of the old file.
+        let reloaded = VectorIndex::load(&path).unwrap();
+        assert_eq!(reloaded.size(), 1);
+        let fetched = reloaded.get_vector(vid_b).unwrap();
+        for (x, y) in fetched.iter().zip(b.iter()) {
+            assert!((x - y).abs() < 1e-4, "expected {y}, got {x}");
+        }
+    }
+
+    #[test]
+    fn save_atomic_rejects_on_read_only_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hnsw.usearch");
+
+        let mut writable = VectorIndex::new().unwrap();
+        let embedding = vec![0.1_f32; EMBED_DIM];
+        writable.add(&embedding).unwrap();
+        writable.save(&path).unwrap();
+
+        let viewed = VectorIndex::view(&path).unwrap();
+        assert!(viewed.save_atomic(&path).is_err());
     }
 
     #[test]
