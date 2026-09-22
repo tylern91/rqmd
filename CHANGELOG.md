@@ -20,6 +20,11 @@
   collection's vectors from the HNSW index before purging it from the database, closing a
   leak where purged vectors stayed in `hnsw.usearch` invisible to `doctor`'s orphan count.
 
+### Security
+- Bump `rustls` to `0.23.45` ([RUSTSEC-2026-0285](https://github.com/rustls/rustls/security/advisories/GHSA-2mjx-qc3c-rqvc)):
+  `rustls` 0.23.41 accepted TLS 1.3 handshake messages sent at the wrong encryption level
+  when packed into the same record as a key-changing message. Closes #72.
+
 ---
 
 ## [0.15.0] - 2026-09-04
