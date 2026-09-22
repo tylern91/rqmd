@@ -2,10 +2,33 @@
 
 ## [Unreleased]
 
+---
+
+## [0.16.0] - 2026-09-22
+
 ### Added
 - `rqmd embed --cleanup`: reclaims orphaned `content_vectors` rows and `content` rows
   referenced by no document, then `VACUUM`s the database. No model load, no re-embed —
   unlike `--rebuild`, which remains the remedy for a stale chunking/model fingerprint.
+
+### Fixed
+- `Store::flush` now persists `hnsw.usearch` atomically (temp file, `fsync`, then rename)
+  instead of truncating the live file in place. A crash mid-flush previously left a torn
+  or zero-length file that `Store::open` silently treated as an empty index, losing every
+  embedding.
+- `rqmd collection remove` now takes the index write lock and evicts the removed
+  collection's vectors from the HNSW index before purging it from the database, closing a
+  leak where purged vectors stayed in `hnsw.usearch` invisible to `doctor`'s orphan count.
+
+### Security
+- Bump `rustls` to `0.23.45` ([RUSTSEC-2026-0285](https://github.com/rustls/rustls/security/advisories/GHSA-2mjx-qc3c-rqvc)):
+  `rustls` 0.23.41 accepted TLS 1.3 handshake messages sent at the wrong encryption level
+  when packed into the same record as a key-changing message. Closes #72.
+- Bump `cxx` to `1.0.202` (unsound `let_cxx_string!`, RUSTSEC-2026-0202), and `chacha20`/`der`
+  to their unyanked patch releases (`0.10.2`/`0.8.2`), clearing three `cargo audit` warnings.
+  `number_prefix` (unmaintained, no newer release exists), `paste` (unmaintained), and `lru`
+  (unsound, blocked by `tantivy 0.26.1`'s `lru = "^0.16.3"` pin) remain — fixing them requires
+  bumping a parent crate and is out of scope for this release.
 
 ---
 
