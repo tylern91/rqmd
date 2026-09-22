@@ -2,10 +2,23 @@
 
 ## [Unreleased]
 
+---
+
+## [0.16.0] - 2026-09-22
+
 ### Added
 - `rqmd embed --cleanup`: reclaims orphaned `content_vectors` rows and `content` rows
   referenced by no document, then `VACUUM`s the database. No model load, no re-embed —
   unlike `--rebuild`, which remains the remedy for a stale chunking/model fingerprint.
+
+### Fixed
+- `Store::flush` now persists `hnsw.usearch` atomically (temp file, `fsync`, then rename)
+  instead of truncating the live file in place. A crash mid-flush previously left a torn
+  or zero-length file that `Store::open` silently treated as an empty index, losing every
+  embedding.
+- `rqmd collection remove` now takes the index write lock and evicts the removed
+  collection's vectors from the HNSW index before purging it from the database, closing a
+  leak where purged vectors stayed in `hnsw.usearch` invisible to `doctor`'s orphan count.
 
 ---
 
