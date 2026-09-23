@@ -186,6 +186,18 @@ Escalate a `major`/`minor` label to a major version bump with any of:
 Your PR is not gated on signing a Contributor License Agreement or adding a
 `Signed-off-by` trailer. Submitting a PR is enough.
 
+## Keeping `target/` bounded
+
+Cargo never garbage-collects `target/` — stale fingerprints accumulate
+permanently across rebuilds. `scripts/clean-target.sh` prunes artifacts
+(most aggressively `target/debug/incremental/`) untouched for more than 14
+days (`--days N` to override, `--dry-run` to preview). Run
+`scripts/install-git-hooks.sh` once per clone to chain it into
+`.git/hooks/post-merge` — it runs `git lfs post-merge` first, preserving its
+exit status, then the prune advisory-only (a cleanup failure never fails the
+merge). The installer refuses to overwrite a post-merge hook it doesn't
+recognize, and re-running it is a no-op once installed.
+
 ## Don't touch — looks usable, isn't
 
 A few things in the repo look like working tooling but currently aren't safe
