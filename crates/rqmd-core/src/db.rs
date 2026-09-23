@@ -833,18 +833,42 @@ pub fn delete_unreferenced_content(conn: &Connection) -> Result<usize> {
     Ok(n)
 }
 
-/// Remove all content_vectors rows for a collection's documents.
+const NOT_SHARED_WITH_OTHER_COLLECTION_PREDICATE: &str = "hash IN \
+     (SELECT hash FROM documents WHERE collection = ?1 AND active = 1) \
+     AND hash NOT IN \
+     (SELECT hash FROM documents WHERE collection <> ?1 AND active = 1)";
+
+/// Remove all content_vectors rows for a collection's documents, except any
+/// hash still actively referenced by another collection.
 ///
 /// Called before re-embedding a collection so that fresh HNSW vids (which
 /// restart from the current index size) never conflict with stale vid values
-/// left behind by a previous interrupted embed run.
+/// left behind by a previous interrupted embed run. `content_vectors` is
+/// content-addressed (`PRIMARY KEY (hash, seq)`), not collection-scoped, so a
+/// naive `collection = ?1` delete would also wipe vectors for a hash shared
+/// with another collection (e.g. a vendored `LICENSE`) — the exclusion below
+/// prevents that.
 pub fn clear_vectors_for_collection(conn: &Connection, collection: &str) -> Result<usize> {
     let n = conn.execute(
-        "DELETE FROM content_vectors WHERE hash IN \
-         (SELECT hash FROM documents WHERE collection = ?1 AND active = 1)",
+        &format!("DELETE FROM content_vectors WHERE {NOT_SHARED_WITH_OTHER_COLLECTION_PREDICATE}"),
         params![collection],
     )?;
     Ok(n)
+}
+
+/// Return the vids backing `clear_vectors_for_collection`'s delete, for a
+/// scoped `embed --rebuild` to evict from the in-memory HNSW index before
+/// that delete runs. Shares the same predicate so the two can never disagree
+/// on what counts as this collection's own, unshared vectors.
+pub fn rebuildable_vids_for_collection(conn: &Connection, collection: &str) -> Result<Vec<u64>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT vid FROM content_vectors WHERE {NOT_SHARED_WITH_OTHER_COLLECTION_PREDICATE} AND vid IS NOT NULL"
+    ))?;
+    let rows = stmt
+        .query_map(params![collection], |row| row.get::<_, u64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("rebuildable vids for collection")?;
+    Ok(rows)
 }
 
 const ORPHANED_VECTOR_PREDICATE: &str = "hash NOT IN (SELECT hash FROM documents WHERE active = 1)";
@@ -1120,6 +1144,58 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             "150"
+        );
+    }
+
+    /// `content_vectors` is content-addressed (`PRIMARY KEY (hash, seq)`), not
+    /// collection-scoped, so a naive `collection = ?1` delete would also wipe a
+    /// hash shared with another active collection (e.g. a vendored `LICENSE`).
+    /// This pins the fix in both `clear_vectors_for_collection` and its paired
+    /// `rebuildable_vids_for_collection` — they must agree, since a scoped
+    /// rebuild evicts the latter's vids before running the former's delete.
+    #[test]
+    fn scoped_rebuild_clear_keeps_hash_shared_with_another_collection() {
+        let conn = test_conn();
+        let now = "2026-01-01T00:00:00Z";
+
+        // "a"-only hash: must be cleared and its vid must be evictable.
+        upsert_content(&conn, "a_only_hash", "body-a", now).unwrap();
+        upsert_document(&conn, "a", "a.md", "a", "a_only_hash", now).unwrap();
+        upsert_vector_meta(&conn, "a_only_hash", 0, 0, "m", "fp", 1, 1, now).unwrap();
+
+        // "b"-only hash: must survive a scoped rebuild of "a".
+        upsert_content(&conn, "b_only_hash", "body-b", now).unwrap();
+        upsert_document(&conn, "b", "b.md", "b", "b_only_hash", now).unwrap();
+        upsert_vector_meta(&conn, "b_only_hash", 0, 0, "m", "fp", 1, 2, now).unwrap();
+
+        // Shared hash, actively referenced by both "a" and "b": must survive a
+        // scoped rebuild of "a" because "b" still needs it.
+        upsert_content(&conn, "shared_hash", "shared body", now).unwrap();
+        upsert_document(&conn, "a", "shared-in-a.md", "shared", "shared_hash", now).unwrap();
+        upsert_document(&conn, "b", "shared-in-b.md", "shared", "shared_hash", now).unwrap();
+        upsert_vector_meta(&conn, "shared_hash", 0, 0, "m", "fp", 1, 3, now).unwrap();
+
+        let vids = rebuildable_vids_for_collection(&conn, "a").unwrap();
+        assert_eq!(
+            vids,
+            vec![1],
+            "only a's unshared vid should be marked for HNSW eviction"
+        );
+
+        let deleted = clear_vectors_for_collection(&conn, "a").unwrap();
+        assert_eq!(deleted, 1, "only a's unshared row should be deleted");
+
+        assert!(
+            !hash_has_any_vector(&conn, "a_only_hash"),
+            "a's own hash must be cleared"
+        );
+        assert!(
+            hash_has_any_vector(&conn, "b_only_hash"),
+            "b's unrelated hash must survive a's scoped rebuild"
+        );
+        assert!(
+            hash_has_any_vector(&conn, "shared_hash"),
+            "a hash shared with b must survive a's scoped rebuild"
         );
     }
 }

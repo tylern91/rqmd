@@ -346,18 +346,34 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     // Delete the HNSW file and all content_vectors rows *before* opening the backend
     // so that Store::open starts with a clean slate (next_vid=0, no DB vids).
     if rebuild {
-        let hnsw_path = store::store_config(index_dir, true).hnsw_path;
-        if hnsw_path.exists() {
-            std::fs::remove_file(&hnsw_path)
-                .with_context(|| format!("remove hnsw file: {}", hnsw_path.display()))?;
-        }
-        let s = store::open_store_no_backend(index_dir, true)?;
         match collection {
             Some(c) => {
+                // Writable handle: evict_hnsw_vectors needs a non-view HNSW,
+                // same reason collection::remove opens with read_only=false.
+                let mut s = store::open_store_no_backend(index_dir, false)?;
+                // Evict before the DELETE below: the vids query reads rows
+                // the DELETE removes.
+                let vids = db::rebuildable_vids_for_collection(&s.db, c)
+                    .context("list rebuildable vids")?;
+                s.evict_hnsw_vectors(&vids)
+                    .context("evict collection vectors")?;
                 db::clear_vectors_for_collection(&s.db, c)
                     .context("clear vectors for collection")?;
+                s.flush().context("flush after scoped rebuild eviction")?;
             }
             None => {
+                // Unscoped: content_vectors is content-addressed, shared across
+                // every collection, so dropping the whole HNSW file is correct
+                // (and cheaper than evicting every vid one at a time) only when
+                // every collection's vectors are being cleared together. Doing
+                // this for a *scoped* rebuild would silently break vector
+                // search for every other collection sharing the file — see #66.
+                let hnsw_path = store::store_config(index_dir, true).hnsw_path;
+                if hnsw_path.exists() {
+                    std::fs::remove_file(&hnsw_path)
+                        .with_context(|| format!("remove hnsw file: {}", hnsw_path.display()))?;
+                }
+                let s = store::open_store_no_backend(index_dir, true)?;
                 db::clear_all_vectors(&s.db).context("clear all vectors")?;
             }
         }
@@ -1102,6 +1118,53 @@ mod tests {
         run_cleanup(index_dir.path()).unwrap();
         let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
         assert_eq!(db::count_orphaned_vectors(&s.db).unwrap(), 0);
+    }
+
+    /// `clear_vectors_for_collection` + `rebuildable_vids_for_collection` must
+    /// agree with each other and must not touch a hash shared with another
+    /// active collection — the SQL-layer half of #66. `a`'s own vector is
+    /// cleared, `b`'s vector survives, and the shared hash's vector survives
+    /// because `b` still actively references it.
+    #[test]
+    fn scoped_rebuild_clear_keeps_hash_shared_with_another_collection() {
+        let index_dir = tempfile::tempdir().unwrap();
+        let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+        let now = "2026-01-01T00:00:00Z";
+
+        db::upsert_content(&s.db, "a_only_hash", "a only body", now).unwrap();
+        db::upsert_document(&s.db, "a", "a_only.md", "A", "a_only_hash", now).unwrap();
+        db::upsert_vector_meta(&s.db, "a_only_hash", 0, 0, "m", "fp", 1, 1, now).unwrap();
+
+        db::upsert_content(&s.db, "b_only_hash", "b only body", now).unwrap();
+        db::upsert_document(&s.db, "b", "b_only.md", "B", "b_only_hash", now).unwrap();
+        db::upsert_vector_meta(&s.db, "b_only_hash", 0, 0, "m", "fp", 1, 2, now).unwrap();
+
+        db::upsert_content(&s.db, "shared_hash", "shared body", now).unwrap();
+        db::upsert_document(&s.db, "a", "shared.md", "S", "shared_hash", now).unwrap();
+        db::upsert_document(&s.db, "b", "shared.md", "S", "shared_hash", now).unwrap();
+        db::upsert_vector_meta(&s.db, "shared_hash", 0, 0, "m", "fp", 1, 3, now).unwrap();
+
+        let vids = db::rebuildable_vids_for_collection(&s.db, "a").unwrap();
+        assert_eq!(
+            vids,
+            vec![1],
+            "only a_only_hash's vid is rebuildable for 'a' — shared_hash is excluded"
+        );
+
+        db::clear_vectors_for_collection(&s.db, "a").unwrap();
+
+        assert!(
+            !db::hash_has_any_vector(&s.db, "a_only_hash"),
+            "a's own vector must be cleared by a scoped rebuild"
+        );
+        assert!(
+            db::hash_has_any_vector(&s.db, "b_only_hash"),
+            "b's own vector must survive a rebuild scoped to 'a'"
+        );
+        assert!(
+            db::hash_has_any_vector(&s.db, "shared_hash"),
+            "shared_hash's vector must survive — 'b' still actively references it"
+        );
     }
 
     /// Content referenced by no document at all is deleted; content still
