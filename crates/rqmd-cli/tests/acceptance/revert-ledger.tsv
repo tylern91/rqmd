@@ -1,0 +1,11 @@
+# Revert-evidence ledger for the acceptance tier.
+#
+# A row asserts that the named ac_N test was observed to fail when its
+# production code was mutated, then observed to pass again after the
+# mutation was reverted and byte-diffed clean against a pre-mutation
+# backup. This is manual mutation testing, recorded as evidence — not
+# backfilled documentation.
+#
+# Schema: suite<TAB>ac<TAB>verified_sha<TAB>date
+collection	1	98d44817d629208212e2e04ccdc7f85db3b69722	2026-09-23
+collection	2	98d44817d629208212e2e04ccdc7f85db3b69722	2026-09-23

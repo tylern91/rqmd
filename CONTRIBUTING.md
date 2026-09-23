@@ -95,6 +95,38 @@ one) runs no Rust CI at all. `security.yml` (Trivy) runs on every PR
 regardless; only a **CRITICAL** vulnerability with a known fix blocks the
 merge, HIGH severity is recorded to the Security tab but doesn't block.
 
+## Acceptance-test tier
+
+`crates/rqmd-cli/tests/acceptance/` holds end-to-end tests that drive the
+real `rqmd` binary via `assert_cmd`, one file per cluster (e.g.
+`collection.rs`). This sits alongside — not instead of — the existing inline
+`#[cfg(test)]` unit tests; the two tiers coexist.
+
+- **Naming**: every test is `fn ac_<N>_<behaviour>()`, where `N` is the
+  **1-based position** of the acceptance-criteria checkbox it proves, in the
+  linked issue's `## Acceptance Criteria` section. Issue #66's two boxes are
+  AC-1 and AC-2.
+- **Lint** (`scripts/lint-acceptance-tests.sh`, run in the `ac-gate` CI job):
+  Rule A rejects a test function not matching `^ac_[0-9]+_`; Rule B rejects
+  an `assert_cmd` result that's never interrogated (no `.success()` /
+  `.failure()` / `.stdout(…)` / `.stderr(…)` chained) — the equivalent of a
+  bats `[ ]` that silently no-ops.
+- **Revert-ledger obligation**: any `ac_N` test added or changed must have a
+  row in `crates/rqmd-cli/tests/acceptance/revert-ledger.tsv`
+  (`suite<TAB>ac<TAB>verified_sha<TAB>date`), earned by actually mutating the
+  production code the test exercises, observing the test fail, reverting the
+  mutation, byte-diffing the reverted file clean against a pre-mutation
+  backup, and observing the test pass again. This is not optional
+  documentation — CI's `ac-gate` job checks it against `origin/main` on every
+  PR that touches the tier.
+- **Fold / Keep / Delete**: when a future PR migrates an existing unit-test
+  cluster into this tier, give every original test in that cluster one of
+  three verdicts, recorded in `docs/research/<date>-atdd-migration-<cluster>-cluster.md`:
+  **Fold** (an acceptance test already reaches the same branch — delete the
+  unit test), **Keep** (guards a branch no acceptance test reaches — stays in
+  the unit tier), or **Delete** (provides no coverage at all). Deleting a
+  test without a written verdict is not allowed.
+
 ## MSRV policy
 
 `rust-version = "1.88"` in the root `Cargo.toml` (`[workspace.package]`,
