@@ -9,3 +9,4 @@
 # Schema: suite<TAB>ac<TAB>verified_sha<TAB>date
 collection	1	98d44817d629208212e2e04ccdc7f85db3b69722	2026-09-23
 collection	2	98d44817d629208212e2e04ccdc7f85db3b69722	2026-09-23
+index_rebuild	1	c2726cba38528ed173130f375f19a594c36fa8cb	2026-09-23

@@ -4,6 +4,22 @@
 
 ---
 
+## [0.16.1] - 2026-09-23
+
+### Fixed
+- `rqmd embed -c <collection> --rebuild` no longer deletes the shared `hnsw.usearch`
+  index outright. A scoped rebuild now evicts only the named collection's own vectors
+  from the HNSW graph before clearing them from the database, so vector search for
+  every other collection survives the rebuild. Previously any scoped `--rebuild` wiped
+  the whole index, silently breaking `query`/`vsearch` for unrelated collections.
+- `clear_vectors_for_collection` no longer deletes `content_vectors` rows for a hash
+  that is still actively referenced by another collection. `content_vectors` is
+  content-addressed rather than collection-scoped, so two collections indexing the
+  same file (a vendored `LICENSE`, a shared `README`) previously lost that file's
+  vector on either collection's scoped rebuild, independent of the HNSW bug above.
+
+---
+
 ## [0.16.0] - 2026-09-22
 
 ### Added
