@@ -36,7 +36,7 @@ env:
 jobs:
   version-sync:
     name: Version sync
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 5
 
     steps:
@@ -50,7 +50,7 @@ jobs:
 
   build-macos:
     name: Build ${{ matrix.feature-set }} (macOS arm64)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
 
     strategy:
@@ -104,8 +104,8 @@ jobs:
         run: cargo run --locked --bin rqmd -- eval --mode bm25
 
   build-linux:
-    name: Build default (Linux x64, ${{ matrix.toolchain }})
-    runs-on: ubuntu-latest
+    name: Build default (Linux ${{ matrix.arch }}, ${{ matrix.toolchain }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     # The MSRV (1.88) leg is a drift check, not a release gate — its failure
     # must not block dist-binary or show as a required-check failure.
@@ -114,7 +114,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: ["stable", "1.88"]
+        include:
+          - toolchain: stable
+            os: ubuntu-26.04
+            arch: x64
+          - toolchain: stable
+            os: ubuntu-26.04-arm
+            arch: arm64
+          - toolchain: "1.88"
+            os: ubuntu-26.04
+            arch: x64
 
     steps:
       - uses: actions/checkout@v7
@@ -136,7 +145,7 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          key: linux-x64-${{ matrix.toolchain }}
+          key: linux-${{ matrix.arch }}-${{ matrix.toolchain }}
           cache-on-failure: true
 
       - name: Build (default, Linux CPU-only — no Metal)
@@ -153,7 +162,7 @@ jobs:
 
   dist-binary:
     name: Release binary (macOS arm64)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [build-macos, build-linux]
