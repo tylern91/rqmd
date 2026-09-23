@@ -197,3 +197,108 @@ jobs:
           name: rqmd-macos-arm64
           path: target/dist/rqmd
           retention-days: 30
+
+  ac-gate:
+    name: Acceptance-criteria gate
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # revert-evidence (check 4) diffs ac_* tests against origin/main.
+          fetch-depth: 0
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ac-gate
+          cache-on-failure: true
+
+      - name: Lint acceptance tests
+        run: bash scripts/lint-acceptance-tests.sh
+
+      - name: Run acceptance tests
+        run: bash scripts/run-acceptance-tests.sh
+
+      - name: Check 1 — reverse-orphan (every ac_N on disk is in acceptance.json)
+        run: |
+          set -Eeuo pipefail
+          missing=0
+          while IFS= read -r fn; do
+            key="$(printf '%s\n' "$fn" | sed -E 's/::ac_([0-9]+)_.*/::AC-\1/')"
+            if ! jq -e --arg k "$key" '.acceptance[$k]' acceptance.json > /dev/null; then
+              printf '::error::reverse-orphan: %s (key %s) has no acceptance.json entry\n' "$fn" "$key" >&2
+              missing=1
+            fi
+          done < <(grep -rhoE '^fn ac_[0-9]+_[a-zA-Z0-9_]+' crates/rqmd-cli/tests/acceptance/*.rs \
+                     | sed -E 's/^fn //' \
+                     | while read -r name; do
+                         file="$(grep -lE "^fn ${name}\\(" crates/rqmd-cli/tests/acceptance/*.rs | head -1)"
+                         suite="$(basename "$file" .rs)"
+                         printf '%s::%s\n' "$suite" "$name"
+                       done)
+          if [[ $missing -ne 0 ]]; then
+            exit 1
+          fi
+          printf 'PASS:ac-gate:reverse-orphan\n'
+
+      - name: Check 2 — forward-orphan (every acceptance.json key resolves to a real test)
+        run: |
+          set -Eeuo pipefail
+          missing=0
+          while IFS= read -r key; do
+            suite="${key%%::AC-*}"
+            fn="$(jq -r --arg k "$key" '.acceptance[$k].fn' acceptance.json)"
+            name="${fn#*::}"
+            file="crates/rqmd-cli/tests/acceptance/${suite}.rs"
+            if [[ ! -f "$file" ]] || ! grep -qE "^fn ${name}\(" "$file"; then
+              printf '::error::forward-orphan: %s (fn %s) does not resolve to a real test\n' "$key" "$fn" >&2
+              missing=1
+            fi
+          done < <(jq -r '.acceptance | keys[]' acceptance.json)
+          if [[ $missing -ne 0 ]]; then
+            exit 1
+          fi
+          printf 'PASS:ac-gate:forward-orphan\n'
+
+      - name: Check 3 — all-passed (no skips or failures in this tier)
+        run: |
+          set -Eeuo pipefail
+          bad="$(jq '[.acceptance | to_entries[] | select(.value.state != "passed")] | length' acceptance.json)"
+          if [[ "$bad" -ne 0 ]]; then
+            jq -r '.acceptance | to_entries[] | select(.value.state != "passed") | "::error::all-passed: \(.key) is \(.value.state)"' acceptance.json >&2
+            exit 1
+          fi
+          printf 'PASS:ac-gate:all-passed\n'
+
+      - name: Check 4 — revert-evidence (every new/changed ac_N has a ledger row)
+        run: |
+          set -Eeuo pipefail
+          ledger="crates/rqmd-cli/tests/acceptance/revert-ledger.tsv"
+          changed="$(git diff --name-only origin/main...HEAD -- 'crates/rqmd-cli/tests/acceptance/*.rs' \
+                       | grep -v '/helpers\.rs$' || true)"
+          if [[ -z "$changed" ]]; then
+            printf 'SKIP:ac-gate:revert-evidence:no-new-or-changed-acs\n'
+            exit 0
+          fi
+          missing=0
+          while IFS= read -r file; do
+            [[ -f "$file" ]] || continue
+            suite="$(basename "$file" .rs)"
+            while IFS= read -r ac; do
+              if ! awk -F'\t' -v s="$suite" -v a="$ac" \
+                   '$1 == s && $2 == a { found=1 } END { exit !found }' "$ledger"; then
+                printf '::error::revert-evidence: %s::ac_%s has no row in %s\n' "$suite" "$ac" "$ledger" >&2
+                missing=1
+              fi
+            done < <(grep -oE '^fn ac_[0-9]+_' "$file" | sed -E 's/^fn ac_([0-9]+)_/\1/')
+          done <<< "$changed"
+          if [[ $missing -ne 0 ]]; then
+            exit 1
+          fi
+          printf 'PASS:ac-gate:revert-evidence\n'
