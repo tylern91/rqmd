@@ -76,10 +76,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15
+          - os: macos-26
             name_suffix: aarch64-apple-darwin
             llama_metal: "1"
-          - os: ubuntu-latest
+          - os: ubuntu-26.04
             name_suffix: x86_64-unknown-linux-gnu
             llama_metal: "0"
     runs-on: ${{ matrix.os }}
@@ -147,7 +147,7 @@ jobs:
     name: Inject asset digests into release notes
     needs: upload-assets
     if: inputs.refresh_notes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -240,7 +240,7 @@ jobs:
     name: Sync Homebrew tap formula
     needs: upload-assets
     if: inputs.sync_homebrew && vars.HOMEBREW_SYNC_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
