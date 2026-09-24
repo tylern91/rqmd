@@ -4,6 +4,19 @@
 
 ---
 
+## [0.16.4] - 2026-09-24
+
+### Changed
+- `target/` growth is now bounded on two fronts. `[profile.dev]` and
+  `[profile.dev.package."*"]` set `debug = false`, since day-to-day
+  `cargo build`/`test`/`clippy` runs don't need debug symbols and skipping
+  them cuts `deps/`/`.fingerprint/` size per crate. `scripts/clean-target.sh`
+  gained a hash-group sweep: once a newer `.fingerprint` hash appears for a
+  crate, older sibling hashes (and their matching `deps/`/`build/` outputs)
+  are removed once they've sat untouched for `--grace-hours` (default 24) —
+  a crate's only current fingerprint is never swept, so pruning never forces
+  an unnecessary rebuild. New `--grace-hours N` and `--no-hash-sweep` flags.
+
 ## [0.16.3] - 2026-09-24
 
 ### Security

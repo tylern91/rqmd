@@ -198,6 +198,24 @@ exit status, then the prune advisory-only (a cleanup failure never fails the
 merge). The installer refuses to overwrite a post-merge hook it doesn't
 recognize, and re-running it is a no-op once installed.
 
+The script also runs a **hash-group sweep** on every invocation: a single
+crate can accumulate many `target/debug/.fingerprint/<crate>-<hash>` variants
+within a single day (one per feature/profile combination it's built with),
+well inside the 14-day age window above. Once a newer hash appears for a
+crate, the sweep removes older sibling hashes (and their matching
+`target/debug/deps/`/`target/debug/build/` outputs) once they've sat
+untouched for `--grace-hours` (default 24) — it never removes a crate's only
+current fingerprint, so a rebuild is never forced by pruning alone. Disable
+it with `--no-hash-sweep` if you need to compare hash-suffixed artifacts
+across builds.
+
+`[profile.dev]` and `[profile.dev.package."*"]` in the root `Cargo.toml` set
+`debug = false` — debug builds don't need debug symbols for day-to-day
+`cargo build`/`test`/`clippy` runs, and skipping them cuts per-crate
+`deps/`/`.fingerprint/` size substantially. If you need symbols for a
+debugger session, override it for that build only:
+`CARGO_PROFILE_DEV_DEBUG=true cargo build`.
+
 ## Don't touch — looks usable, isn't
 
 A few things in the repo look like working tooling but currently aren't safe

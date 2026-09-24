@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.16.3"
+version = "0.16.4"
 rust-version = "1.88"
 
 [workspace.lints.clippy]
@@ -11,9 +11,11 @@ all = { level = "deny", priority = -1 }
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 [profile.dev]
 opt-level = 1
+debug = false
 
 [profile.release]
 opt-level = 3
