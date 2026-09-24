@@ -4,6 +4,16 @@
 
 ---
 
+## [0.16.3] - 2026-09-24
+
+### Security
+- Bumped `rmcp` from `1.8.0` to `2.2.0` in `rqmd-mcp`, clearing 3 open code-scanning alerts:
+  CVE-2026-63127 (HIGH, OAuth token impersonation via missing resource-field validation),
+  CVE-2026-63128 (HIGH, DoS via unauthenticated session table leak), and CVE-2026-64684
+  (MEDIUM, sensitive HTTP headers leaked on cross-origin redirects). No source changes were
+  required — the major version bump did not touch the `ServerHandler`/`#[tool_router]`/
+  `StreamableHttpService` surface this crate uses.
+
 ## [0.16.2] - 2026-09-24
 
 ### Fixed
