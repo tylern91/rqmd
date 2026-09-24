@@ -65,6 +65,7 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
     if let Some(ref ts) = last_modified {
         println!("  Updated:  {}", fmt::format_time_ago(ts));
     }
+    store::warn_if_raw_backfill_pending(&s);
 
     // ── AST Chunking (qmd.ts:539-563) ─────────────────────────────────────────────
     println!("\n\x1b[1mAST Chunking\x1b[0m");
@@ -450,14 +451,19 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
         // gets re-embedded instead of silently skipped).
         let docs = db::list_documents(&s.db, Some(&col.name))?;
 
-        // Collect only docs whose hash has no vector row at the current fingerprint yet
-        // and whose hash has not already been queued in this run (duplicate-hash guard).
+        // Collect only docs whose hash still needs embedding per the same
+        // hash-level "satisfied by either route" rule `count_docs_needing_embed`
+        // uses (not a per-document fingerprint match — see `hash_needs_embed`'s
+        // doc comment for why the two must agree), and whose hash has not
+        // already been queued in this run (duplicate-hash guard).
+        let base_fp = store::expected_fingerprint();
+        let ast_fp = store::expected_ast_fingerprint();
         let mut todo_indices: Vec<usize> = Vec::new();
         for (i, doc) in docs.iter().enumerate() {
-            let fingerprint = store::expected_fingerprint_for_path(&doc.path);
-            if !db::hash_has_vector_with_fingerprint(&s.db, &doc.hash, &fingerprint)
-                && !seen_hashes.contains(&doc.hash)
-            {
+            if seen_hashes.contains(&doc.hash) {
+                continue;
+            }
+            if db::hash_needs_embed(&s.db, &doc.hash, &base_fp, &ast_fp).unwrap_or(true) {
                 seen_hashes.insert(doc.hash.clone());
                 todo_indices.push(i);
             }
@@ -617,6 +623,14 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
     // Mirror qmd's "Updating N collection(s)..." header (qmd.ts:675).
     println!("\x1b[1mUpdating {} collection(s)...\x1b[0m\n", cols.len());
 
+    // Tracks whether every collection was fully walked and every file indexed
+    // without error — the raw-split marker must only be set on a clean full
+    // pass, otherwise a skipped collection (missing dir, bad glob, 0 matches)
+    // or a per-file `prepare`/index failure leaves `documents.raw` at its
+    // empty-string default for those rows permanently, since the marker
+    // suppresses `warn_if_raw_backfill_pending` forever once set.
+    let mut all_collections_clean = true;
+
     for (ci, col) in cols.iter().enumerate() {
         // Per-collection header: [i/n] name (pattern)
         println!(
@@ -627,7 +641,9 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             col.pattern
         );
 
-        update_one_collection(&mut s, col, is_tty)?;
+        if !update_one_collection(&mut s, col, is_tty)? {
+            all_collections_clean = false;
+        }
     }
 
     // A removed document's hash may still be in active use by another document
@@ -649,18 +665,27 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             "\nRun 'rqmd embed' to update embeddings ({needs_embed} unique hashes need vectors)"
         );
     }
+
+    // Only an unscoped run that touched every document cleanly can certify the
+    // raw-split backfill complete — a skipped collection or file leaves some
+    // `documents.raw` rows at their empty-string default.
+    if collection.is_none() && all_collections_clean {
+        store::mark_raw_split_backfilled(&s)?;
+    }
     Ok(())
 }
 
 /// Re-walk one collection's directory, run its update hook, re-index changed
 /// files, and prune deleted ones. Extracted from `run_update`'s per-collection
 /// loop body; the `IndexOutcome`-based tally counters and every WARN-on-failure
-/// path are preserved bit-for-bit.
-fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: bool) -> Result<()> {
+/// path are preserved bit-for-bit. Returns `false` if any part of the
+/// collection was skipped or any file failed to index — the caller uses this
+/// to decide whether the run is clean enough to certify the raw-split backfill.
+fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: bool) -> Result<bool> {
     let dir = Path::new(&col.path);
     if !dir.exists() {
         eprintln!("  WARN: directory not found: {}", dir.display());
-        return Ok(());
+        return Ok(false);
     }
 
     // Run the collection's pre-update hook (e.g. `git fetch && git pull ...`)
@@ -692,7 +717,7 @@ fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: boo
                 "  WARN: {}: invalid mask '{}': {e:#}",
                 col.name, col.pattern
             );
-            return Ok(());
+            return Ok(false);
         }
     };
     let ignore_set = exclusions::build_ignore_set(&col.ignore);
@@ -702,6 +727,7 @@ fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: boo
     let mut unchanged_count = 0usize;
     let mut processed = 0usize;
     let mut skips = document::SkipCounts::default();
+    let mut clean = true;
 
     // Pre-collect matching paths so we know the total before indexing begins,
     // enabling "Indexing: N/total" progress (matching qmd's output). Reuses the
@@ -715,6 +741,9 @@ fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: boo
             col.pattern,
             dir.display()
         );
+        // Not a `clean = false` case: zero matches means zero documents in this
+        // collection to backfill, so it can't leave any `documents.raw` row
+        // stale — unlike a per-file failure below, which does.
     }
 
     for path in &files {
@@ -723,6 +752,7 @@ fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: boo
             Err(reason) => {
                 skips.record(reason);
                 processed += 1;
+                clean = false;
                 continue;
             }
         };
@@ -741,7 +771,10 @@ fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: boo
             &doc.indexed_text,
             &doc.raw,
         ) {
-            Err(e) => eprintln!("  WARN: {}: {e:#}", doc.rel_path),
+            Err(e) => {
+                eprintln!("  WARN: {}: {e:#}", doc.rel_path);
+                clean = false;
+            }
             Ok(IndexOutcome::New) => new_count += 1,
             Ok(IndexOutcome::Updated) => updated_count += 1,
             Ok(IndexOutcome::Unchanged) => unchanged_count += 1,
@@ -795,7 +828,7 @@ fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: boo
     println!(
         "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, {removed_count} removed{skip_suffix}"
     );
-    Ok(())
+    Ok(clean)
 }
 
 pub fn run_init() -> Result<()> {
@@ -881,6 +914,7 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
 
         print_doctor_stale_fingerprint_check(&s.db);
         print_doctor_orphaned_vector_check(&s.db);
+        store::warn_if_raw_backfill_pending(&s);
 
         // Recommended next steps.
         let needs_embed: i64 = db::count_docs_needing_embed(

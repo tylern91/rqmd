@@ -56,13 +56,13 @@ pub fn run_get(
         let docid = spec.docid_hex();
         let doc = db::get_document_by_docid_prefix(&s.db, docid)?
             .with_context(|| format!("no document found with docid #{docid}"))?;
-        let body = db::get_content(&s.db, &doc.hash)?.unwrap_or_default();
+        let body = db::get_document_raw(&s.db, doc.id)?.unwrap_or_default();
         let file = format!("rqmd://{}/{}", doc.collection, doc.path);
         (doc.title, body, file, doc.collection, doc.path)
     } else {
         let doc = db::get_document_by_filepath(&s.db, &spec.collection, &spec.path)?
             .with_context(|| format!("not found: {path_arg}"))?;
-        let body = db::get_content(&s.db, &doc.hash)?.unwrap_or_default();
+        let body = db::get_document_raw(&s.db, doc.id)?.unwrap_or_default();
         let file = format!("rqmd://{}/{}", doc.collection, doc.path);
         (doc.title, body, file, doc.collection, doc.path)
     };
@@ -97,7 +97,7 @@ pub fn run_multi_get(
     let mut printed = 0usize;
 
     for doc in &docs {
-        let body = db::get_content(&s.db, &doc.hash)?.unwrap_or_default();
+        let body = db::get_document_raw(&s.db, doc.id)?.unwrap_or_default();
         let file = format!("rqmd://{}/{}", doc.collection, doc.path);
         if printed > 0 && fmt == Format::Cli {
             println!("\n{}", "─".repeat(60));

@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     chunking::{chunk_document_for_path, first_chunk},
     db::{
-        self, content_hash, doc_for_vid, doc_for_vid_meta, docid_from_hash, get_content,
-        get_context_for_path, open_db, upsert_content, upsert_document, upsert_vector_meta,
+        self, content_hash, doc_for_vid, doc_for_vid_meta, docid_from_hash, get_context_for_path,
+        open_db, upsert_content, upsert_document, upsert_vector_meta,
     },
     fts::FtsIndex,
     hnsw::VectorIndex,
@@ -281,10 +281,12 @@ impl Store {
         let now = rfc3339_now();
         let hash = content_hash(body);
 
-        // 1. Upsert content + document record in rusqlite.
+        // 1. Upsert content + document record in rusqlite. No indexed/raw split
+        // here (unlike index_document_fts_only_with_raw) — body serves both roles.
         upsert_content(&self.db, &hash, body, &now).context("upsert content")?;
         let doc_id = upsert_document(&self.db, collection, rel_path, title, &hash, &now)
             .context("upsert document")?;
+        db::set_document_raw(&self.db, doc_id, body).context("set document raw")?;
 
         // 2. Add to Tantivy FTS. filepath = "collection/path".
         let filepath = format!("{collection}/{rel_path}");
@@ -380,14 +382,30 @@ impl Store {
             }
         };
 
-        // Unchanged: content and Tantivy index are already correct — skip all writes.
+        // `content.doc` is keyed by `hash = content_hash(indexed_text)`, so it
+        // must hold `indexed_text` — the bytes the hash actually identifies —
+        // not `raw`. `upsert_content` overwrites on conflict, so this also
+        // self-heals rows written before the raw/indexed-text split, where a
+        // shared hash's first writer could donate its raw text to every other
+        // document on that hash. `raw` is stored per-document instead, via
+        // `set_document_raw`, so retrieval still returns each document's own
+        // verbatim file. Both writes run unconditionally — including when
+        // `outcome == Unchanged` — since `raw` can legitimately go stale (a
+        // frontmatter-only edit doesn't change `hash`) and pre-split indexes
+        // need this pass to repair `content.doc` without a forced reindex.
+        upsert_content(&self.db, &hash, indexed_text, &now).context("upsert content")?;
+
         if outcome == IndexOutcome::Unchanged {
+            let existing = db::get_document_by_filepath(&self.db, collection, rel_path)
+                .context("get document for raw backfill")?
+                .context("document vanished between classification and backfill")?;
+            db::set_document_raw(&self.db, existing.id, raw).context("set document raw")?;
             return Ok(IndexOutcome::Unchanged);
         }
 
-        upsert_content(&self.db, &hash, raw, &now).context("upsert content")?;
         let doc_id = upsert_document(&self.db, collection, rel_path, title, &hash, &now)
             .context("upsert document")?;
+        db::set_document_raw(&self.db, doc_id, raw).context("set document raw")?;
         let filepath = format!("{collection}/{rel_path}");
         self.fts
             .add_document(&filepath, title, indexed_text, doc_id)
@@ -1154,7 +1172,7 @@ impl Store {
                 Some(d) => d,
                 None => continue,
             };
-            let body = get_content(&self.db, &doc.hash)?.unwrap_or_default();
+            let body = db::get_document_raw(&self.db, doc.id)?.unwrap_or_default();
             results.push(self.result_from_doc(&doc, body, score));
         }
         Ok(results)
@@ -1223,7 +1241,7 @@ impl Store {
             Some(d) => d,
             None => return Ok(None),
         };
-        let body = get_content(&self.db, &doc.hash)?.unwrap_or_default();
+        let body = db::get_document_raw(&self.db, doc.id)?.unwrap_or_default();
         Ok(Some((doc, body)))
     }
 

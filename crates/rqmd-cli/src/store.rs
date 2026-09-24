@@ -118,6 +118,49 @@ pub fn warn_if_fingerprint_stale(s: &Store) {
     }
 }
 
+/// Store-config key marking that a full (unscoped) `rqmd update` has completed
+/// since the `documents.raw` / retrieval-payload split landed. Every document
+/// touched by such a run gets its `content` row healed and its `raw` column
+/// backfilled (see `Store::index_document_fts_only_with_raw`), so this is set
+/// once that pass finishes — not on a `--collection`-scoped run, which only
+/// covers a subset of documents.
+const RAW_SPLIT_SCHEMA_KEY: &str = "schema_raw_split";
+
+/// Mark that a full `rqmd update` has backfilled `raw` / healed `content` for
+/// every active document. Called once, after `run_update` completes an
+/// unscoped pass over every collection.
+pub fn mark_raw_split_backfilled(s: &Store) -> Result<()> {
+    db::set_config(&s.db, RAW_SPLIT_SCHEMA_KEY, "1")
+}
+
+/// Warn once if the index predates the `documents.raw` split and hasn't yet
+/// had a full `rqmd update` pass to repair it — until then, some documents
+/// may still be serving another document's retrieval text (a pre-split
+/// `content` row collision) and embeddings may still include frontmatter.
+/// A fresh (post-split) index has no documents until the first `update`, so
+/// this only fires once something has actually been indexed.
+pub fn warn_if_raw_backfill_pending(s: &Store) {
+    if db::get_config(&s.db, RAW_SPLIT_SCHEMA_KEY)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return;
+    }
+    let has_docs: i64 = s
+        .db
+        .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+        .unwrap_or(0);
+    if has_docs > 0 {
+        eprintln!(
+            "\x1b[33mrqmd: warning: index predates the retrieval-text fix — some documents may \
+             still serve another document's text; run `rqmd update` (full, not \
+             --collection-scoped) to repair, then `rqmd embed --rebuild` to also purge \
+             frontmatter that was embedded before the fix\x1b[0m"
+        );
+    }
+}
+
 /// Collection name → root filesystem path, needed to resolve a document's
 /// real absolute path for `--format files`. Only worth a DB round-trip when
 /// the chosen format actually needs it.

@@ -1600,6 +1600,9 @@ fn count_docs_needing_embed_counts_stale_fingerprint_as_pending() {
 /// A `.java` doc is pending under the base fingerprint but not under the AST
 /// one, and a `.md` doc is the inverse — `count_docs_needing_embed` must pick
 /// the right expected fingerprint per document's path, not a single global one.
+/// Each document here owns a distinct hash, so hash-level and per-row accounting
+/// agree; `count_docs_needing_embed_satisfied_by_either_route_on_shared_hash`
+/// below covers the case where they diverge.
 #[test]
 fn count_docs_needing_embed_is_path_aware_for_ast_eligibility() {
     let dir = TempDir::new().unwrap();
@@ -1695,6 +1698,191 @@ fn count_docs_needing_embed_is_path_aware_for_ast_eligibility() {
     )
     .unwrap();
     assert_eq!(count_docs_needing_embed(&store.db, &base, &ast).unwrap(), 0);
+}
+
+/// The live-index defect this fix targets: an AST-eligible path (`.py`) and a
+/// non-eligible path (`.md`) share one content hash. `content_vectors` can only
+/// ever hold one fingerprint per hash, so `run_embed`'s hash-level dedup can
+/// only ever satisfy one of the two documents' path-expected fingerprints —
+/// under the old per-row accounting the hash was permanently "pending" no
+/// matter which fingerprint got embedded. The new hash-level accounting must
+/// treat the hash as satisfied once *either* expected fingerprint is present.
+#[test]
+fn count_docs_needing_embed_satisfied_by_either_route_on_shared_hash() {
+    let dir = TempDir::new().unwrap();
+    let store = test_store(&dir);
+    let collection = "coll";
+
+    upsert_content(&store.db, "shared-hash", "same body", "2024-01-01T00:00:00Z").unwrap();
+    upsert_document(
+        &store.db,
+        collection,
+        "readme.md",
+        "Readme",
+        "shared-hash",
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+    upsert_document(
+        &store.db,
+        collection,
+        "script.py",
+        "Script",
+        "shared-hash",
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+
+    let base = rqmd_core::store::expected_embed_fingerprint("fake");
+    let ast = rqmd_core::store::expected_embed_fingerprint_for_path("fake", "script.py");
+
+    // Nothing embedded — the shared hash is pending (counts once, not twice).
+    assert_eq!(count_docs_needing_embed(&store.db, &base, &ast).unwrap(), 1);
+
+    // run_embed's hash-level dedup reaches this hash via whichever path arrives
+    // first; here it embeds under the AST fingerprint (the .py doc's route).
+    upsert_vector_meta(
+        &store.db,
+        "shared-hash",
+        0,
+        0,
+        "fake",
+        &ast,
+        1,
+        1,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &ast).unwrap(),
+        0,
+        "a vector at the AST fingerprint must satisfy the hash even though a \
+         non-eligible document (readme.md) sharing the hash expects the base \
+         fingerprint — this is the exact stuck-forever case from the live index"
+    );
+}
+
+/// Two documents share `indexed_text` (so they share `hash`) but carry different
+/// `raw` (e.g. differing frontmatter). `content.doc` — keyed by `hash` — must hold
+/// `indexed_text`, and each document's own `raw` must come back from its own row,
+/// not get donated from whichever document reached the shared hash first.
+#[test]
+fn shared_hash_documents_each_retain_their_own_raw_text() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    let collection = "coll";
+
+    let outcome1 = store
+        .index_document_fts_only_with_raw(
+            collection,
+            "a.md",
+            "A",
+            "same body",
+            "---\ntitle: A\n---\nsame body",
+        )
+        .unwrap();
+    let outcome2 = store
+        .index_document_fts_only_with_raw(
+            collection,
+            "b.md",
+            "B",
+            "same body",
+            "---\ntitle: B\n---\nsame body",
+        )
+        .unwrap();
+    assert_eq!(outcome1, rqmd_core::IndexOutcome::New);
+    assert_eq!(outcome2, rqmd_core::IndexOutcome::New);
+
+    let hash = content_hash("same body");
+    assert_eq!(
+        rqmd_core::db::get_content(&store.db, &hash).unwrap().as_deref(),
+        Some("same body"),
+        "content.doc must hold indexed_text, not either document's raw"
+    );
+
+    let doc_a = get_document_by_filepath(&store.db, collection, "a.md")
+        .unwrap()
+        .unwrap();
+    let doc_b = get_document_by_filepath(&store.db, collection, "b.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rqmd_core::db::get_document_raw(&store.db, doc_a.id).unwrap().as_deref(),
+        Some("---\ntitle: A\n---\nsame body")
+    );
+    assert_eq!(
+        rqmd_core::db::get_document_raw(&store.db, doc_b.id).unwrap().as_deref(),
+        Some("---\ntitle: B\n---\nsame body")
+    );
+}
+
+/// A frontmatter-only edit keeps `hash` unchanged (`IndexOutcome::Unchanged`), so it
+/// must not re-trigger embedding — but `raw` legitimately changed and must still be
+/// backfilled/refreshed, and a pre-split `content` row (holding some other document's
+/// raw text from before the raw/indexed-text split) must self-heal on this same pass.
+#[test]
+fn unchanged_reindex_backfills_raw_and_heals_content_without_forcing_reembed() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    let collection = "coll";
+    let hash = content_hash("body text");
+
+    // Simulate a pre-split row: content.doc holds a donated raw from some other
+    // document that used to share this hash, not the indexed_text the hash identifies.
+    upsert_content(&store.db, &hash, "WRONG donated raw", "2024-01-01T00:00:00Z").unwrap();
+
+    let outcome = store
+        .index_document_fts_only_with_raw(
+            collection,
+            "a.md",
+            "A",
+            "body text",
+            "---\ntitle: A v1\n---\nbody text",
+        )
+        .unwrap();
+    assert_eq!(outcome, rqmd_core::IndexOutcome::New);
+
+    let base = rqmd_core::store::expected_embed_fingerprint("fake");
+    let ast = rqmd_core::store::expected_embed_fingerprint_for_path("fake", "a.md");
+    upsert_vector_meta(&store.db, &hash, 0, 0, "fake", &base, 1, 1, "2024-01-01T00:00:00Z")
+        .unwrap();
+    assert_eq!(count_docs_needing_embed(&store.db, &base, &ast).unwrap(), 0);
+
+    // Content identity is unchanged (same indexed_text) but the frontmatter changed.
+    let outcome2 = store
+        .index_document_fts_only_with_raw(
+            collection,
+            "a.md",
+            "A",
+            "body text",
+            "---\ntitle: A v2\n---\nbody text",
+        )
+        .unwrap();
+    assert_eq!(
+        outcome2,
+        rqmd_core::IndexOutcome::Unchanged,
+        "hash didn't change, so the outcome must still read Unchanged"
+    );
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &ast).unwrap(),
+        0,
+        "an Unchanged reindex must not make an already-embedded hash look pending again"
+    );
+
+    assert_eq!(
+        rqmd_core::db::get_content(&store.db, &hash).unwrap().as_deref(),
+        Some("body text"),
+        "the pre-split donated raw must self-heal to indexed_text on this pass"
+    );
+    let doc = get_document_by_filepath(&store.db, collection, "a.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rqmd_core::db::get_document_raw(&store.db, doc.id).unwrap().as_deref(),
+        Some("---\ntitle: A v2\n---\nbody text"),
+        "raw must be backfilled to the freshly-read file even on the Unchanged path"
+    );
 }
 
 #[test]
