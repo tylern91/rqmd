@@ -351,7 +351,7 @@ fn get_document(
         Err(e) => return Err(format!("DB error: {e:#}")),
     };
 
-    let body = db::get_content(&store.db, &doc.hash)
+    let body = db::get_document_raw(&store.db, doc.id)
         .unwrap_or_default()
         .unwrap_or_default();
 
@@ -395,7 +395,7 @@ fn multi_get_documents(
 
     for doc in &docs {
         let filepath = format!("{}/{}", doc.collection, doc.path);
-        let body = db::get_content(&store.db, &doc.hash)
+        let body = db::get_document_raw(&store.db, doc.id)
             .unwrap_or_default()
             .unwrap_or_default();
         let text: String = body
