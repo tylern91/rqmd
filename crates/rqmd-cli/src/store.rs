@@ -147,10 +147,9 @@ pub fn warn_if_raw_backfill_pending(s: &Store) {
     {
         return;
     }
-    let has_docs: i64 = s
-        .db
-        .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
-        .unwrap_or(0);
+    let has_docs: i64 =
+        s.db.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap_or(0);
     if has_docs > 0 {
         eprintln!(
             "\x1b[33mrqmd: warning: index predates the retrieval-text fix — some documents may \

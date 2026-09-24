@@ -542,8 +542,7 @@ pub fn hash_needs_embed(
     let all_ast = all_ast.unwrap_or(0) == 1;
 
     let ast_satisfied = has_ast && hash_has_vector_with_fingerprint(conn, hash, ast_fingerprint);
-    let base_satisfied =
-        !all_ast && hash_has_vector_with_fingerprint(conn, hash, base_fingerprint);
+    let base_satisfied = !all_ast && hash_has_vector_with_fingerprint(conn, hash, base_fingerprint);
     Ok(!(ast_satisfied || base_satisfied))
 }
 

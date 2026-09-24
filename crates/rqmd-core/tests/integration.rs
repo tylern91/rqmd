@@ -1713,7 +1713,13 @@ fn count_docs_needing_embed_satisfied_by_either_route_on_shared_hash() {
     let store = test_store(&dir);
     let collection = "coll";
 
-    upsert_content(&store.db, "shared-hash", "same body", "2024-01-01T00:00:00Z").unwrap();
+    upsert_content(
+        &store.db,
+        "shared-hash",
+        "same body",
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
     upsert_document(
         &store.db,
         collection,
@@ -1796,7 +1802,9 @@ fn shared_hash_documents_each_retain_their_own_raw_text() {
 
     let hash = content_hash("same body");
     assert_eq!(
-        rqmd_core::db::get_content(&store.db, &hash).unwrap().as_deref(),
+        rqmd_core::db::get_content(&store.db, &hash)
+            .unwrap()
+            .as_deref(),
         Some("same body"),
         "content.doc must hold indexed_text, not either document's raw"
     );
@@ -1808,11 +1816,15 @@ fn shared_hash_documents_each_retain_their_own_raw_text() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        rqmd_core::db::get_document_raw(&store.db, doc_a.id).unwrap().as_deref(),
+        rqmd_core::db::get_document_raw(&store.db, doc_a.id)
+            .unwrap()
+            .as_deref(),
         Some("---\ntitle: A\n---\nsame body")
     );
     assert_eq!(
-        rqmd_core::db::get_document_raw(&store.db, doc_b.id).unwrap().as_deref(),
+        rqmd_core::db::get_document_raw(&store.db, doc_b.id)
+            .unwrap()
+            .as_deref(),
         Some("---\ntitle: B\n---\nsame body")
     );
 }
@@ -1830,7 +1842,13 @@ fn unchanged_reindex_backfills_raw_and_heals_content_without_forcing_reembed() {
 
     // Simulate a pre-split row: content.doc holds a donated raw from some other
     // document that used to share this hash, not the indexed_text the hash identifies.
-    upsert_content(&store.db, &hash, "WRONG donated raw", "2024-01-01T00:00:00Z").unwrap();
+    upsert_content(
+        &store.db,
+        &hash,
+        "WRONG donated raw",
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
 
     let outcome = store
         .index_document_fts_only_with_raw(
@@ -1845,8 +1863,18 @@ fn unchanged_reindex_backfills_raw_and_heals_content_without_forcing_reembed() {
 
     let base = rqmd_core::store::expected_embed_fingerprint("fake");
     let ast = rqmd_core::store::expected_embed_fingerprint_for_path("fake", "a.md");
-    upsert_vector_meta(&store.db, &hash, 0, 0, "fake", &base, 1, 1, "2024-01-01T00:00:00Z")
-        .unwrap();
+    upsert_vector_meta(
+        &store.db,
+        &hash,
+        0,
+        0,
+        "fake",
+        &base,
+        1,
+        1,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
     assert_eq!(count_docs_needing_embed(&store.db, &base, &ast).unwrap(), 0);
 
     // Content identity is unchanged (same indexed_text) but the frontmatter changed.
@@ -1871,7 +1899,9 @@ fn unchanged_reindex_backfills_raw_and_heals_content_without_forcing_reembed() {
     );
 
     assert_eq!(
-        rqmd_core::db::get_content(&store.db, &hash).unwrap().as_deref(),
+        rqmd_core::db::get_content(&store.db, &hash)
+            .unwrap()
+            .as_deref(),
         Some("body text"),
         "the pre-split donated raw must self-heal to indexed_text on this pass"
     );
@@ -1879,7 +1909,9 @@ fn unchanged_reindex_backfills_raw_and_heals_content_without_forcing_reembed() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        rqmd_core::db::get_document_raw(&store.db, doc.id).unwrap().as_deref(),
+        rqmd_core::db::get_document_raw(&store.db, doc.id)
+            .unwrap()
+            .as_deref(),
         Some("---\ntitle: A v2\n---\nbody text"),
         "raw must be backfilled to the freshly-read file even on the Unchanged path"
     );
