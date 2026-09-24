@@ -4,6 +4,39 @@
 
 ---
 
+## [0.16.2] - 2026-09-24
+
+### Fixed
+- `rqmd status`/`rqmd doctor` no longer report a permanently-stuck "1 hash pending"
+  that `rqmd embed` could never drain. `content` previously conflated embedding
+  identity (`content.hash = content_hash(indexed_text)`) with retrieval payload
+  (`content.doc` held the first document's raw text to claim a hash, via
+  `INSERT OR IGNORE`), so documents sharing a hash could silently serve another
+  document's raw body — up to ~3,300 documents in the live index. `documents` now
+  has its own `raw` column, `content.doc` holds only `indexed_text`, and
+  `upsert_content` self-heals via `INSERT ... ON CONFLICT(hash) DO UPDATE` instead
+  of overwriting on `OR REPLACE` (which would have cascade-deleted every document
+  row sharing that hash).
+- `count_docs_needing_embed` now evaluates pending status per content hash instead
+  of per document row: a hash is satisfied once *any* document sharing it has a
+  vector at the fingerprint its own path expects, matching how `content_vectors`
+  is actually keyed (`(hash, seq)`, one fingerprint per hash). Previously a hash
+  shared between an AST-eligible and a non-eligible path could never be marked
+  fully embedded, since the single stored fingerprint could never match both
+  paths' expectations simultaneously.
+- `rqmd embed`'s per-document todo-selection now uses the same hash-level
+  "satisfied by either route" rule (`db::hash_needs_embed`) as the pending
+  counter above, instead of a per-document fingerprint check — the previous
+  mismatch caused indefinite re-embed/evict churn on shared hashes while
+  `rqmd status` falsely reported 0 pending.
+- `rqmd update` now only marks the index as backfilled for the raw/indexed_text
+  split after an unscoped run that touched every document cleanly; a run with a
+  missing directory, an invalid glob, a zero-match mask, or a per-file failure no
+  longer certifies a backfill it didn't actually finish.
+- Corrected `warn_if_raw_backfill_pending`'s message: `rqmd update` alone repairs
+  `documents.raw`/`content.doc`, but pre-fix embeddings still contain frontmatter
+  until `rqmd embed --rebuild` is also run.
+
 ## [0.16.1] - 2026-09-23
 
 ### Fixed

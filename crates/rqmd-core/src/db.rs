@@ -46,6 +46,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
             created_at  TEXT NOT NULL,
             modified_at TEXT NOT NULL,
             active      INTEGER NOT NULL DEFAULT 1,
+            raw         TEXT NOT NULL DEFAULT '',
             UNIQUE(collection, path)
         );
 
@@ -97,6 +98,15 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "allow_hidden",
         "allow_hidden INTEGER NOT NULL DEFAULT 0",
     )?;
+    // `documents.raw` separates the per-document retrieval payload (the
+    // verbatim file) from `content.doc`, which is keyed by `content.hash` —
+    // itself `content_hash(indexed_text)`, not of `raw`. Before this column,
+    // `raw` was stored in `content.doc` and `INSERT OR IGNORE` meant every
+    // document sharing a hash (e.g. frontmatter-only differences, or
+    // coincidentally identical bodies) silently inherited whichever raw text
+    // was written first. See `store::upgrade_needed` for the one-time
+    // reindex this column requires on existing indexes.
+    ensure_column(conn, "documents", "raw", "raw TEXT NOT NULL DEFAULT ''")?;
     Ok(())
 }
 
@@ -142,9 +152,18 @@ pub fn docid_from_hash(hash: &str) -> &str {
 
 // ── Content CRUD ──────────────────────────────────────────────────────────────
 
+/// `hash` is always `content_hash(doc)` at every call site, so any two writes for the
+/// same hash carry byte-identical `doc` — overwriting on conflict is therefore
+/// idempotent, and also self-heals rows written before the raw/indexed-text split,
+/// where `doc` could hold a different document's raw body that happened to collide on
+/// this hash. This must stay an `UPDATE`-on-conflict, not `INSERT OR REPLACE`:
+/// `documents.hash REFERENCES content(hash) ON DELETE CASCADE` is enforced
+/// (`PRAGMA foreign_keys = ON`), and `INSERT OR REPLACE` deletes-then-reinserts,
+/// which would cascade-delete every document row sharing this hash.
 pub fn upsert_content(conn: &Connection, hash: &str, doc: &str, now: &str) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO content(hash, doc, created_at) VALUES (?1, ?2, ?3)",
+        "INSERT INTO content(hash, doc, created_at) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(hash) DO UPDATE SET doc = excluded.doc",
         params![hash, doc, now],
     )?;
     Ok(())
@@ -213,6 +232,34 @@ pub fn upsert_document(
         |row| row.get(0),
     )
     .context("upsert document")
+}
+
+/// Set the verbatim retrieval payload for a document, independent of
+/// `content.doc` — see the `documents.raw` migration comment in
+/// `init_schema`. Split from `upsert_document` rather than added as a
+/// parameter to it: `upsert_document` is called from ~30 existing tests that
+/// exercise hash/dedup semantics unrelated to raw text, and giving it a
+/// mandatory `raw` argument would force every one of them to grow an unused
+/// value.
+pub fn set_document_raw(conn: &Connection, doc_id: i64, raw: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE documents SET raw = ?1 WHERE id = ?2",
+        params![raw, doc_id],
+    )
+    .context("set document raw")?;
+    Ok(())
+}
+
+/// Read a document's verbatim retrieval payload by row id — the counterpart
+/// to [`set_document_raw`]. Returns `None` if no such document exists.
+pub fn get_document_raw(conn: &Connection, doc_id: i64) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT raw FROM documents WHERE id = ?1",
+        params![doc_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .context("get document raw")
 }
 
 pub fn get_document_by_filepath(
@@ -373,14 +420,26 @@ pub fn has_vector(conn: &Connection, hash: &str, seq: i64, fingerprint: &str) ->
 }
 
 /// Count distinct content hashes still needing embedding: active documents with
-/// NON-EMPTY content whose hash has no content_vectors row at the fingerprint
-/// that document's path currently expects — `ast_fingerprint` for a path
-/// matching `chunking::ast_chunking_extensions()`, `base_fingerprint` otherwise
-/// (see `store::expected_fingerprint`/`expected_fingerprint_for_path`). The
-/// `length(c.doc) > 0` filter mirrors run_embed's `if body.is_empty() { continue; }`
+/// NON-EMPTY content whose hash has no content_vectors row at any fingerprint
+/// that *some* document sharing that hash currently expects — `ast_fingerprint`
+/// for a path matching `chunking::ast_chunking_extensions()`, `base_fingerprint`
+/// otherwise (see `store::expected_fingerprint`/`expected_fingerprint_for_path`).
+///
+/// A hash is satisfied per-hash, not per-document-row: `content_vectors` is keyed
+/// `(hash, seq)` and `ON CONFLICT DO UPDATE` on `embed_fingerprint` means a hash
+/// can carry exactly one fingerprint at a time (`run_embed`'s `seen_hashes` dedup
+/// embeds whichever path reaches a hash first). Requiring every document's own
+/// path-expected fingerprint to match — the old per-row behavior — can never be
+/// satisfied when an AST-eligible and a non-eligible path share a hash, since the
+/// single stored fingerprint cannot equal both. So a hash counts as pending only
+/// if NEITHER route is satisfied: no AST-eligible document on the hash has its
+/// `ast_fingerprint` vector, AND no non-eligible document on the hash has its
+/// `base_fingerprint` vector.
+///
+/// The `length(c.doc) > 0` filter mirrors run_embed's `if body.is_empty() { continue; }`
 /// skip — without it, empty files (hash = SHA-256 of "") count as pending forever
-/// but never embed. A hash with vectors only under a *stale* fingerprint counts
-/// as pending, since it still needs a re-embed.
+/// but never embed. A hash with vectors only under a *stale* fingerprint (neither
+/// current `base_fingerprint` nor `ast_fingerprint`) still counts as pending.
 pub fn count_docs_needing_embed(
     conn: &Connection,
     base_fingerprint: &str,
@@ -407,14 +466,23 @@ pub fn count_docs_needing_embed(
         .collect::<Vec<_>>()
         .join(" OR ");
     let sql = format!(
-        "SELECT COUNT(DISTINCT d.hash) FROM documents d \
-         JOIN content c ON c.hash = d.hash \
-         WHERE d.active = 1 AND length(c.doc) > 0 \
-         AND NOT EXISTS (\
+        "SELECT COUNT(*) FROM (\
+             SELECT d.hash AS hash, \
+                 MAX(CASE WHEN {eligible_clause} THEN 1 ELSE 0 END) AS has_ast, \
+                 MIN(CASE WHEN {eligible_clause} THEN 1 ELSE 0 END) AS all_ast \
+             FROM documents d \
+             JOIN content c ON c.hash = d.hash \
+             WHERE d.active = 1 AND length(c.doc) > 0 \
+             GROUP BY d.hash\
+         ) h \
+         WHERE (h.has_ast = 0 OR NOT EXISTS (\
              SELECT 1 FROM content_vectors cv \
-             WHERE cv.hash = d.hash \
-             AND cv.embed_fingerprint = CASE WHEN {eligible_clause} THEN ?2 ELSE ?1 END\
-         )"
+             WHERE cv.hash = h.hash AND cv.embed_fingerprint = ?2\
+         )) \
+         AND (h.all_ast = 1 OR NOT EXISTS (\
+             SELECT 1 FROM content_vectors cv \
+             WHERE cv.hash = h.hash AND cv.embed_fingerprint = ?1\
+         ))"
     );
     conn.query_row(&sql, params![base_fingerprint, ast_fingerprint], |r| {
         r.get(0)
@@ -433,6 +501,49 @@ pub fn hash_has_any_vector(conn: &Connection, hash: &str) -> bool {
     )
     .unwrap_or(0)
         > 0
+}
+
+/// Per-hash equivalent of [`count_docs_needing_embed`]'s "satisfied by either
+/// route" rule — used by `run_embed` to decide whether a hash still needs
+/// embedding, instead of the per-document [`hash_has_vector_with_fingerprint`]
+/// check, which disagrees with the counter for a hash shared by an AST-eligible
+/// and a non-eligible path (the counter says satisfied once either fingerprint
+/// is present; the per-document check demands a specific one and can churn
+/// forever). `has_ast`/`all_ast` mirror the SQL aggregate in the counter: `true`
+/// if any/every document currently active on this hash is AST-eligible.
+pub fn hash_needs_embed(
+    conn: &Connection,
+    hash: &str,
+    base_fingerprint: &str,
+    ast_fingerprint: &str,
+) -> rusqlite::Result<bool> {
+    let extensions = crate::chunking::ast_chunking_extensions();
+    if extensions.is_empty() {
+        return Ok(!hash_has_vector_with_fingerprint(
+            conn,
+            hash,
+            base_fingerprint,
+        ));
+    }
+
+    let eligible_clause = extensions
+        .iter()
+        .map(|ext| format!("lower(d.path) LIKE '%.{ext}'"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let sql = format!(
+        "SELECT MAX(CASE WHEN {eligible_clause} THEN 1 ELSE 0 END), \
+                MIN(CASE WHEN {eligible_clause} THEN 1 ELSE 0 END) \
+         FROM documents d WHERE d.hash = ?1 AND d.active = 1"
+    );
+    let (has_ast, all_ast): (Option<i64>, Option<i64>) =
+        conn.query_row(&sql, params![hash], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let has_ast = has_ast.unwrap_or(0) == 1;
+    let all_ast = all_ast.unwrap_or(0) == 1;
+
+    let ast_satisfied = has_ast && hash_has_vector_with_fingerprint(conn, hash, ast_fingerprint);
+    let base_satisfied = !all_ast && hash_has_vector_with_fingerprint(conn, hash, base_fingerprint);
+    Ok(!(ast_satisfied || base_satisfied))
 }
 
 /// Check whether a content hash already has a vector row at the *current*
@@ -594,10 +705,9 @@ pub fn upsert_vector_meta(
 pub fn doc_for_vid(conn: &Connection, vid: u64) -> Result<Option<(Document, String)>> {
     conn.query_row(
         r#"
-        SELECT d.id, d.collection, d.path, d.title, d.hash, d.active, c.doc
+        SELECT d.id, d.collection, d.path, d.title, d.hash, d.active, d.raw
         FROM content_vectors cv
         JOIN documents d ON d.hash = cv.hash AND d.active = 1
-        JOIN content c ON c.hash = cv.hash
         WHERE cv.vid = ?1
         LIMIT 1
         "#,
