@@ -60,7 +60,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.HOMEBREW_APP_ID }}
+          client-id: ${{ vars.HOMEBREW_APP_CLIENT_ID }}
           private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
           owner: tylern91
           repositories: rqmd
@@ -130,6 +130,20 @@ jobs:
           else
             printf 'skip=false\n' >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Assert workspace version matches the tag about to be cut
+        # Catches the class of bug where "latest tag" (used to compute next
+        # below) is behind Cargo.toml because an earlier release's CI run
+        # never executed (e.g. a bot-authored PR's workflow run required
+        # manual approval and nobody approved it) — the next release then
+        # tags the WRONG commit under the SKIPPED version number, publishing
+        # a Release with no matching binary. Fails here, before any tag or
+        # Release exists, rather than only after upload-assets builds the
+        # binary in publish-assets.yml.
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          next="${{ steps.ver.outputs.next }}"
+          bash scripts/check-version-sync.sh . --expect "${next#v}"
 
       - name: Stamp commit/PR refs into this release's CHANGELOG section
         # Stamps CHANGELOG.md in THIS ephemeral checkout only — never committed

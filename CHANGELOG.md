@@ -4,6 +4,23 @@
 
 ---
 
+## [0.16.5] - 2026-09-25
+
+### Fixed
+- `release.yml` now asserts `[workspace.package]` version matches the tag it's about to cut
+  (`scripts/check-version-sync.sh --expect`) *before* creating the tag or GitHub Release —
+  closes the gap where a skipped release (e.g. an unapproved bot-PR CI run) let a later
+  release compute a stale tag against a newer commit, publishing a Release with no matching
+  binary (v0.16.3 shipped empty after PR #76's release run went unapproved and PR #80 bumped
+  Cargo.toml again before it ran).
+
+### Changed
+- `actions/create-github-app-token@v3`'s deprecated `app-id` input replaced with `client-id`
+  (reads the new `HOMEBREW_APP_CLIENT_ID` repo variable) in `release.yml` and
+  `publish-assets.yml`.
+
+---
+
 ## [0.16.4] - 2026-09-24
 
 ### Changed

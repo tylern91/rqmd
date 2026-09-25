@@ -164,6 +164,17 @@ A PR that should ship in a release **finalizes its own release section** in
    *why* the change matters, hand-wrapped at roughly 76 columns, matching the
    rest of the file.
 
+`release.yml` also re-checks this at tag time via
+`scripts/check-version-sync.sh --expect <next-tag>`, comparing `Cargo.toml`
+against the version the release job is *about to cut* — not just the
+CHANGELOG's top heading. This catches the case where an earlier release PR's
+CI run never executed (workflow runs on bot-authored PRs, e.g. Copilot or
+Dependabot, require a maintainer to click "Approve and run") and a later PR's
+release then computes a stale tag against a newer commit. **Approve
+bot-authored PRs' workflow runs promptly**, or re-run the missed release via
+`workflow_dispatch` before merging anything else — otherwise the guard blocks
+the next release until the mismatch is resolved.
+
 ## Semver labels
 
 Apply exactly one on your PR: `patch`, `minor`, or `skip-release`.
