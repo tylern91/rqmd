@@ -8,10 +8,24 @@
 # heading (`## [Unreleased]` -> `## [X.Y.Z] - DATE`) — a forgotten bump ships
 # a binary that reports the previous release's version.
 #
-# Usage: check-version-sync.sh [path-to-repo-root]
+# Usage: check-version-sync.sh [path-to-repo-root] [--expect X.Y.Z]
+#
+# --expect additionally asserts the workspace version equals X.Y.Z. The
+# release workflow passes the tag it's about to cut, so a version that was
+# never bumped (e.g. a prior release PR's CI run went unapproved and never
+# ran) fails loudly before a tag/Release is published, instead of only
+# surfacing after binaries are built in publish-assets.yml.
 set -Eeuo pipefail
 
-root="${1:-.}"
+root="."
+expect=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --expect) expect="${2:?--expect requires a version}"; shift 2 ;;
+    *) root="$1"; shift ;;
+  esac
+done
+
 cargo_toml="${root}/Cargo.toml"
 changelog="${root}/CHANGELOG.md"
 
@@ -53,6 +67,14 @@ if [[ "$workspace_version" != "$changelog_version" ]]; then
   printf 'check-version-sync: MISMATCH — Cargo.toml [workspace.package] version is "%s" but CHANGELOG.md top release is "%s"\n' \
     "$workspace_version" "$changelog_version" >&2
   printf 'Bump [workspace.package] version in %s to match, or finalize CHANGELOG.md if it is stale.\n' "$cargo_toml" >&2
+  exit 1
+fi
+
+if [[ -n "$expect" && "$workspace_version" != "$expect" ]]; then
+  printf 'check-version-sync: MISMATCH — Cargo.toml [workspace.package] version is "%s" but the release being cut expects "%s"\n' \
+    "$workspace_version" "$expect" >&2
+  printf 'A previous release was likely skipped (e.g. an unapproved bot-PR run never executed release.yml),\n' >&2
+  printf 'so the latest tag is behind Cargo.toml. Re-run the missed release, or re-check the version bump.\n' >&2
   exit 1
 fi
 
