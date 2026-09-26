@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+---
+
+## [0.17.0] - 2026-09-26
+
 ### Changed
 - `rqmd-mcp`'s `rmcp` dependency bumped `2.2.0` -> `3.4.1`, adding support for the `2026-07-28`
   MCP protocol revision (stateless `server/discover`, standard HTTP headers) alongside the
