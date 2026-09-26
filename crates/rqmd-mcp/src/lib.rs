@@ -324,4 +324,88 @@ mod tests {
         assert_eq!(json["pid"], std::process::id());
         assert_eq!(json["index_dir"], dir.path().to_string_lossy().as_ref());
     }
+
+    /// rmcp 3.x still serves a legacy (pre-2026-07-28) `initialize` handshake
+    /// with a session, exactly as 2.x did — this pins that down as a
+    /// regression guard for the rmcp 2.2.0 -> 3.4.1 upgrade.
+    #[tokio::test]
+    async fn legacy_initialize_returns_a_session_id() {
+        let (router, _dir) = test_router();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1.0"}
+            }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(HOST, "127.0.0.1")
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get("Mcp-Session-Id").is_some(),
+            "legacy initialize should still hand back a session id"
+        );
+    }
+
+    /// rmcp 3.x's new `2026-07-28` protocol serves `server/discover` (and
+    /// every other request) statelessly — no session is created, regardless
+    /// of `legacy_session_mode` (which we never set and stays at its
+    /// default). This is the one behavior genuinely new to 3.x that this
+    /// daemon's clients could hit.
+    ///
+    /// A `2026-07-28` request also requires the `Mcp-Method` standard header
+    /// (SEP-2243) once the server negotiates that version — omitting it is a
+    /// hard 400 (`-32020`), confirmed by running this test against the real
+    /// server before adding the header below.
+    ///
+    /// TODO(tyler): the assertions below are my best read of "stateless" for
+    /// this test (200 OK, no `Mcp-Session-Id` issued) — see the rmcp 3.x
+    /// migration guide (rust-sdk discussion #969, §10 "Stateless HTTP and
+    /// subscription streams"). Since `RqmdServer` is a long-lived daemon
+    /// with `Arc`-shared model/index state (`ml()`/`fts()` in `server.rs`),
+    /// you may want this test to also assert something about the response
+    /// body (e.g. `resultType`/`supportedVersions`) or about repeat calls
+    /// never accumulating session state — adjust as you see fit.
+    #[tokio::test]
+    async fn discover_2026_07_28_is_stateless() {
+        let (router, _dir) = test_router();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": {"name": "test", "version": "1.0"},
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(HOST, "127.0.0.1")
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", "2026-07-28")
+            .header("Mcp-Method", "server/discover")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get("Mcp-Session-Id").is_none(),
+            "a 2026-07-28 discover request must not create a session"
+        );
+    }
 }

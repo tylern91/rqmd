@@ -8,7 +8,7 @@ use std::{
 use rmcp::{
     ServerHandler,
     handler::server::wrapper::Parameters,
-    model::{Implementation, ServerCapabilities, ServerInfo},
+    model::{Implementation, ServerCapabilities, ServerConfig},
     schemars, serde, tool, tool_handler, tool_router,
 };
 
@@ -245,8 +245,8 @@ impl RqmdServer {
 
 #[tool_handler]
 impl ServerHandler for RqmdServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("rqmd", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "RQMD knowledge base search. \

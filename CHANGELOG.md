@@ -4,6 +4,16 @@
 
 ---
 
+## [0.17.0] - 2026-09-26
+
+### Changed
+- `rqmd-mcp`'s `rmcp` dependency bumped `2.2.0` -> `3.4.1`, adding support for the `2026-07-28`
+  MCP protocol revision (stateless `server/discover`, standard HTTP headers) alongside the
+  existing legacy session-based clients, which negotiate and behave unchanged. Only code change
+  needed: `rmcp::model::ServerInfo` (deprecated in rmcp 3.4.0) -> `ServerConfig`.
+
+---
+
 ## [0.16.5] - 2026-09-25
 
 ### Fixed
