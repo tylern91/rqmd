@@ -227,6 +227,23 @@ across builds.
 debugger session, override it for that build only:
 `CARGO_PROFILE_DEV_DEBUG=true cargo build`.
 
+## Optional: RTK (condensed AI-agent command output)
+
+If you drive this repo through an AI coding agent (Claude Code, Codex CLI,
+etc.), you may notice `AGENTS.md`, `CLAUDE.md`, `RTK.md`, `.rtk/filters.toml`,
+and `.codex/hooks.json` in the repo root. These belong to
+[RTK](https://github.com/rtk-ai/rtk), a CLI proxy some contributors use to
+condense noisy command output before it reaches the agent's context. None of
+it does anything without the `rtk` binary installed and its agent hook
+configured — without that, `AGENTS.md`/`CLAUDE.md` just point at an inert
+`RTK.md`, and `.rtk/filters.toml` sits unused. Nothing here affects `cargo
+build`/`test`/`clippy` or CI.
+
+`.rtk/filters.toml` ships one project filter (`rqmd-status`, compacting
+`rqmd status`'s per-collection detail). RTK does not apply a project filter
+until you explicitly trust it — run `rtk trust` once (and again after editing
+the filter) to review and enable it.
+
 ## Don't touch — looks usable, isn't
 
 A few things in the repo look like working tooling but currently aren't safe
