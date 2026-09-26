@@ -1,0 +1,72 @@
+# Project-local RTK filters — commit this file with your repo.
+# Filters here override user-global and built-in filters.
+# Docs: https://github.com/rtk-ai/rtk#custom-filters
+schema_version = 1
+
+# `rqmd status` prints a per-collection Pattern/Contexts/description block for
+# every registered collection (14 collections in this workspace ~= 200 lines),
+# plus a static Examples/Models section. None of that changes call to call —
+# only the counts, timestamps, and any Pending/warning lines do. Strip the
+# static lines, keep everything that carries signal.
+[filters.rqmd-status]
+description = "Compact `rqmd status`: drop static per-collection Pattern/Contexts/description and the Examples/model-file lines; keep counts, timestamps, and any pending/warning lines"
+match_command = "^rqmd\\s+status\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s+Pattern:\\s",              # per-collection glob pattern (static)
+  "^\\s+Contexts:\\s",             # per-collection context count (static)
+  "^\\s{6}/\\S*:\\s",              # per-collection context description (static)
+  "^Examples$",                    # Examples section header
+  "^\\s+#\\s",                     # Examples comment lines
+  "^\\s+rqmd (ls|get|search)\\s",  # Examples command lines
+  "^\\s+└",                        # model GGUF filename sub-bullets
+]
+
+[[tests.rqmd-status]]
+name = "collection block keeps name and Files, drops Pattern/Contexts/description"
+input = """
+Collections
+  local-memory (rqmd://local-memory/)
+    Pattern:  */memory/**/*.md
+    Files:    1314 (updated 30m ago)
+    Contexts: 1
+      /: Claude Code per-project memory and session notes under ~/...
+  vault (rqmd://vault/)
+    Pattern:  **/*.md
+    Files:    64894 (updated 18m ago)
+    Contexts: 1
+      /: Obsidian "Tyler's Second Brain" vault: personal and work...
+"""
+expected = "Collections\n  local-memory (rqmd://local-memory/)\n    Files:    1314 (updated 30m ago)\n  vault (rqmd://vault/)\n    Files:    64894 (updated 18m ago)"
+
+[[tests.rqmd-status]]
+name = "Examples and model-file sub-bullets dropped, Models header and Tips kept"
+input = """
+Examples
+  # List files in a collection
+  rqmd ls local-memory
+  # Get a document
+  rqmd get rqmd://local-memory/path/to/file.md
+  # Search within a collection
+  rqmd search "query" -c local-memory
+
+Models
+  Embedding:   https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF
+               └── embeddinggemma-300M-Q8_0.gguf
+
+Tips
+  Add update commands to keep collections fresh: local-memory, vault
+    rqmd collection update-cmd <name> 'git pull --rebase --ff-only'
+"""
+expected = "\nModels\n  Embedding:   https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF\n\nTips\n  Add update commands to keep collections fresh: local-memory, vault\n    rqmd collection update-cmd <name> 'git pull --rebase --ff-only'"
+
+[[tests.rqmd-status]]
+name = "Pending and Updated lines under Documents survive"
+input = """
+Documents
+  Total:    108838 files indexed
+  Vectors:  307026 embedded
+  Pending:  3 need embedding (run 'rqmd embed')
+  Updated:  18m ago
+"""
+expected = "Documents\n  Total:    108838 files indexed\n  Vectors:  307026 embedded\n  Pending:  3 need embedding (run 'rqmd embed')\n  Updated:  18m ago"
