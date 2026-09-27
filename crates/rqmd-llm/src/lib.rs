@@ -8,7 +8,7 @@
 //!   RQMD_INFERENCE_BACKEND=llama|ort   (default: llama)
 //!   RQMD_ORT_EP=auto|coreml|cuda|directml|cpu
 //!
-//! All API shapes validated against llama-cpp-2 v0.1.150 in spike-inference.
+//! All API shapes validated against llama-cpp-2 v0.1.154 in spike-inference.
 //! Critical gotchas (all confirmed by spike):
 //! - Qwen3-Reranker is a causal decoder model → ctx.decode(), NOT ctx.encode()
 //! - Reranker needs a fresh LlamaContext per (query, doc) pair (KV cache positions)
@@ -877,7 +877,7 @@ fn build_prompt_batch(tokens: &[LlamaToken], n_prompt: usize) -> Result<LlamaBat
 }
 
 /// Free-form sampler chain for HyDE expansion generation — no GBNF grammar.
-/// GBNF grammar sampling is not viable on llama-cpp-2 v0.1.150: the
+/// GBNF grammar sampling is not viable on llama-cpp-2 v0.1.154: the
 /// llama.cpp grammar engine aborts with GGML_ASSERT(!stacks.empty()) when
 /// a multi-byte token drives the grammar into a dead state, and that assert
 /// is uncatchable across Rust FFI.  The output parser (parse_and_run_expansion)
@@ -935,6 +935,12 @@ impl InferenceBackend for LlamaCppBackend {
         batch.add_sequence(&tokens, 0, true)?;
         ctx.encode(&mut batch).context("encode")?;
         let emb = ctx.embeddings_seq_ith(0).context("embedding extract")?;
+        anyhow::ensure!(
+            emb.len() == EMBED_DIM,
+            "embed model {} returned {}-dim vectors; index expects {EMBED_DIM}",
+            self.embed_model_name,
+            emb.len()
+        );
         Ok(l2_normalize(emb.to_vec()))
     }
 

@@ -38,6 +38,8 @@ pub enum OrtEp {
 }
 
 impl OrtEp {
+    // Returns Option, not Result, so this can't implement std::str::FromStr as-is.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "auto" => Some(Self::Auto),
