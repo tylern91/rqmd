@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Fixed
+- `rqmd vsearch` and `rqmd similar` no longer load a full document body for every raw vector
+  hit while widening their candidate pool — only for the final result set. On a scoped
+  `vsearch` over a small collection, the previous behavior could read nearly the whole index's
+  document bodies into memory on each widening pass.
+- A vector search scoped to one collection now correctly finds that collection's own copy of
+  content shared with another collection (`content_vectors` is keyed by content hash, so two
+  documents in different collections with identical content share one vid). Previously,
+  resolving that vid picked an arbitrary one of the two documents with no collection
+  constraint, and the scoped search discarded a mismatch instead of finding its own copy —
+  silently losing a genuine in-scope match.
+- Query expansion (`rqmd query`'s `lex:`/`vec:`/`hyde:` generation step) now skips a line that
+  exactly repeats an earlier line of the same kind, or repeats the original query outright.
+  Previously a repeated line re-ran the same FTS/vector search for zero new candidates each
+  time.
+
 ---
 
 ## [0.17.1] - 2026-09-27
