@@ -1,9 +1,9 @@
 [workspace]
 members = ["crates/*"]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
-version = "0.17.0"
+version = "0.17.1"
 rust-version = "1.88"
 
 [workspace.lints.clippy]

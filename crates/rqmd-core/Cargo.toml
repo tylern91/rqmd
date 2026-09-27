@@ -29,15 +29,15 @@ anyhow = "1"
 rqmd-llm = { path = "../rqmd-llm" }
 tracing = "0.1"
 regex = "1"
-rusqlite = { version = "0.33", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = { version = "0.10", features = ["std"] }
+sha2 = "0.11"
 hex = "0.4"
 tantivy = "0.26"
 usearch = "2.25"
 globset = "0.4"
-tree-sitter = { version = "0.25", optional = true }
+tree-sitter = { version = "0.26", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
 tree-sitter-javascript = { version = "0.25", optional = true }
 tree-sitter-java = { version = "0.23", optional = true }
