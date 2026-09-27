@@ -586,7 +586,7 @@ pub fn run_cleanup(index_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
+pub fn run_update(index_dir: &Path, collection: Option<&str>, hooks_allowed: bool) -> Result<()> {
     // Shares IndexLock with run_embed: an `update` mutating `documents` rows
     // mid-way through a concurrent `embed`'s snapshot is a separate hazard
     // from the vid race, but the two commands never need to run at once.
@@ -641,7 +641,7 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
             col.pattern
         );
 
-        if !update_one_collection(&mut s, col, is_tty)? {
+        if !update_one_collection(&mut s, col, is_tty, hooks_allowed)? {
             all_collections_clean = false;
         }
     }
@@ -681,7 +681,17 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>) -> Result<()> {
 /// path are preserved bit-for-bit. Returns `false` if any part of the
 /// collection was skipped or any file failed to index — the caller uses this
 /// to decide whether the run is clean enough to certify the raw-split backfill.
-fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: bool) -> Result<bool> {
+///
+/// `hooks_allowed` gates `col.update_command`: a project-local `.rqmd/` index
+/// (picked up implicitly from the current directory) can belong to a repo the
+/// current user does not control, so its hook command is skipped unless the
+/// caller opted in — see `store::hooks_allowed`.
+fn update_one_collection(
+    s: &mut rqmd_core::Store,
+    col: &Collection,
+    is_tty: bool,
+    hooks_allowed: bool,
+) -> Result<bool> {
     let dir = Path::new(&col.path);
     if !dir.exists() {
         eprintln!("  WARN: directory not found: {}", dir.display());
@@ -693,20 +703,26 @@ fn update_one_collection(s: &mut rqmd_core::Store, col: &Collection, is_tty: boo
     if let Some(cmd) = col.update_command.as_deref()
         && !cmd.trim().is_empty()
     {
-        println!("  \x1b[2m$ {cmd}\x1b[0m");
-        match std::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(dir)
-            .status()
-        {
-            Ok(status) if !status.success() => {
-                eprintln!("  WARN: update hook exited with {status}");
+        if !hooks_allowed {
+            eprintln!(
+                "  WARN: skipping update hook (project-local index; pass --run-hooks to allow it): {cmd}"
+            );
+        } else {
+            println!("  \x1b[2m$ {cmd}\x1b[0m");
+            match std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(dir)
+                .status()
+            {
+                Ok(status) if !status.success() => {
+                    eprintln!("  WARN: update hook exited with {status}");
+                }
+                Err(e) => {
+                    eprintln!("  WARN: update hook failed to run: {e}");
+                }
+                _ => {}
             }
-            Err(e) => {
-                eprintln!("  WARN: update hook failed to run: {e}");
-            }
-            _ => {}
         }
     }
 
@@ -1078,8 +1094,8 @@ mod tests {
         db::upsert_collection(&s.db, &coll_col).unwrap();
 
         // Initial walk indexes both collections' files as active documents.
-        update_one_collection(&mut s, &keep_col, false).unwrap();
-        update_one_collection(&mut s, &coll_col, false).unwrap();
+        update_one_collection(&mut s, &keep_col, false, true).unwrap();
+        update_one_collection(&mut s, &coll_col, false, true).unwrap();
 
         let shared_hash =
             db::hashes_for_paths(&s.db, "keep", &["shared.md".to_string()]).unwrap()[0].clone();
@@ -1102,7 +1118,7 @@ mod tests {
         // and "keep" still references shared_hash, so only unique_hash
         // should be reclaimed.
         std::fs::remove_file(coll_src.path().join("unique.md")).unwrap();
-        update_one_collection(&mut s, &coll_col, false).unwrap();
+        update_one_collection(&mut s, &coll_col, false, true).unwrap();
         s.reclaim_orphaned_vectors().unwrap();
 
         assert!(

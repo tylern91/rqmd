@@ -6,26 +6,54 @@ use std::path::{Path, PathBuf};
 
 use crate::format::Format;
 
-/// Resolve the index directory:
+/// Where the resolved index directory came from — determines whether a
+/// collection's `update_command` hook is trusted to run without `--run-hooks`.
+/// `ProjectLocal` is the risky case: `rqmd update` picks up `.rqmd/` from the
+/// current directory implicitly, so running it inside a freshly cloned repo
+/// would otherwise execute a shell command that repo's author chose, not the
+/// current user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexSource {
+    /// `--index-dir` flag / `RQMD_INDEX_DIR` env — named explicitly by the caller.
+    Explicit,
+    /// `.rqmd/` picked up implicitly from the current directory.
+    ProjectLocal,
+    /// `~/.cache/rqmd/` (or platform equivalent) — the caller's own global index.
+    Global,
+}
+
+/// Resolve the index directory and where it came from:
 ///   1. `--index-dir` flag / `RQMD_INDEX_DIR` env
 ///   2. `.rqmd/` in the current directory (project-local)
 ///   3. `~/.cache/rqmd/` (global default)
-pub fn resolve_index_dir(override_path: Option<&str>) -> Result<PathBuf> {
+pub fn resolve_index_dir(override_path: Option<&str>) -> Result<(PathBuf, IndexSource)> {
     if let Some(p) = override_path {
-        return Ok(PathBuf::from(p));
+        return Ok((PathBuf::from(p), IndexSource::Explicit));
     }
 
     // Project-local .rqmd/ takes precedence over global
     let local = PathBuf::from(".rqmd");
     if local.join("index.sqlite").exists() {
-        return Ok(local);
+        return Ok((local, IndexSource::ProjectLocal));
     }
 
     // Global default
     let home = dirs::cache_dir()
         .or_else(dirs::home_dir)
         .context("cannot determine home directory")?;
-    Ok(home.join("rqmd"))
+    Ok((home.join("rqmd"), IndexSource::Global))
+}
+
+/// Whether a collection's `update_command` hook may run automatically for an
+/// index resolved from `source`. Explicit and global indexes are ones the
+/// current user chose to point rqmd at, so their hooks are trusted by
+/// default. A project-local `.rqmd/` can belong to a repo someone else
+/// authored — its hooks only run when the caller opts in with `--run-hooks`.
+pub fn hooks_allowed(source: IndexSource, run_hooks_flag: bool) -> bool {
+    match source {
+        IndexSource::Explicit | IndexSource::Global => true,
+        IndexSource::ProjectLocal => run_hooks_flag,
+    }
 }
 
 /// `read_only` opens the HNSW index as a memory-mapped view instead of
@@ -184,8 +212,21 @@ mod tests {
         // The override branch must return immediately — it must never touch
         // the current directory or the environment, both of which are
         // process-global state shared with every other test in the binary.
-        let resolved = resolve_index_dir(Some("/tmp/some/explicit/dir")).unwrap();
+        let (resolved, source) = resolve_index_dir(Some("/tmp/some/explicit/dir")).unwrap();
         assert_eq!(resolved, PathBuf::from("/tmp/some/explicit/dir"));
+        assert_eq!(source, IndexSource::Explicit);
+    }
+
+    #[test]
+    fn hooks_allowed_trusts_explicit_and_global_without_the_flag() {
+        assert!(hooks_allowed(IndexSource::Explicit, false));
+        assert!(hooks_allowed(IndexSource::Global, false));
+    }
+
+    #[test]
+    fn hooks_allowed_requires_the_flag_for_project_local() {
+        assert!(!hooks_allowed(IndexSource::ProjectLocal, false));
+        assert!(hooks_allowed(IndexSource::ProjectLocal, true));
     }
 
     #[test]

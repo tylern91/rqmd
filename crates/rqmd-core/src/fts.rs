@@ -322,9 +322,17 @@ impl FtsIndex {
         const FETCH_OVERSCAN_CAP: usize = 5000;
         let scoped = collections.is_some_and(|c| !c.is_empty());
         let fetch_limit = if scoped {
+            // `Ord::clamp` panics if its min bound exceeds its max bound, which
+            // `limit` alone would do here once `limit > FETCH_OVERSCAN_CAP` — a
+            // caller-supplied `limit` (e.g. an MCP client's request) must not be
+            // able to panic this. `saturating_mul(FACTOR)` is always >= `limit`
+            // for `limit >= 1`, so `.min(FETCH_OVERSCAN_CAP.max(limit))` yields
+            // the same result as the old clamp when `limit <= CAP`, and falls
+            // back to exactly `limit` (no overscan) once `limit` alone exceeds
+            // the cap, instead of panicking.
             limit
                 .saturating_mul(FETCH_OVERSCAN_FACTOR)
-                .clamp(limit, FETCH_OVERSCAN_CAP)
+                .min(FETCH_OVERSCAN_CAP.max(limit))
         } else {
             limit
         };
@@ -642,5 +650,25 @@ mod tests {
                 .iter()
                 .all(|(path, _, _)| path.starts_with("notes/"))
         );
+    }
+
+    /// AC-2 regression (github.com/tylern91/rqmd#86): a scoped search whose
+    /// `limit` exceeds `FETCH_OVERSCAN_CAP` must not panic. Before the fix,
+    /// `.clamp(limit, FETCH_OVERSCAN_CAP)` panicked as soon as `limit` (the
+    /// clamp's min bound) exceeded the 5000 cap (its max bound) — reachable
+    /// from any MCP client that sends a large `limit` alongside a non-empty
+    /// `collections` filter.
+    #[test]
+    fn search_fts_multi_scoped_query_with_limit_above_overscan_cap_does_not_panic() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("notes/doc.md", "Title", "shared", 0)
+            .unwrap();
+        idx.commit().unwrap();
+
+        let results = idx
+            .search_fts_multi("shared", 5001, Some(&["notes".to_string()]))
+            .unwrap();
+        assert_eq!(results.len(), 1);
     }
 }

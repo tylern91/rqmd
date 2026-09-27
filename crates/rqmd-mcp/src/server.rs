@@ -21,6 +21,20 @@ use rqmd_llm::{BackendKind, create_backend, no_backend};
 /// generous but finite batch size.
 const MULTI_GET_MAX_DOCS: usize = 200;
 
+/// Hard cap on `search`/`query`'s `limit`. An MCP client fully controls this
+/// value; left unclamped, a huge `limit` on a collection-scoped search hits
+/// `rqmd_core::fts`'s overscan calculation, or on any search allocates a
+/// tantivy `TopDocs` collector sized to it — either way this is worth
+/// bounding at the boundary rather than trusting every downstream caller to
+/// do it (github.com/tylern91/rqmd#86, AC-2).
+const MAX_SEARCH_LIMIT: usize = 1000;
+
+/// Clamp a client-supplied `limit` to `1..=MAX_SEARCH_LIMIT`, defaulting to
+/// `default` when omitted.
+fn clamp_limit(limit: Option<usize>, default: usize) -> usize {
+    limit.unwrap_or(default).clamp(1, MAX_SEARCH_LIMIT)
+}
+
 // ── Server struct ─────────────────────────────────────────────────────────────
 
 /// Shared MCP server; Clone is cheap (all fields are Arc).
@@ -180,7 +194,7 @@ impl RqmdServer {
     fn query(&self, Parameters(p): Parameters<QueryInput>) -> Result<String, String> {
         let no_rerank = !p.rerank.unwrap_or(true);
         let no_expand = !p.expand.unwrap_or(true);
-        let limit = p.limit.unwrap_or(10);
+        let limit = clamp_limit(p.limit, 10);
         let cols = p.collections.as_deref();
         let intent = p.intent.as_deref();
         let mut store = self
@@ -197,7 +211,7 @@ impl RqmdServer {
         description = "BM25 keyword search. Fast, no model required. Supports \"quoted phrases\" and -negation. Use for known terms or exact phrases."
     )]
     fn search(&self, Parameters(p): Parameters<SearchInput>) -> Result<String, String> {
-        let limit = p.limit.unwrap_or(10);
+        let limit = clamp_limit(p.limit, 10);
         let cols = p.collections.as_deref();
         let store = self
             .fts()
@@ -340,7 +354,7 @@ fn get_document(
     } else {
         // Try "collection/path" split
         match lookup.split_once('/') {
-            Some((col, path)) => db::get_document_by_filepath(&store.db, col, path),
+            Some((col, path)) => db::get_active_document_by_filepath(&store.db, col, path),
             None => return Err(format!("Cannot parse path: {lookup}")),
         }
     };
@@ -472,6 +486,21 @@ mod tests {
             hash: format!("hash{id}"),
             active: true,
         }
+    }
+
+    /// AC-2 (github.com/tylern91/rqmd#86): a client-supplied `limit` far above
+    /// the cap must be clamped, not passed through — this is what stops a
+    /// large `limit` from ever reaching `rqmd_core::fts`'s overscan math.
+    #[test]
+    fn clamp_limit_caps_a_large_client_supplied_value() {
+        assert_eq!(clamp_limit(Some(5001), 10), MAX_SEARCH_LIMIT);
+        assert_eq!(clamp_limit(Some(usize::MAX), 10), MAX_SEARCH_LIMIT);
+    }
+
+    #[test]
+    fn clamp_limit_defaults_when_omitted_and_floors_zero() {
+        assert_eq!(clamp_limit(None, 10), 10);
+        assert_eq!(clamp_limit(Some(0), 10), 1);
     }
 
     #[test]

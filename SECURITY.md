@@ -43,3 +43,22 @@ text and the full list of exposed tools, and
 
 If you need authenticated or multi-tenant access to an rqmd index, that isn't
 implemented today; a proposal is welcome as an issue.
+
+## Update hook trust
+
+A collection can carry an `update_command` (set via `rqmd collection
+update-cmd`) that `rqmd update` runs through the shell before re-indexing that
+collection — e.g. `git pull` to refresh a synced directory. That command is
+read from the resolved index's `index.sqlite`, so which index gets resolved
+matters:
+
+- `--index-dir`/`RQMD_INDEX_DIR` (explicit) and the global `~/.cache/rqmd/`
+  index are ones you pointed rqmd at yourself — their hooks run by default.
+- A project-local `.rqmd/` picked up implicitly from the current directory
+  can belong to a repo someone else authored. Its `update_command` is
+  **skipped by default** (with a warning) unless you pass `rqmd update
+  --run-hooks` — otherwise, running `rqmd update` right after cloning an
+  unfamiliar repo that ships a `.rqmd/` would execute a command chosen by
+  that repo's author, not you.
+
+If you do trust the repo, `--run-hooks` opts back in for that invocation.

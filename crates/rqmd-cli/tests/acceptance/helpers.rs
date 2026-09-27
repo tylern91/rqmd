@@ -11,6 +11,15 @@ pub fn rqmd(index_dir: &Path) -> Command {
     cmd
 }
 
+/// Build an `rqmd` invocation with no `--index-dir`, run from `cwd` instead —
+/// exercises `resolve_index_dir`'s implicit project-local `.rqmd/` detection,
+/// which `rqmd()` above always bypasses.
+pub fn rqmd_in_cwd(cwd: &Path) -> Command {
+    let mut cmd = Command::cargo_bin("rqmd").expect("rqmd binary");
+    cmd.current_dir(cwd);
+    cmd
+}
+
 /// Fails the test if `out`'s stdout is empty or whitespace-only — a test
 /// cannot pass by asserting against nothing.
 pub fn refute_vacuous_output(out: &Output) {

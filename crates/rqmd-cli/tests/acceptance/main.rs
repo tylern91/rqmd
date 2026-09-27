@@ -4,3 +4,4 @@
 mod collection;
 mod helpers;
 mod index_rebuild;
+mod security;
