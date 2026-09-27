@@ -11,7 +11,8 @@
   this release (no pre-releases, no yanked versions): `rusqlite` `0.33` -> `0.40.2` (bundled
   SQLite `3.48.0` -> `3.53.2`), `sha2` `0.10` -> `0.11`, `tree-sitter` `0.25` -> `0.26.13`,
   `dirs` `5` -> `6` (rqmd-cli), `llama-cpp-2`/`llama-cpp-sys-2` `0.1.150` -> `0.1.154`, plus
-  patch/minor bumps to `clap`, `regex`, `globset`, and `usearch`. `ort` stays pinned at
+  patch/minor bumps to `tokio` (also fixes a Windows MSRV regression introduced upstream in
+  `1.53.0`), `clap`, `regex`, `globset`, and `usearch`. `ort` stays pinned at
   `=2.0.0-rc.12`: there is no stable 2.x release yet, and the next candidate (`rc.13`) trades a
   real build break (CoreML has no Linux/Windows link target) for no security or correctness
   gain over `rc.12` (no advisories against either, per OSV).
