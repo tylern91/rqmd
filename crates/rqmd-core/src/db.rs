@@ -975,10 +975,10 @@ pub fn rebuildable_vids_for_collection(conn: &Connection, collection: &str) -> R
         "SELECT vid FROM content_vectors WHERE {NOT_SHARED_WITH_OTHER_COLLECTION_PREDICATE} AND vid IS NOT NULL"
     ))?;
     let rows = stmt
-        .query_map(params![collection], |row| row.get::<_, u64>(0))?
+        .query_map(params![collection], |row| row.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()
         .context("rebuildable vids for collection")?;
-    Ok(rows)
+    Ok(rows.into_iter().map(|v| v as u64).collect())
 }
 
 const ORPHANED_VECTOR_PREDICATE: &str = "hash NOT IN (SELECT hash FROM documents WHERE active = 1)";

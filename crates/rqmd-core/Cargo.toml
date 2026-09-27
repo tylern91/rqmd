@@ -29,7 +29,7 @@ anyhow = "1"
 rqmd-llm = { path = "../rqmd-llm" }
 tracing = "0.1"
 regex = "1"
-rusqlite = { version = "0.33", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
