@@ -4,6 +4,35 @@
 
 ---
 
+## [0.17.1] - 2026-09-27
+
+### Changed
+- Dependency upgrade round, targeting only stable releases published at least 30 days before
+  this release (no pre-releases, no yanked versions): `rusqlite` `0.33` -> `0.40.2` (bundled
+  SQLite `3.48.0` -> `3.53.2`), `sha2` `0.10` -> `0.11`, `tree-sitter` `0.25` -> `0.26.13`,
+  `dirs` `5` -> `6` (rqmd-cli), `llama-cpp-2`/`llama-cpp-sys-2` `0.1.150` -> `0.1.154`, plus
+  patch/minor bumps to `clap`, `regex`, `globset`, and `usearch`. `ort` stays pinned at
+  `=2.0.0-rc.12`: there is no stable 2.x release yet, and the next candidate (`rc.13`) trades a
+  real build break (CoreML has no Linux/Windows link target) for no security or correctness
+  gain over `rc.12` (no advisories against either, per OSV).
+- Workspace resolver set to `"3"`, which keeps transitive dependencies that need a newer Rust
+  than this project's MSRV (1.88) from being pulled in by a routine `cargo update`.
+- Removed `indicatif` (rqmd-cli) and `dirs` (rqmd-mcp): unused in either crate. Dropped
+  `tokenizers`' `http` feature (rqmd-llm, `ort-backend` only): rqmd never calls
+  `Tokenizer::from_pretrained`, and dropping it removes a duplicate `hf-hub 0.4.3` and `ureq`
+  from the dependency graph.
+- **If you run `rqmd mcp` as a background daemon, stop it before installing this release**
+  (`rqmd mcp stop`), then start it again afterwards. This avoids an old SQLite 3.48 process
+  sharing a live WAL file with a new SQLite 3.53 writer during the upgrade.
+
+### Fixed
+- A collection's rebuildable-vid lookup now correctly recovers vids above `i64::MAX` instead of
+  erroring out, a side effect of the `rusqlite` upgrade (`u64`/`usize` reads moved behind a
+  feature flag rusqlite no longer enables by default; the fix reads the column as `i64` and
+  casts back, matching every other vid read/write in the file).
+
+---
+
 ## [0.17.0] - 2026-09-26
 
 ### Changed
