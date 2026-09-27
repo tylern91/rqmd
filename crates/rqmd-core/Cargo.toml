@@ -37,7 +37,7 @@ hex = "0.4"
 tantivy = "0.26"
 usearch = "2.25"
 globset = "0.4"
-tree-sitter = { version = "0.25", optional = true }
+tree-sitter = { version = "0.26", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
 tree-sitter-javascript = { version = "0.25", optional = true }
 tree-sitter-java = { version = "0.23", optional = true }

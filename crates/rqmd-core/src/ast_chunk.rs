@@ -77,8 +77,13 @@ pub(crate) fn chunk_source(text: &str, ext: &str) -> Option<Vec<Chunk>> {
 
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_micros(PARSE_TIMEOUT_MICROS);
-    let mut cancel_if_overdue =
-        |_state: &tree_sitter::ParseState| std::time::Instant::now() >= deadline;
+    let mut cancel_if_overdue = |_state: &tree_sitter::ParseState| {
+        if std::time::Instant::now() >= deadline {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    };
     let mut text_provider = |offset: usize, _point: tree_sitter::Point| -> &[u8] {
         text.as_bytes().get(offset..).unwrap_or(&[])
     };
