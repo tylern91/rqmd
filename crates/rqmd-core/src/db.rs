@@ -139,7 +139,7 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Res
 
 // ── Docid ─────────────────────────────────────────────────────────────────────
 
-/// First 6 hex chars of SHA-256(content) — matches qmd's docid format.
+/// Full SHA-256 hex digest of content — `docid_from_hash` takes the first 6 chars for the docid.
 pub fn content_hash(text: &str) -> String {
     let mut h = Sha256::new();
     h.update(text.as_bytes());
@@ -1158,6 +1158,17 @@ mod tests {
     fn insert_doc(conn: &Connection, hash: &str, path: &str) {
         upsert_content(conn, hash, "body", "2026-01-01T00:00:00Z").unwrap();
         upsert_document(conn, "col", path, "title", hash, "2026-01-01T00:00:00Z").unwrap();
+    }
+
+    /// Pins `content_hash` to the known SHA-256("abc") vector, independent of
+    /// sha2's own output — catches a hashing regression that the sha2-version
+    /// bump can't self-detect (unlike a test that compares sha2 to itself).
+    #[test]
+    fn content_hash_matches_known_sha256_abc_vector() {
+        assert_eq!(
+            content_hash("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     /// A docid containing a literal `_` must only match a hash with a literal
