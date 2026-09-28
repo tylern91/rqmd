@@ -747,6 +747,38 @@ fn search_vec_single_collection_still_scopes_correctly() {
     assert_eq!(hits[0].collection, "alpha");
 }
 
+/// qmd#933 parity (rqmd#86): `content_vectors` is keyed by content hash, so
+/// two documents in different collections with identical content share one
+/// vid. Before the fix, resolving that vid picked an arbitrary one of the
+/// two documents with no collection constraint, and a scoped search for the
+/// *other* collection discarded the mismatch instead of finding its own
+/// copy — silently losing a genuine in-scope match.
+#[test]
+fn search_vec_multi_scoped_query_finds_a_hash_shared_with_another_collection() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store_with_vectors(&dir);
+
+    let shared_body = "widgetopic identical content shared by two collections";
+    store
+        .index_document("alpha", "doc.md", "Alpha Doc", shared_body)
+        .unwrap();
+    store
+        .index_document("beta", "doc.md", "Beta Doc", shared_body)
+        .unwrap();
+    store.flush().unwrap();
+
+    let beta_only = ["beta".to_string()];
+    let hits = store
+        .search_vec_multi("widgetopic", 10, Some(&beta_only))
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected beta's own copy of the shared content, got {hits:?}"
+    );
+    assert_eq!(hits[0].collection, "beta");
+}
+
 #[test]
 fn search_vec_multi_none_resolves_to_include_by_default_collections() {
     let dir = TempDir::new().unwrap();
@@ -902,6 +934,37 @@ fn hybrid_query_multi_finds_minority_collection_despite_bulk_corpus() {
          same embedding: {hits:?}"
     );
     assert!(hits.iter().all(|h| h.collection == "target"));
+}
+
+/// qmd#933 parity (rqmd#86), hybrid-query path: `hybrid_query_multi`'s vector
+/// leg goes through `search_vec_scoped` -> `vec_hits_to_ranked`, a separate
+/// code path from `search_vec_multi` that shares the same shared-hash
+/// resolution bug — see `search_vec_multi_scoped_query_finds_a_hash_shared_
+/// with_another_collection` for the mechanism.
+#[test]
+fn hybrid_query_multi_scoped_query_finds_a_hash_shared_with_another_collection() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store_with_vectors(&dir);
+
+    let shared_body = "widgetopic identical content shared by two collections";
+    store
+        .index_document("alpha", "doc.md", "Alpha Doc", shared_body)
+        .unwrap();
+    store
+        .index_document("beta", "doc.md", "Beta Doc", shared_body)
+        .unwrap();
+    store.flush().unwrap();
+
+    let beta_only = ["beta".to_string()];
+    let hits = store
+        .hybrid_query_multi("widgetopic", None, 10, Some(&beta_only), true, true)
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected beta's own copy of the shared content, got {hits:?}"
+    );
+    assert_eq!(hits[0].collection, "beta");
 }
 
 // ── multi-get resolution hardening ────────────────────────────────────────────
