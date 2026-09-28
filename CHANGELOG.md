@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+---
+
+## [0.17.2] - 2026-09-28
+
 ### Fixed
 - `rqmd vsearch` and `rqmd similar` no longer load a full document body for every raw vector
   hit while widening their candidate pool — only for the final result set. On a scoped
