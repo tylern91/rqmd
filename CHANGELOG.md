@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+---
+
+## [0.17.3] - 2026-09-28
+
 ### Fixed
 - BM25 full-text search now normalizes text to Unicode NFC at both index time (document
   title/body) and query time. Tantivy's default tokenizer treats a combining mark as a token
