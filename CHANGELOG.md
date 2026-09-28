@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.17.4] - 2026-09-28
+
 ### Security
 - `rqmd update` no longer runs a collection's `update_command` hook when the index was picked
   up implicitly from a project-local `.rqmd/` in the current directory — that hook's command is
@@ -23,6 +25,46 @@
 ### Fixed
 - Scoped `search`'s overscan calculation no longer panics for a `limit` above the 5000
   overscan cap — it now falls back to no overscan for that request instead of crashing.
+
+---
+
+## [0.17.3] - 2026-09-28
+
+### Fixed
+- BM25 full-text search now normalizes text to Unicode NFC at both index time (document
+  title/body) and query time. Tantivy's default tokenizer treats a combining mark as a token
+  separator, so the same text encoded as NFD (decomposed, e.g. "impôt" as `o` + a combining
+  circumflex) tokenized differently from its NFC (composed, single-codepoint) form — a document
+  indexed in one form could silently miss a query in the other. `filepath` is intentionally not
+  normalized here; see the `normalize_nfc` doc comment in `fts.rs` for why.
+  **Note for existing indexes**: this only takes effect for a document the next time it's
+  newly indexed or its content changes — `rqmd update` skips the FTS write entirely for a file
+  whose hash is unchanged, so content already indexed in NFD form keeps its old, unnormalized
+  Tantivy entry until that file's content changes on disk or its collection is removed and
+  re-added. There's no dedicated "reindex FTS only" command to force this today.
+
+### Added
+- New dependency: `unicode-normalization` (rqmd-core), used only for the NFC normalization above.
+
+---
+
+## [0.17.2] - 2026-09-28
+
+### Fixed
+- `rqmd vsearch` and `rqmd similar` no longer load a full document body for every raw vector
+  hit while widening their candidate pool — only for the final result set. On a scoped
+  `vsearch` over a small collection, the previous behavior could read nearly the whole index's
+  document bodies into memory on each widening pass.
+- A vector search scoped to one collection now correctly finds that collection's own copy of
+  content shared with another collection (`content_vectors` is keyed by content hash, so two
+  documents in different collections with identical content share one vid). Previously,
+  resolving that vid picked an arbitrary one of the two documents with no collection
+  constraint, and the scoped search discarded a mismatch instead of finding its own copy —
+  silently losing a genuine in-scope match.
+- Query expansion (`rqmd query`'s `lex:`/`vec:`/`hyde:` generation step) now skips a line that
+  exactly repeats an earlier line of the same kind, or repeats the original query outright.
+  Previously a repeated line re-ran the same FTS/vector search for zero new candidates each
+  time.
 
 ---
 

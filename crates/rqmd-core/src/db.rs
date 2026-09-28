@@ -721,29 +721,13 @@ pub fn upsert_vector_meta(
     Ok(())
 }
 
-/// Look up (collection, path, title, hash, doc_body) for a vector ID.
-/// Returns None if the vid has no matching active document.
-pub fn doc_for_vid(conn: &Connection, vid: u64) -> Result<Option<(Document, String)>> {
-    conn.query_row(
-        r#"
-        SELECT d.id, d.collection, d.path, d.title, d.hash, d.active, d.raw
-        FROM content_vectors cv
-        JOIN documents d ON d.hash = cv.hash AND d.active = 1
-        WHERE cv.vid = ?1
-        LIMIT 1
-        "#,
-        params![vid as i64],
-        |row| Ok((map_document(row)?, row.get::<_, String>(6)?)),
-    )
-    .optional()
-    .context("doc_for_vid")
-}
-
 /// Look up (collection, path, title, hash) for a vector ID, without the
-/// document body. Callers that only need identity/metadata (e.g. ranking
-/// and dedup before any chunk is selected) should prefer this over
-/// `doc_for_vid` — it skips the `content` join entirely, avoiding an
-/// unused body fetch on every candidate.
+/// document body — every caller only needs document identity for ranking
+/// and per-document dedup before a chunk is ever selected, so this skips the
+/// `content` join entirely rather than fetching a body that would otherwise
+/// be discarded for every candidate that isn't in the final result set
+/// (qmd#987 parity, rqmd#86: the body-joining variant this replaced could
+/// read nearly the whole index's bodies into memory on a widening vsearch).
 pub fn doc_for_vid_meta(conn: &Connection, vid: u64) -> Result<Option<Document>> {
     conn.query_row(
         r#"
@@ -758,6 +742,47 @@ pub fn doc_for_vid_meta(conn: &Connection, vid: u64) -> Result<Option<Document>>
     )
     .optional()
     .context("doc_for_vid_meta")
+}
+
+/// Same as [`doc_for_vid_meta`], but when `collections` is non-empty the
+/// constraint is pushed into the query itself rather than applied by the
+/// caller afterward.
+///
+/// `content_vectors.hash` can be shared by documents in different
+/// collections (identical content indexed twice); `doc_for_vid_meta`'s plain
+/// `LIMIT 1` picks whichever row SQLite returns first, with no guarantee
+/// it's the in-scope one. A caller that discards a wrong-collection result
+/// (rather than trying the hash's other collection) silently drops that
+/// vid's genuine in-scope match from a collection-scoped search instead of
+/// finding it (qmd#933 parity, rqmd#86).
+pub fn doc_for_vid_meta_in(
+    conn: &Connection,
+    vid: u64,
+    collections: Option<&[String]>,
+) -> Result<Option<Document>> {
+    let cols = match collections.filter(|c| !c.is_empty()) {
+        None => return doc_for_vid_meta(conn, vid),
+        Some(cols) => cols,
+    };
+    let placeholders = vec!["?"; cols.len()].join(",");
+    let sql = format!(
+        r#"
+        SELECT d.id, d.collection, d.path, d.title, d.hash, d.active
+        FROM content_vectors cv
+        JOIN documents d ON d.hash = cv.hash AND d.active = 1
+        WHERE cv.vid = ?1 AND d.collection IN ({placeholders})
+        LIMIT 1
+        "#
+    );
+    let vid_i64 = vid as i64;
+    let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + cols.len());
+    bind.push(&vid_i64);
+    for c in cols {
+        bind.push(c);
+    }
+    conn.query_row(&sql, params_from_iter(bind), map_document)
+        .optional()
+        .context("doc_for_vid_meta_in")
 }
 
 /// Return all vids for a content hash's chunks, ordered by `seq` (chunk order).
@@ -1376,5 +1401,42 @@ mod tests {
             hash_has_any_vector(&conn, "shared_hash"),
             "a hash shared with b must survive a's scoped rebuild"
         );
+    }
+
+    /// qmd#933 parity (rqmd#86): `content_vectors` is keyed by hash, so a
+    /// vid shared by two collections' identical content must resolve to the
+    /// requested collection's own row, not to whichever row the plain
+    /// `LIMIT 1` lookup happens to return first.
+    #[test]
+    fn doc_for_vid_meta_in_resolves_to_the_requested_collection() {
+        let conn = test_conn();
+        let now = "2026-01-01T00:00:00Z";
+        upsert_content(&conn, "shared_hash", "shared body", now).unwrap();
+        upsert_document(&conn, "a", "doc.md", "title", "shared_hash", now).unwrap();
+        upsert_document(&conn, "b", "doc.md", "title", "shared_hash", now).unwrap();
+        upsert_vector_meta(&conn, "shared_hash", 0, 0, "m", "fp", 1, 7, now).unwrap();
+
+        let scoped_b = vec!["b".to_string()];
+        let doc = doc_for_vid_meta_in(&conn, 7, Some(&scoped_b))
+            .unwrap()
+            .expect("b's copy of the shared hash must resolve");
+        assert_eq!(doc.collection, "b");
+
+        let scoped_a = vec!["a".to_string()];
+        let doc = doc_for_vid_meta_in(&conn, 7, Some(&scoped_a))
+            .unwrap()
+            .expect("a's copy of the shared hash must resolve");
+        assert_eq!(doc.collection, "a");
+
+        // A collection that doesn't hold this hash at all: no row to fall back to.
+        let scoped_c = vec!["c".to_string()];
+        assert!(
+            doc_for_vid_meta_in(&conn, 7, Some(&scoped_c))
+                .unwrap()
+                .is_none()
+        );
+
+        // Unscoped (None) is unaffected — same as doc_for_vid_meta's plain LIMIT 1.
+        assert!(doc_for_vid_meta_in(&conn, 7, None).unwrap().is_some());
     }
 }

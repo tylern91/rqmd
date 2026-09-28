@@ -34,6 +34,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 hex = "0.4"
+unicode-normalization = "0.1.25"
 tantivy = "0.26"
 usearch = "2.25"
 globset = "0.4"

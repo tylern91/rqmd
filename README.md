@@ -161,7 +161,9 @@ TypeScript hybrid-search CLI by [@tobi](https://github.com/tobi). The search
 pipeline design, RRF fusion formula, BM25 field weights, chunking parameters, docid
 scheme, and MCP tool surface are all derived from that project. See
 [BENCHMARK.md](BENCHMARK.md) for the de-risking spike results that validated the
-Rust technology choices.
+Rust technology choices, and
+[docs/research/2026-09-27-upstream-qmd-adoption.md](docs/research/2026-09-27-upstream-qmd-adoption.md)
+for the most recent upstream-parity and security assessment.
 
 **Coming from qmd?** The quickest path:
 

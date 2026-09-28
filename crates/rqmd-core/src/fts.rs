@@ -14,6 +14,30 @@ use tantivy::{
     query::{BooleanQuery, ConstScoreQuery, PhraseQuery, Query, QueryParser, TermQuery},
     schema::{FAST, Field, IndexRecordOption, STORED, Schema, SchemaBuilder, TEXT, Value},
 };
+use unicode_normalization::UnicodeNormalization;
+
+/// Normalize to Unicode NFC (canonical composition). Tantivy's default
+/// tokenizer treats a combining mark as a token separator, so the same text
+/// encoded as NFD (e.g. "impôt" as 'o' + U+0302 rather than the single
+/// codepoint U+00F4) tokenizes differently and can fail to match text
+/// encoded the other way — a document indexed in one form and queried in the
+/// other otherwise misses (qmd#966 parity, rqmd#86). Applying this
+/// consistently at both index time (`add_document`'s title/body) and query
+/// time (`search_fts_multi`) means every stored and queried term goes
+/// through tokenization in one canonical form. This does not touch the
+/// `filepath` field — normalizing on-disk paths raises its own questions
+/// (e.g. macOS's HFS+/APFS historically returning NFD from directory
+/// listings) that are out of scope here.
+///
+/// Only applies going forward: `Store::index_document_fts_only_with_raw`
+/// skips the `add_document` call entirely when a file's content hash is
+/// unchanged, so a document already indexed in NFD form before this existed
+/// keeps its old, unnormalized Tantivy entry until its content changes on
+/// disk or its collection is removed and re-added — there's no dedicated
+/// "reindex FTS only" command to force it otherwise.
+fn normalize_nfc(s: &str) -> String {
+    s.nfc().collect()
+}
 
 /// How long `writer_mut` waits for another process's `IndexWriter` to release
 /// the Tantivy lock before giving up. `0` disables waiting (fail immediately,
@@ -162,6 +186,8 @@ impl FtsIndex {
             self.schema.body,
             self.schema.doc_id,
         );
+        let title = normalize_nfc(title);
+        let body = normalize_nfc(body);
         self.delete_by_filepath(filepath)?;
         let w = self.writer_mut()?;
         w.add_document(doc!(
@@ -276,12 +302,17 @@ impl FtsIndex {
 
         let searcher = self.reader.searcher();
 
+        // Same NFC normalization `add_document` applies to title/body — a
+        // query must go through tokenization in the same canonical form as
+        // whatever's indexed, or the two can silently miss each other.
+        let query_text = normalize_nfc(query_text);
+
         // `parse_query` fails hard on a fragment tantivy reads as a field specifier
         // (e.g. "error: connection refused" — the colon looks like `field:value`).
         // `parse_query_lenient` degrades that fragment to a best-effort clause
         // instead of returning zero results with no explanation; surface each
         // degradation as a warning so it's diagnosable.
-        let (mut query, parse_errors) = self.query_parser.parse_query_lenient(query_text);
+        let (mut query, parse_errors) = self.query_parser.parse_query_lenient(&query_text);
         for err in &parse_errors {
             tracing::warn!("fts query {query_text:?} parsed leniently: {err}");
         }
@@ -670,5 +701,39 @@ mod tests {
             .search_fts_multi("shared", 5001, Some(&["notes".to_string()]))
             .unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    /// qmd#966 parity (rqmd#86): "impôt" NFC is a single U+00F4 codepoint;
+    /// NFD is 'o' + U+0302 (combining circumflex). Tantivy's default
+    /// tokenizer treats a combining mark as a separator, so an unnormalized
+    /// NFD query tokenizes to "impo"+"t" instead of one "impôt" token and
+    /// misses an NFC-indexed document — confirmed to fail before
+    /// `normalize_nfc` was applied at both index and query time. Covers both
+    /// directions: whichever form is indexed, a query in the other form must
+    /// still match, since both go through the same NFC normalization.
+    #[test]
+    fn nfd_and_nfc_forms_of_the_same_text_match_each_other() {
+        let nfc = "impôt"; // U+0069 U+006D U+0070 U+00F4 U+0074
+        let nfd = "impo\u{0302}t"; // U+0069 U+006D U+0070 U+006F U+0302 U+0074
+        assert_ne!(
+            nfc.chars().count(),
+            nfd.chars().count(),
+            "sanity: the two encodings must actually differ"
+        );
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("notes/nfc.md", "Title", nfc, 1).unwrap();
+        idx.add_document("notes/nfd.md", "Title", nfd, 2).unwrap();
+        idx.commit().unwrap();
+
+        for (query, label) in [(nfd, "NFD query"), (nfc, "NFC query")] {
+            let hits = idx.search_fts(query, 10, None).unwrap();
+            assert_eq!(
+                hits.len(),
+                2,
+                "{label} {query:?} must match both the NFC- and NFD-indexed document"
+            );
+        }
     }
 }
