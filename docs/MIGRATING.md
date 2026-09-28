@@ -10,9 +10,11 @@
 | Startup | ~300 ms (JIT) | ~5 ms |
 | Search pipeline | BM25 + vector + RRF + rerank | Same pipeline, same parameters |
 | MCP server identity | `qmd` | `rqmd` |
-| Chunking | tree-sitter AST-aware | Regex heuristic (headings, code fences, lists) |
+| Chunking | tree-sitter AST-aware | Markdown break-point scoring (prose) + tree-sitter AST chunking (source code, default `ast-chunking` feature) |
 | Index location | `~/.cache/qmd/` | `~/.cache/rqmd/` (Linux) / `~/Library/Caches/rqmd/` (macOS) |
 | File exclusion | `.gitignore` aware | Built-in exclusions + per-collection `ignore` list |
+| Update hooks | n/a | A project-local `.rqmd/` index only runs its `update_command` hook with `rqmd update --run-hooks` — an explicit `--index-dir`/global index runs it automatically. See [SECURITY.md](../SECURITY.md#update-hook-trust). |
+| MCP result limit | n/a | `search`/`query` clamp a client-supplied `limit` to 1000 rather than trusting it unbounded. |
 
 Search quality is equivalent — the RRF formula, BM25 field weights, chunk size (900 tokens / 15% overlap), and docid scheme are all ported verbatim from qmd.
 

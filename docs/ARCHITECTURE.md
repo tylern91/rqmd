@@ -58,6 +58,46 @@ parameters — the stored fingerprint no longer matches, and `rqmd doctor`
 surfaces that the existing vectors were built under a different
 configuration and may need re-embedding.
 
+### AST chunking (source code)
+
+The break-point scoring above is tuned for prose — it has no notion of a
+function or class boundary, so source files chunked that way get
+near-arbitrary cuts (there's rarely a blank line or heading near the
+3,600-character target inside code). Under the default `ast-chunking`
+feature, files with a recognized extension (`.ts`/`.tsx`, `.js`/`.jsx`/`.mjs`/`.cjs`,
+`.java`, `.py`) are parsed with `tree-sitter` instead, and chunked at
+declaration boundaries — function, method, class, interface, and similar
+top-level constructs, kept deliberately narrow per language rather than
+exhaustive. Parsing is capped at 5 seconds to guard against pathological
+input; the chunker falls back to the character-offset chunker above whenever
+the extension isn't recognized, parsing fails, or the parse yields no
+boundary nodes at all (e.g. an empty file). An oversized single function
+still gets a reasonable backward-break split via the same windowed-join
+primitive the markdown chunker uses, rather than a hard cut mid-token.
+Building without the `ast-chunking` feature falls back to the markdown
+chunker for every file, source code included.
+
+### Security boundaries
+
+Three boundaries worth knowing before pointing rqmd at content you don't
+fully trust:
+
+- **Update-hook trust.** A collection's `update_command` hook only runs
+  automatically when its index was reached via an explicit `--index-dir` /
+  `RQMD_INDEX_DIR` or the global default. A project-local `.rqmd/` picked up
+  implicitly (e.g. by running `rqmd update` inside a cloned repo) skips the
+  hook with a warning unless `rqmd update --run-hooks` is passed explicitly
+  — see [SECURITY.md](../SECURITY.md#update-hook-trust).
+- **Symlink containment.** The collection walker canonicalizes the
+  collection root once and excludes any walked entry whose resolved path
+  doesn't stay under it — a symlink pointing outside the collection (e.g. at
+  `~/.ssh`) is not indexed, even though symlinks that stay inside the root
+  are followed normally.
+- **MCP result limits.** `search` and `query` clamp a client-supplied
+  `limit` to a fixed cap (1000) rather than trusting it unbounded, so a
+  malformed or adversarial MCP client request can't force an unbounded
+  allocation or a scoped-search overscan past its safety ceiling.
+
 ---
 
 ## Design decisions

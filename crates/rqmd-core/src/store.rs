@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     chunking::{chunk_document_for_path, first_chunk},
     db::{
-        self, content_hash, doc_for_vid, doc_for_vid_meta, docid_from_hash, get_context_for_path,
-        open_db, upsert_content, upsert_document, upsert_vector_meta,
+        self, content_hash, doc_for_vid_meta, doc_for_vid_meta_in, docid_from_hash,
+        get_context_for_path, open_db, upsert_content, upsert_document, upsert_vector_meta,
     },
     fts::FtsIndex,
     hnsw::VectorIndex,
@@ -632,29 +632,32 @@ impl Store {
         // out to a fixed-size raw top-k). Double `k` until enough in-scope
         // documents are found or the whole index has been searched.
         let mut k = limit.saturating_mul(4).max(1);
-        let mut by_doc: HashMap<String, (f32, crate::types::Document, String)> = HashMap::new();
+        // `doc_for_vid_meta` gives ranking/dedup document identity without the
+        // body, which is only needed for the final `limit` survivors — fetched
+        // once, below, instead of once per raw HNSW hit on every widening pass
+        // (qmd#987 parity, rqmd#86).
+        let mut by_doc: HashMap<String, (f32, crate::types::Document)> = HashMap::new();
 
         loop {
             let raw = self.hnsw.search(&embedding, k)?;
             by_doc.clear();
             for (vid, sim) in raw {
-                let Some((doc, body)) = doc_for_vid(&self.db, vid)? else {
+                // Pushes the collection constraint into the lookup itself: a
+                // hash shared across collections must resolve to the
+                // in-scope row here, not to an arbitrary one that then gets
+                // discarded by a post-hoc filter (qmd#933 parity, rqmd#86).
+                let Some(doc) = doc_for_vid_meta_in(&self.db, vid, effective.as_deref())? else {
                     continue;
                 };
-                if let Some(cols) = &effective
-                    && !cols.iter().any(|c| c == &doc.collection)
-                {
-                    continue;
-                }
                 let filepath = format!("{}/{}", doc.collection, doc.path);
                 // Keep only the best-scoring chunk per document — a multi-chunk
                 // document must appear once in results, not once per chunk.
                 let keep = match by_doc.get(&filepath) {
-                    Some((existing_sim, _, _)) => sim > *existing_sim,
+                    Some((existing_sim, _)) => sim > *existing_sim,
                     None => true,
                 };
                 if keep {
-                    by_doc.insert(filepath, (sim, doc, body));
+                    by_doc.insert(filepath, (sim, doc));
                 }
             }
 
@@ -664,12 +667,13 @@ impl Store {
             k = (k * 2).min(total_vectors);
         }
 
-        let mut ranked: Vec<(f32, crate::types::Document, String)> = by_doc.into_values().collect();
+        let mut ranked: Vec<(f32, crate::types::Document)> = by_doc.into_values().collect();
         ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         ranked.truncate(limit);
 
         let mut results = Vec::with_capacity(ranked.len());
-        for (sim, doc, body) in ranked {
+        for (sim, doc) in ranked {
+            let body = db::get_document_raw(&self.db, doc.id)?.unwrap_or_default();
             results.push(self.result_from_doc(&doc, body, sim));
         }
         Ok(results)
@@ -712,12 +716,14 @@ impl Store {
             .max(limit + 1)
             .min(total_vectors.max(1));
 
-        let mut by_doc: HashMap<String, (f32, crate::types::Document, String)> = HashMap::new();
+        // Same rationale as `search_vec_multi`: rank by identity only
+        // (`doc_for_vid_meta`), fetch bodies once for the final survivors.
+        let mut by_doc: HashMap<String, (f32, crate::types::Document)> = HashMap::new();
         for vid in vids {
             let embedding = self.hnsw.get_vector(vid)?;
             let hits = self.hnsw.search(&embedding, k)?;
             for (hit_vid, sim) in hits {
-                let Some((doc, body)) = doc_for_vid(&self.db, hit_vid)? else {
+                let Some(doc) = doc_for_vid_meta(&self.db, hit_vid)? else {
                     continue;
                 };
                 let filepath = format!("{}/{}", doc.collection, doc.path);
@@ -725,21 +731,22 @@ impl Store {
                     continue;
                 }
                 let keep = match by_doc.get(&filepath) {
-                    Some((existing_sim, _, _)) => sim > *existing_sim,
+                    Some((existing_sim, _)) => sim > *existing_sim,
                     None => true,
                 };
                 if keep {
-                    by_doc.insert(filepath, (sim, doc, body));
+                    by_doc.insert(filepath, (sim, doc));
                 }
             }
         }
 
-        let mut ranked: Vec<(f32, crate::types::Document, String)> = by_doc.into_values().collect();
+        let mut ranked: Vec<(f32, crate::types::Document)> = by_doc.into_values().collect();
         ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         ranked.truncate(limit);
 
         let mut results = Vec::with_capacity(ranked.len());
-        for (sim, doc, body) in ranked {
+        for (sim, doc) in ranked {
+            let body = db::get_document_raw(&self.db, doc.id)?.unwrap_or_default();
             results.push(self.result_from_doc(&doc, body, sim));
         }
         Ok(results)
@@ -981,8 +988,12 @@ impl Store {
                     let prompt = build_expansion_prompt(expand_text, effective_intent);
                     match self.backend.generate(&prompt) {
                         Ok(expansion) => {
-                            let expansion_lists =
-                                self.parse_and_run_expansion(&expansion, collections, fetch_size)?;
+                            let expansion_lists = self.parse_and_run_expansion(
+                                &expansion,
+                                expand_text,
+                                collections,
+                                fetch_size,
+                            )?;
                             ranked_lists.extend(expansion_lists.0);
                             list_meta.extend(expansion_lists.1);
                         }
@@ -1213,15 +1224,12 @@ impl Store {
     ) -> Result<Vec<RankedResult>> {
         let mut results = Vec::new();
         for (vid, sim) in hits {
-            // Ranking only needs document identity, not the body — `doc_for_vid_meta`
-            // skips the `content` join that `doc_for_vid` pays for on every candidate.
-            if let Some(doc) = doc_for_vid_meta(&self.db, vid)? {
-                if let Some(cols) = collections
-                    && !cols.is_empty()
-                    && !cols.iter().any(|c| c == &doc.collection)
-                {
-                    continue;
-                }
+            // Ranking only needs document identity, not the body. The
+            // collection constraint is pushed into the lookup itself, not
+            // applied after the fact — a hash shared across collections
+            // must resolve to the in-scope row here, not to an arbitrary one
+            // that then gets discarded (qmd#933 parity, rqmd#86).
+            if let Some(doc) = doc_for_vid_meta_in(&self.db, vid, collections)? {
                 results.push(RankedResult {
                     filepath: format!("{}/{}", doc.collection, doc.path),
                     title: doc.title,
@@ -1252,20 +1260,33 @@ impl Store {
     /// `fetch_size` is the caller's already-computed candidate-pool size (see
     /// `hybrid_query_multi`) — threaded through so expansion searches scale
     /// with the requested `limit` the same way the original-query searches do.
+    ///
+    /// Two dedup rules, applied per kind (a `lex:` line never suppresses a
+    /// `vec:` line even with identical text — they search different
+    /// retrieval mechanisms): a line is dropped if its trimmed text exactly
+    /// repeats the original query (already covered by the original-query FTS
+    /// and vector legs run before expansion) or exactly repeats an earlier
+    /// line of the same kind in this same expansion output. Without this, the
+    /// generation model repeating a line — observed to cache-duplicate a HyDE
+    /// passage up to 12x for one query — re-runs the same FTS/vector search
+    /// for zero new candidates each time (qmd#952/#1000/#921 parity, rqmd#86).
     fn parse_and_run_expansion(
         &mut self,
         expansion: &str,
+        original_query: &str,
         collections: Option<&[String]>,
         fetch_size: usize,
     ) -> Result<(Vec<Vec<RankedResult>>, Vec<RankedListMeta>)> {
         let mut lists: Vec<Vec<RankedResult>> = Vec::new();
         let mut metas: Vec<RankedListMeta> = Vec::new();
+        let original_trimmed = original_query.trim();
+        let mut seen: HashSet<(&'static str, &str)> = HashSet::new();
 
         for line in expansion.lines() {
             let line = line.trim();
             if let Some(text) = line.strip_prefix("lex:") {
                 let text = text.trim();
-                if !text.is_empty() {
+                if !text.is_empty() && text != original_trimmed && seen.insert(("lex", text)) {
                     let hits = self.fts.search_fts_multi(text, fetch_size, collections)?;
                     if !hits.is_empty() {
                         lists.push(fts_hits_to_ranked(&hits));
@@ -1277,7 +1298,7 @@ impl Store {
                 }
             } else if let Some(text) = line.strip_prefix("vec:") {
                 let text = text.trim();
-                if !text.is_empty() {
+                if !text.is_empty() && text != original_trimmed && seen.insert(("vec", text)) {
                     let emb = self
                         .backend
                         .embed_query(text)
@@ -1293,7 +1314,7 @@ impl Store {
                 }
             } else if let Some(text) = line.strip_prefix("hyde:") {
                 let text = text.trim();
-                if !text.is_empty() {
+                if !text.is_empty() && text != original_trimmed && seen.insert(("hyde", text)) {
                     // Passage-side prompt — see the QueryType::Hyde comment above for why.
                     let emb = self
                         .backend
@@ -1822,5 +1843,84 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 1, "vector match must still surface a result");
+    }
+
+    /// A backend whose `generate` returns a fixed, caller-supplied expansion
+    /// string — `StubBackend::generate` panics unconditionally, so this
+    /// exists only to give `parse_and_run_expansion` a controllable output to
+    /// dedup. `embed` returns a constant vector (like `StubBackend`) so any
+    /// two texts always cosine-match, making vector search deterministic
+    /// without depending on real embedding math.
+    struct FixedExpansionBackend {
+        expansion: String,
+    }
+
+    impl rqmd_llm::InferenceBackend for FixedExpansionBackend {
+        fn embed(&mut self, _text: &str) -> Result<Vec<f32>> {
+            Ok(vec![0.1; rqmd_llm::EMBED_DIM])
+        }
+        fn rerank(&mut self, _query: &str, docs: &[&str]) -> Result<Vec<f32>> {
+            Ok(vec![0.0; docs.len()])
+        }
+        fn generate(&mut self, _prompt: &str) -> Result<String> {
+            Ok(self.expansion.clone())
+        }
+        fn embed_model_name(&self) -> &str {
+            "fixed-expansion"
+        }
+        fn rerank_model_name(&self) -> &str {
+            "fixed-expansion"
+        }
+        fn generate_model_name(&self) -> &str {
+            "fixed-expansion"
+        }
+    }
+
+    /// qmd#952/#1000/#921 parity (rqmd#86): a generation model repeating an
+    /// identical `vec:`/`lex:`/`hyde:` line in one expansion output must only
+    /// run that search once, and a line that just repeats the original query
+    /// must not run at all — both re-runs the original-query legs already
+    /// cover with zero new candidates.
+    #[test]
+    fn parse_and_run_expansion_dedups_repeated_lines_and_drops_the_original_query() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let backend = FixedExpansionBackend {
+            expansion: "lex: original query\nvec: duplicate line\nvec: duplicate line\n"
+                .to_string(),
+        };
+        let config = StoreConfig {
+            db_path: dir.path().join("test.sqlite"),
+            tantivy_dir: dir.path().join("tantivy"),
+            hnsw_path: dir.path().join("hnsw.usearch"),
+            read_only: false,
+        };
+        let mut store = Store::open(config, Box::new(backend)).unwrap();
+
+        store
+            .index_document("coll", "a.md", "Title", "some content here")
+            .unwrap();
+        store.flush().unwrap();
+
+        let (lists, metas) = store
+            .parse_and_run_expansion(
+                "lex: original query\nvec: duplicate line\nvec: duplicate line\n",
+                "original query",
+                None,
+                10,
+            )
+            .unwrap();
+
+        assert_eq!(
+            metas.len(),
+            1,
+            "expected exactly one surviving expansion list, got {metas:?}"
+        );
+        assert_eq!(metas[0].source, "expand-vec");
+        assert_eq!(lists.len(), 1);
+        assert_eq!(
+            lists[0].len(),
+            1,
+            "the deduped vec: line should still find the one indexed document"
+        );
     }
 }
