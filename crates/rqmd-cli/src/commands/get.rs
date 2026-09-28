@@ -60,7 +60,7 @@ pub fn run_get(
         let file = format!("rqmd://{}/{}", doc.collection, doc.path);
         (doc.title, body, file, doc.collection, doc.path)
     } else {
-        let doc = db::get_document_by_filepath(&s.db, &spec.collection, &spec.path)?
+        let doc = db::get_active_document_by_filepath(&s.db, &spec.collection, &spec.path)?
             .with_context(|| format!("not found: {path_arg}"))?;
         let body = db::get_document_raw(&s.db, doc.id)?.unwrap_or_default();
         let file = format!("rqmd://{}/{}", doc.collection, doc.path);

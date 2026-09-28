@@ -94,24 +94,43 @@ impl SkipCounts {
 /// (permission denied listing a directory, broken symlink) is simply skipped
 /// by `WalkDir` itself, while a *read* failure on a file that IS listed is
 /// classified per-file by [`prepare`], since those are different failure modes.
+///
+/// `follow_links(true)` lets a symlink *inside* the tree resolve to content
+/// elsewhere on disk — useful for e.g. a shared notes directory linked into
+/// several collections. Without a containment check that also lets a
+/// symlink escape the collection root entirely (`ln -s /etc/passwd leak.md`),
+/// so every candidate's fully-resolved real path is required to stay under
+/// `root`'s real path before it is indexed (github.com/tylern91/rqmd#86, AC-3).
 pub fn collect_candidates(
     root: &Path,
     include: &GlobSet,
     ignore: &GlobSet,
     allow_hidden: bool,
 ) -> Vec<PathBuf> {
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     WalkDir::new(root)
         .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
         .map(|e| e.into_path())
         .filter(|p| p.is_file())
+        .filter(|p| is_contained_in(p, &canonical_root))
         .filter(|p| !exclusions::is_excluded(p, root, ignore, allow_hidden))
         .filter(|p| {
             let rel = p.strip_prefix(root).unwrap_or(p);
             include.is_match(rel)
         })
         .collect()
+}
+
+/// True if `p`'s fully-resolved (symlink-followed) real path is under
+/// `canonical_root`. A path that fails to canonicalize (dangling symlink,
+/// permission error mid-resolution) is treated as not contained rather than
+/// indexed on a guess.
+fn is_contained_in(p: &Path, canonical_root: &Path) -> bool {
+    std::fs::canonicalize(p)
+        .map(|real| real.starts_with(canonical_root))
+        .unwrap_or(false)
 }
 
 /// Read `abs` and resolve its title + indexed/raw text pair.
@@ -519,5 +538,70 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["a.md"]);
+    }
+
+    /// AC-3 (github.com/tylern91/rqmd#86): a symlink whose real target
+    /// resolves outside the collection root must not be walked in — even
+    /// though `follow_links(true)` makes `WalkDir` list it as a regular file.
+    #[test]
+    #[cfg(unix)]
+    fn collect_candidates_excludes_a_symlink_escaping_the_root() {
+        let outside = tempdir().unwrap();
+        write(outside.path(), "secret.md", "outside the collection");
+
+        let root = tempdir().unwrap();
+        write(root.path(), "a.md", "inside the collection");
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.md"),
+            root.path().join("leak.md"),
+        )
+        .unwrap();
+
+        let include = exclusions::build_include_set("**/*.md").unwrap();
+        let ignore = exclusions::build_ignore_set(&[]);
+        let found = collect_candidates(root.path(), &include, &ignore, false);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| {
+                p.strip_prefix(root.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(names, vec!["a.md"], "leak.md must be excluded: {names:?}");
+    }
+
+    /// A symlink that stays inside the collection root (e.g. a shared file
+    /// linked from elsewhere in the same tree) must still be walked in — the
+    /// containment check is about escaping `root`, not symlinks per se.
+    #[test]
+    #[cfg(unix)]
+    fn collect_candidates_includes_a_symlink_contained_within_the_root() {
+        let root = tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("real")).unwrap();
+        write(root.path().join("real").as_path(), "target.md", "shared");
+        std::os::unix::fs::symlink(
+            root.path().join("real").join("target.md"),
+            root.path().join("linked.md"),
+        )
+        .unwrap();
+
+        let include = exclusions::build_include_set("**/*.md").unwrap();
+        let ignore = exclusions::build_ignore_set(&[]);
+        let found = collect_candidates(root.path(), &include, &ignore, false);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| {
+                p.strip_prefix(root.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            names.contains(&"linked.md".to_string()),
+            "in-tree symlink must still be indexed: {names:?}"
+        );
     }
 }

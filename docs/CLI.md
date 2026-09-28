@@ -15,7 +15,7 @@
 | `rqmd ls [collection[/path]]` | List collections or files |
 | `rqmd embed [-c collection] [--rebuild]` | Generate embeddings (`--rebuild`: clear vectors and re-embed from scratch) |
 | `rqmd embed --cleanup` | Reclaim orphaned vectors and unreferenced content — no model, no re-embed |
-| `rqmd update [-c collection]` | Re-index: reports new, updated, unchanged, and removed (soft-deleted) document counts |
+| `rqmd update [-c collection] [--run-hooks]` | Re-index: reports new, updated, unchanged, and removed (soft-deleted) document counts. `--run-hooks` runs each collection's `update_command` even when the index was picked up implicitly from a project-local `.rqmd/` — see [Update hook trust](SECURITY.md#update-hook-trust) |
 | `rqmd status` | Index health and collection summary |
 | `rqmd doctor` | Diagnose config, index, model, and device issues |
 | `rqmd bench [-n N]` | Embed throughput benchmark (default: 5 rounds) |

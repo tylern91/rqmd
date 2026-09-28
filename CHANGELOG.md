@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.17.4] - 2026-09-28
+
+### Security
+- `rqmd update` no longer runs a collection's `update_command` hook when the index was picked
+  up implicitly from a project-local `.rqmd/` in the current directory — that hook's command is
+  chosen by whoever set up the repo you're in, not necessarily you. Explicit
+  (`--index-dir`/`RQMD_INDEX_DIR`) and global (`~/.cache/rqmd/`) indexes still run hooks by
+  default; pass `rqmd update --run-hooks` to opt a project-local index's hooks back in. See
+  [SECURITY.md](SECURITY.md#update-hook-trust).
+- MCP `search`/`query`'s client-supplied `limit` is now clamped to `1..=1000`. Previously an
+  unclamped `limit` above 5000 combined with a `collections` filter panicked inside
+  `rqmd-core`'s scoped-search overscan calculation, poisoning the store mutex and leaving
+  `search`/`get`/`multi_get`/`status` broken until the daemon restarted.
+- The collection walker no longer follows a symlink whose real target resolves outside the
+  collection root — previously such a symlink was indexed (and served by MCP `get`) as if it
+  belonged to the collection.
+- `rqmd get "#"` (an empty docid) and `get`/`similar` by path now correctly reject/exclude,
+  instead of an empty docid matching an arbitrary document and a path lookup being able to
+  serve a document whose file was already deactivated (deleted on disk).
+
+### Fixed
+- Scoped `search`'s overscan calculation no longer panics for a `limit` above the 5000
+  overscan cap — it now falls back to no overscan for that request instead of crashing.
+
 ---
 
 ## [0.17.3] - 2026-09-28

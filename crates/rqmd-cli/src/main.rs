@@ -136,6 +136,11 @@ enum Commands {
     Update {
         #[arg(short = 'c', long)]
         collection: Option<String>,
+        /// Run each collection's `update_command` hook even when the index
+        /// directory was picked up implicitly from a project-local `.rqmd/`
+        /// (that hook's command comes from whoever set up that repo, not you)
+        #[arg(long)]
+        run_hooks: bool,
     },
     /// Diagnose config, index, model, and device issues
     Doctor,
@@ -313,7 +318,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let index_dir = store::resolve_index_dir(cli.index_dir.as_deref())?;
+    let (index_dir, index_source) = store::resolve_index_dir(cli.index_dir.as_deref())?;
 
     match cli.command {
         Commands::Query {
@@ -388,9 +393,14 @@ fn main() -> Result<()> {
                 commands::index::run_embed(&index_dir, collection.as_deref(), rebuild)
             }
         }
-        Commands::Update { collection } => {
-            commands::index::run_update(&index_dir, collection.as_deref())
-        }
+        Commands::Update {
+            collection,
+            run_hooks,
+        } => commands::index::run_update(
+            &index_dir,
+            collection.as_deref(),
+            store::hooks_allowed(index_source, run_hooks),
+        ),
         Commands::Doctor => commands::index::run_doctor(&index_dir),
         Commands::Bench { rounds } => commands::bench::run_bench(&index_dir, rounds),
         Commands::Eval { mode, verbose } => commands::eval::run_eval(&index_dir, &mode, verbose),

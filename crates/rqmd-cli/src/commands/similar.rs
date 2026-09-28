@@ -20,7 +20,7 @@ pub fn run_similar(index_dir: &Path, ref_arg: &str, num: usize, fmt: Format) -> 
         db::get_document_by_docid_prefix(&s.db, docid)?
             .with_context(|| format!("no document found with docid #{docid}"))?
     } else {
-        db::get_document_by_filepath(&s.db, &spec.collection, &spec.path)?
+        db::get_active_document_by_filepath(&s.db, &spec.collection, &spec.path)?
             .with_context(|| format!("not found: {ref_arg}"))?
     };
 

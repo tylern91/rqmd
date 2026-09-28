@@ -276,6 +276,21 @@ pub fn get_document_by_filepath(
     .context("get document")
 }
 
+/// Retrieval-only wrapper around [`get_document_by_filepath`] that treats a
+/// deactivated (deleted-on-disk) document as not found. Indexing code needs
+/// the unfiltered lookup to see a deactivated row and reactivate it, so that
+/// function stays as-is; only read paths that hand content back to a caller
+/// (`rqmd get`, `rqmd similar`, MCP `get`) should go through this one instead
+/// — otherwise a document removed from disk keeps being served from its
+/// stale row indefinitely (github.com/tylern91/rqmd#86, AC-4).
+pub fn get_active_document_by_filepath(
+    conn: &Connection,
+    collection: &str,
+    path: &str,
+) -> Result<Option<Document>> {
+    Ok(get_document_by_filepath(conn, collection, path)?.filter(|d| d.active))
+}
+
 pub fn get_document_by_id(conn: &Connection, id: i64) -> Result<Option<Document>> {
     conn.query_row(
         &format!("SELECT {DOC_COLUMNS} FROM documents WHERE id=?1"),
@@ -302,8 +317,14 @@ fn escape_like_pattern(s: &str) -> String {
 /// depending on SQLite's row order. `docid` is not validated as hex before
 /// reaching this function (see `PathSpec::docid_hex` in rqmd-cli), so `%`/`_`
 /// are escaped rather than trusted — otherwise a docid containing either
-/// would silently widen the prefix match into a wildcard one.
+/// would silently widen the prefix match into a wildcard one. An empty
+/// `docid` (e.g. `rqmd get "#"`) is rejected outright rather than escaped —
+/// `LIKE '%'` would otherwise match every active document and hand back an
+/// arbitrary one (github.com/tylern91/rqmd#86, AC-4).
 pub fn get_document_by_docid_prefix(conn: &Connection, docid: &str) -> Result<Option<Document>> {
+    if docid.is_empty() {
+        return Ok(None);
+    }
     let pattern = format!("{}%", escape_like_pattern(docid));
     conn.query_row(
         &format!(
@@ -1224,6 +1245,43 @@ mod tests {
             .unwrap()
             .expect("literal percent match");
         assert_eq!(found.path, "literal.md");
+    }
+
+    /// AC-4 (github.com/tylern91/rqmd#86): an empty docid must return
+    /// nothing, not an arbitrary document — pre-fix, `LIKE '%'` matched
+    /// every active row and `LIMIT 1` handed back whichever sorted first.
+    #[test]
+    fn docid_prefix_rejects_empty_docid() {
+        let conn = test_conn();
+        insert_doc(&conn, "abc123deadbeef", "some.md");
+
+        let found = get_document_by_docid_prefix(&conn, "").unwrap();
+        assert!(found.is_none(), "empty docid must not match anything");
+    }
+
+    /// AC-4 (github.com/tylern91/rqmd#86): the retrieval-only lookup must not
+    /// serve a document whose file was deleted on disk (`active = 0`) — the
+    /// unfiltered `get_document_by_filepath` it wraps still needs to see that
+    /// row so indexing can reactivate it, but a read path should not.
+    #[test]
+    fn get_active_document_by_filepath_excludes_deactivated_rows() {
+        let conn = test_conn();
+        insert_doc(&conn, "hash0000", "gone.md");
+        conn.execute("UPDATE documents SET active = 0 WHERE path = 'gone.md'", [])
+            .unwrap();
+
+        assert!(
+            get_document_by_filepath(&conn, "col", "gone.md")
+                .unwrap()
+                .is_some(),
+            "the unfiltered lookup must still see the deactivated row"
+        );
+        assert!(
+            get_active_document_by_filepath(&conn, "col", "gone.md")
+                .unwrap()
+                .is_none(),
+            "the retrieval-only wrapper must not serve a deactivated document"
+        );
     }
 
     #[test]
