@@ -2641,7 +2641,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-cli"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-core"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "anyhow",
  "globset",
@@ -2684,12 +2684,13 @@ dependencies = [
  "tree-sitter-javascript",
  "tree-sitter-python",
  "tree-sitter-typescript",
+ "unicode-normalization",
  "usearch",
 ]
 
 [[package]]
 name = "rqmd-llm"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -2707,7 +2708,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-mcp"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -3472,6 +3473,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
 name = "tokenizers"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3792,6 +3799,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-normalization-alignments"
