@@ -44,5 +44,8 @@ tree-sitter-javascript = { version = "0.25", optional = true }
 tree-sitter-java = { version = "0.23", optional = true }
 tree-sitter-python = { version = "0.25", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

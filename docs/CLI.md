@@ -15,6 +15,7 @@
 | `rqmd ls [collection[/path]]` | List collections or files |
 | `rqmd embed [-c collection] [--rebuild] [--timeout SECS]` | Generate embeddings (`--rebuild`: clear vectors and re-embed from scratch). A document that fails to embed is skipped and listed at the end; see [Exit codes](#exit-codes). `--timeout` stops after that many seconds with the work so far saved; see [Timeouts](#timeouts) |
 | `rqmd embed --cleanup` | Reclaim orphaned vectors and unreferenced content — no model, no re-embed |
+| `rqmd unlock [--force [--yes]]` | Remove the write lock left by a crashed or hung `embed`/`update`. Removes it only when the holder is provably dead; a live holder that has made no progress for `RQMD_LOCK_STALE_SECS` (default 600) needs `--force` and a confirmation. A holder that is alive and recently active is never removed |
 | `rqmd update [-c collection] [--run-hooks]` | Re-index: reports new, updated, unchanged, and removed (soft-deleted) document counts. `--run-hooks` runs each collection's `update_command` even when the index was picked up implicitly from a project-local `.rqmd/` — see [Update hook trust](SECURITY.md#update-hook-trust). A hook that runs longer than `RQMD_HOOK_TIMEOUT_SECS` (default 300) is killed; a failed or timed-out hook never stops the other collections, and is listed at the end |
 | `rqmd status` | Index health and collection summary |
 | `rqmd doctor` | Diagnose config, index, model, and device issues |
