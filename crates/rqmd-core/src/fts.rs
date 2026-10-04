@@ -13,8 +13,11 @@ use tantivy::{
     doc,
     query::{BooleanQuery, ConstScoreQuery, PhraseQuery, Query, QueryParser, TermQuery},
     schema::{FAST, Field, IndexRecordOption, STORED, Schema, SchemaBuilder, TEXT, Value},
+    tokenizer::{LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer},
 };
 use unicode_normalization::UnicodeNormalization;
+
+use crate::cjk_tokenizer::CjkBigramFilter;
 
 /// Normalize to Unicode NFC (canonical composition). Tantivy's default
 /// tokenizer treats a combining mark as a token separator, so the same text
@@ -50,6 +53,18 @@ fn lock_wait_budget() -> Duration {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_LOCK_WAIT_SECS);
     Duration::from_secs(secs)
+}
+
+/// Tantivy's `default` analyzer with CJK runs split into bigrams ahead of the
+/// length filter. Registered under `default` so every `TEXT` field — indexing,
+/// query parsing and `path_terms` alike — picks it up. Changing it changes
+/// what the index must contain: bump [`crate::store::FTS_TOKENIZER_VERSION`].
+fn analyzer() -> TextAnalyzer {
+    TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(CjkBigramFilter)
+        .filter(RemoveLongFilter::limit(40))
+        .filter(LowerCaser)
+        .build()
 }
 
 pub struct FtsSchema {
@@ -106,6 +121,8 @@ impl FtsIndex {
             schema.schema.clone(),
         )
         .context("open_or_create tantivy index")?;
+
+        index.tokenizers().register("default", analyzer());
 
         // Manual reload policy: we call reader.reload() explicitly in commit()
         // so searches immediately after indexing see the new documents.
@@ -186,9 +203,26 @@ impl FtsIndex {
             self.schema.body,
             self.schema.doc_id,
         );
+        self.delete_by_filepath(filepath)?;
+        self.insert_document(
+            filepath,
+            title,
+            body,
+            doc_id,
+            (f_filepath, f_title, f_body, f_doc_id),
+        )
+    }
+
+    fn insert_document(
+        &mut self,
+        filepath: &str,
+        title: &str,
+        body: &str,
+        doc_id: i64,
+        (f_filepath, f_title, f_body, f_doc_id): (Field, Field, Field, Field),
+    ) -> Result<()> {
         let title = normalize_nfc(title);
         let body = normalize_nfc(body);
-        self.delete_by_filepath(filepath)?;
         let w = self.writer_mut()?;
         w.add_document(doc!(
             f_filepath => filepath,
@@ -197,6 +231,36 @@ impl FtsIndex {
             f_doc_id => doc_id,
         ))?;
         Ok(())
+    }
+
+    /// Replace the whole index with `docs` — `(filepath, title, body, doc_id)` —
+    /// committing once at the end. If `docs` fails partway the staged deletion
+    /// and additions are rolled back, so the previous contents stay searchable.
+    pub fn rebuild(
+        &mut self,
+        docs: impl IntoIterator<Item = Result<(String, String, String, i64)>>,
+    ) -> Result<()> {
+        let fields = (
+            self.schema.filepath,
+            self.schema.title,
+            self.schema.body,
+            self.schema.doc_id,
+        );
+        self.writer_mut()?
+            .delete_all_documents()
+            .context("delete all tantivy docs")?;
+        for doc in docs {
+            let staged = doc.and_then(|(filepath, title, body, doc_id)| {
+                self.insert_document(&filepath, &title, &body, doc_id, fields)
+            });
+            if let Err(e) = staged {
+                self.writer_mut()?
+                    .rollback()
+                    .context("roll back partial tantivy rebuild")?;
+                return Err(e);
+            }
+        }
+        self.commit()
     }
 
     /// Delete every previously-indexed document under this exact `filepath`.
@@ -467,6 +531,98 @@ impl FtsIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A substring of an unsegmented CJK run must match; the default
+    /// tokenizer indexes the run as one token (dropped past 40 bytes).
+    #[test]
+    fn a_substring_of_an_unsegmented_cjk_run_matches() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("notes/jp.md", "Title", "私は昨日東京都庁を訪れました", 1)
+            .unwrap();
+        idx.commit().unwrap();
+
+        assert_eq!(idx.search_fts("東京都", 10, None).unwrap().len(), 1);
+        assert_eq!(idx.search_fts("都庁を", 10, None).unwrap().len(), 1);
+        assert_eq!(
+            idx.search_fts("私は昨日東京都庁を訪れました", 10, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(idx.search_fts("大阪府", 10, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cjk_bigrams_do_not_match_across_a_gap() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("a.md", "T", "東京と大阪", 1).unwrap();
+        idx.commit().unwrap();
+
+        // 東大 is not an adjacent pair in the source; 京と is.
+        assert!(idx.search_fts("東大", 10, None).unwrap().is_empty());
+        assert_eq!(idx.search_fts("京と", 10, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn phrase_positions_stay_consistent_around_a_cjk_run() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("a.md", "T", "abc 東京都庁 def", 1)
+            .unwrap();
+        idx.commit().unwrap();
+
+        assert_eq!(
+            idx.search_fts("\"abc 東京都庁 def\"", 10, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(idx.search_fts("\"abc def\"", 10, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn replacing_and_deleting_a_document_with_a_cjk_path_works() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("notes/東京都庁.md", "T", "first body", 1)
+            .unwrap();
+        idx.commit().unwrap();
+        idx.add_document("notes/東京都庁.md", "T", "second body", 1)
+            .unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.reader.searcher().num_docs(), 1);
+
+        idx.delete_by_filepath("notes/東京都庁.md").unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.reader.searcher().num_docs(), 0);
+    }
+
+    #[test]
+    fn a_failed_rebuild_leaves_the_previous_index_searchable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("keep.md", "T", "keepmeterm", 1).unwrap();
+        idx.commit().unwrap();
+
+        let err = idx
+            .rebuild(vec![
+                Ok((
+                    "new.md".to_string(),
+                    "T".to_string(),
+                    "newterm".to_string(),
+                    2,
+                )),
+                Err(anyhow::anyhow!("row unreadable")),
+            ])
+            .unwrap_err();
+        assert!(err.to_string().contains("row unreadable"));
+        idx.commit().unwrap();
+
+        assert_eq!(idx.search_fts("keepmeterm", 10, None).unwrap().len(), 1);
+        assert!(idx.search_fts("newterm", 10, None).unwrap().is_empty());
+    }
 
     /// Re-indexing the same filepath must not leave the previous body's
     /// terms searchable, and must not leave a ghost document behind — the

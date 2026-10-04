@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-04
+
+### Fixed
+- Japanese, Chinese and Korean text is now searchable by substring. The full-text analyzer
+  treated an unspaced run of Han/kana/Hangul as one word: matchable only as a whole, and dropped
+  entirely past 40 bytes, so `rqmd search 東京都` found nothing in a document containing
+  `私は昨日東京都庁を訪れました`. CJK runs are now split into overlapping bigrams at index and
+  query time. Latin-script tokenization, the field weights and the NFC normalization are
+  unchanged. A single-character query matches only where that character stands alone, and CJK
+  postings are larger than word-level ones.
+
+### Changed
+- **One-time full-text rebuild.** Existing indexes were built by the old tokenizer, so the next
+  full `rqmd update` (unscoped, and clean) rebuilds the Tantivy index from the stored document
+  text and prints `Rebuilt the full-text index with CJK-aware tokenization.` Until then CJK
+  queries can miss, and `rqmd search`/`query`/`doctor` warn; Latin-script search is unaffected.
+  A collection-scoped update does not rebuild, because the rebuild reads stored text that only a
+  full pass is guaranteed to have repaired. The tokenizer version lives in `store_config` under
+  `fts_tokenizer_version`; an index with no documents is never reported as pending.
+- The Tantivy index of a CJK-named file is now replaced and deleted correctly: its path is
+  tokenized by the same analyzer on both sides.
+
+---
+
 ## [0.22.0] - 2026-10-04
 
 ### Changed

@@ -188,6 +188,20 @@ pub fn warn_if_raw_backfill_pending(s: &Store) {
     }
 }
 
+/// Warn if the full-text index was built by an older tokenizer than this
+/// binary's: CJK text is indexed in a form CJK queries no longer produce, so
+/// they can miss until a full `rqmd update` rebuilds it. Latin-script search
+/// is unaffected, so this stays a one-line advisory.
+pub fn warn_if_fts_rebuild_pending(s: &Store) {
+    if s.fts_rebuild_pending().unwrap_or(false) {
+        eprintln!(
+            "\x1b[33mrqmd: warning: the full-text index predates CJK tokenization — Japanese, \
+             Chinese and Korean queries may miss until `rqmd update` (full, not \
+             --collection-scoped) rebuilds it\x1b[0m"
+        );
+    }
+}
+
 /// Collection name → root filesystem path, needed to resolve a document's
 /// real absolute path for `--format files`. Only worth a DB round-trip when
 /// the chosen format actually needs it.
