@@ -42,6 +42,37 @@
 
 ---
 
+## [0.17.5] - 2026-10-04
+
+### Fixed
+- The index write lock no longer treats a live process owned by another OS user as dead.
+  Liveness used `kill -0` and read any failure as "no such process", so two accounts sharing an
+  index (for example over a network mount) could reclaim the lock from a running
+  `rqmd embed`/`update`. It now calls `kill(pid, 0)` directly and only `ESRCH` means the
+  process is gone; `EPERM` and any unexpected errno count as alive. A pid file holding `0` or a
+  value that does not fit `pid_t` is rejected as unidentified instead of being signalled as a
+  process group.
+- Reclaiming a stale lock is now a single-winner operation. Acquire, reclaim and release run
+  inside a short `flock` critical section on `.rqmd-write.lock.guard`, so two writers can no
+  longer both observe the same stale lock, both remove it and both believe they hold it. A lock
+  directory that has no readable pid yet is treated as busy for five seconds rather than
+  stale, which closes the gap between creating the directory and writing the pid. Mixed
+  versions: a binary older than this release does not take the guard, so the guarantee holds
+  between binaries that include it.
+- A lock written on a different host is never reclaimed automatically, since its pid says
+  nothing about liveness on this machine.
+
+### Added
+- `rqmd unlock` removes the write lock left by a crashed or hung `embed`/`update` — the lock
+  error used to tell you to `rm -rf` the directory, which is unsafe if the holder is merely
+  slow. It removes a lock only when the holder is provably dead. A live holder is refused while
+  it has made progress within `RQMD_LOCK_STALE_SECS` (default 600), even with `--force`; one
+  with no progress for longer needs `--force` plus an interactive confirmation (or `--yes`).
+  `embed` and `update` now write a throttled heartbeat per document so a slow holder can be
+  told apart from a hung one.
+
+---
+
 ## [0.17.4] - 2026-09-28
 
 ### Security

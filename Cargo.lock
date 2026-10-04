@@ -2670,6 +2670,7 @@ dependencies = [
  "anyhow",
  "globset",
  "hex",
+ "libc",
  "regex",
  "rqmd-llm",
  "rusqlite",
