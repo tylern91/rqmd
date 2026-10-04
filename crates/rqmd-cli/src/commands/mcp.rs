@@ -19,8 +19,9 @@ pub fn run_mcp(
             "refusing to bind the MCP server to non-loopback host {host}: this exposes the \
              index's full-text and semantic search — including `get`, which returns arbitrary \
              indexed file content — with no authentication to anything that can reach \
-             {host}:{port}.\n\nIf this is intentional (e.g. a trusted network or container), \
-             pass --allow-non-loopback (or set RQMD_MCP_ALLOW_NON_LOOPBACK=1)."
+             {}.\n\nIf this is intentional (e.g. a trusted network or container), \
+             pass --allow-non-loopback (or set RQMD_MCP_ALLOW_NON_LOOPBACK=1).",
+            rqmd_mcp::host_port(host, port)
         );
     }
 
@@ -72,15 +73,13 @@ fn spawn_daemon(index_dir: &Path, host: &str, port: u16, allow_non_loopback: boo
     if let Some(existing) = daemon::read_pidfile(index_dir) {
         match daemon::verify_identity(&existing) {
             daemon::Identity::Confirmed(_) => bail!(
-                "rqmd MCP daemon already running (pid {}) on http://{}:{} — run `rqmd mcp stop` first",
+                "rqmd MCP daemon already running (pid {}) on http://{} — run `rqmd mcp stop` first",
                 existing.pid,
-                existing.host,
-                existing.port
+                rqmd_mcp::host_port(&existing.host, existing.port)
             ),
             daemon::Identity::Foreign(health) => bail!(
-                "{}:{} is already in use by a different process (pid {}) — pick a different --port",
-                existing.host,
-                existing.port,
+                "{} is already in use by a different process (pid {}) — pick a different --port",
+                rqmd_mcp::host_port(&existing.host, existing.port),
                 health.pid
             ),
             daemon::Identity::Stale => daemon::remove_pidfile(index_dir),
@@ -138,7 +137,10 @@ fn spawn_daemon(index_dir: &Path, host: &str, port: u16, allow_non_loopback: boo
             // The daemon writes its own pidfile once its listener is bound
             // (see run_http's `on_bound` hook) — we only read/report here,
             // so there is a single writer for the file's whole lifecycle.
-            eprintln!("rqmd MCP daemon started (pid {pid}) on http://{host}:{port}");
+            eprintln!(
+                "rqmd MCP daemon started (pid {pid}) on http://{}",
+                rqmd_mcp::host_port(host, port)
+            );
             Ok(())
         }
         Err(e) => {

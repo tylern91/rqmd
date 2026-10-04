@@ -89,10 +89,33 @@ struct DaemonHealthBody {
     index_dir: String,
 }
 
-/// Strip a trailing `:<port>` from a `Host` header value. Bracketed IPv6
-/// literals (e.g. `[::1]:8181`) aren't a case this server's `--host` handling
-/// supports today (see `run_http`'s plain `host:port` addr string), so this
-/// stays intentionally simple — matching the scope of what `--host` accepts.
+/// The host as typed on the command line, minus the brackets a user may wrap
+/// around an IPv6 literal (`[::1]` → `::1`). This is the form `bind` and
+/// `IpAddr` parsing want.
+pub fn bare_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+/// The host as it appears in a URL authority or `Host`/`Origin` header: IPv6
+/// literals are canonicalised and bracketed (`0:0:0:0:0:0:0:1` → `[::1]`),
+/// everything else is returned unchanged.
+pub fn authority_host(host: &str) -> String {
+    let bare = bare_host(host);
+    match bare.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(ip)) => format!("[{ip}]"),
+        _ => bare.to_string(),
+    }
+}
+
+/// `host:port` safe to embed in a URL, with IPv6 literals bracketed.
+pub fn host_port(host: &str, port: u16) -> String {
+    format!("{}:{port}", authority_host(host))
+}
+
+/// Strip a trailing `:<port>` from a `Host` header value; a bracketed IPv6
+/// literal (`[::1]:8181`) keeps its brackets (`[::1]`).
 fn host_only(header_value: &str) -> &str {
     match header_value.rsplit_once(':') {
         Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
@@ -189,8 +212,9 @@ pub async fn run_http(
     spawn_idle_eviction(server.clone());
 
     let mut allowed_hosts = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-    if !allowed_hosts.iter().any(|h| h == host) {
-        allowed_hosts.push(host.to_string());
+    let host_entry = authority_host(host);
+    if !allowed_hosts.contains(&host_entry) {
+        allowed_hosts.push(host_entry);
     }
 
     // Mirror the Host allowlist into `allowed_origins` — rmcp only applies
@@ -214,12 +238,12 @@ pub async fn run_http(
         config,
     );
 
-    let addr = format!("{host}:{port}");
+    let addr = host_port(host, port);
     eprintln!("RQMD MCP server listening on http://{addr}/mcp");
     eprintln!("Health endpoint:            http://{addr}/health");
 
     let router = build_router(service, allowed_hosts, pid, index_dir);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = tokio::net::TcpListener::bind((bare_host(host), port)).await?;
     on_bound()?;
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
@@ -235,6 +259,10 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_router() -> (Router, tempfile::TempDir) {
+        test_router_with_hosts(&["localhost", "127.0.0.1"])
+    }
+
+    fn test_router_with_hosts(hosts: &[&str]) -> (Router, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let index_dir = dir.path().to_path_buf();
         let server = RqmdServer::new(index_dir.clone()).unwrap();
@@ -245,7 +273,7 @@ mod tests {
         );
         let router = build_router(
             service,
-            vec!["localhost".to_string(), "127.0.0.1".to_string()],
+            hosts.iter().map(|h| h.to_string()).collect(),
             std::process::id(),
             index_dir.to_string_lossy().to_string(),
         );
@@ -407,5 +435,71 @@ mod tests {
             resp.headers().get("Mcp-Session-Id").is_none(),
             "a 2026-07-28 discover request must not create a session"
         );
+    }
+
+    #[test]
+    fn host_port_brackets_and_canonicalises_ipv6_only() {
+        assert_eq!(host_port("127.0.0.1", 8181), "127.0.0.1:8181");
+        assert_eq!(host_port("localhost", 8181), "localhost:8181");
+        assert_eq!(host_port("::1", 8181), "[::1]:8181");
+        assert_eq!(host_port("[::1]", 8181), "[::1]:8181");
+        assert_eq!(host_port("0:0:0:0:0:0:0:1", 8181), "[::1]:8181");
+        assert_eq!(host_port("2001:DB8::1", 80), "[2001:db8::1]:80");
+    }
+
+    #[test]
+    fn bare_host_strips_one_bracket_pair() {
+        assert_eq!(bare_host("[::1]"), "::1");
+        assert_eq!(bare_host("::1"), "::1");
+        assert_eq!(bare_host("[::1"), "[::1");
+    }
+
+    #[test]
+    fn host_only_keeps_ipv6_brackets() {
+        assert_eq!(host_only("[::1]:8181"), "[::1]");
+        assert_eq!(host_only("[::1]"), "[::1]");
+        assert_eq!(host_only("localhost:8181"), "localhost");
+    }
+
+    async fn status_for_host(router: Router, host: &str) -> StatusCode {
+        let req = Request::builder()
+            .uri("/health")
+            .header(HOST, host)
+            .body(Body::empty())
+            .unwrap();
+        router.oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn ipv6_loopback_host_header_is_allowed_only_when_configured() {
+        let (router, _dir) = test_router_with_hosts(&["localhost", "127.0.0.1", "[::1]"]);
+        assert_eq!(
+            status_for_host(router.clone(), "[::1]:8181").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_for_host(router.clone(), "[::2]:8181").await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_for_host(router.clone(), "evil.example:8181").await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(status_for_host(router, "::1").await, StatusCode::FORBIDDEN);
+
+        let (v4_only, _dir) = test_router();
+        assert_eq!(
+            status_for_host(v4_only, "[::1]:8181").await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn ipv6_literal_binds_through_bare_host() {
+        // Hosts without an IPv6 loopback can't exercise this; skip rather than fail.
+        let Ok(listener) = tokio::net::TcpListener::bind((bare_host("[::1]"), 0)).await else {
+            return;
+        };
+        assert!(listener.local_addr().unwrap().is_ipv6());
     }
 }

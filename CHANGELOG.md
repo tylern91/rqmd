@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.17.6] - 2026-10-04
+
+### Fixed
+- MCP `get` and `multi_get` no longer return an unbounded document body. Without `max_lines`
+  they now stop at 2000 lines, each document is capped at 256 KiB even when `max_lines` is
+  given (a single minified line defeated any line cap), and `multi_get` stops at 4 MiB for the
+  whole response, listing how many matched documents were omitted. A cut-short response ends
+  with a `[truncated: …]` note so the caller knows to page with `from_line`/`max_lines`.
+- MCP `status` no longer reports the index directory or any collection's filesystem path, which
+  typically embed the OS username. It still reports document, vector and per-collection
+  document counts; `rqmd status` on the CLI is unchanged.
+- `rqmd mcp --http --host ::1` now binds. The address was built as `::1:8181`, which is not a
+  valid socket address. IPv6 literals are accepted bare or bracketed, canonicalised, and
+  allowed as `Host: [::1]:<port>`/`Origin: http://[::1]:<port>`; the daemon's health check,
+  pidfile checks and status output bracket them too, so `--daemon --host ::1` no longer starts
+  and then reports failure.
+
+### Documentation
+- `docs/CLI.md` and `docs/MCP.md` document the accepted `--host` shapes and the `get`/`multi_get`
+  size caps.
+
+---
+
 ## [0.17.5] - 2026-10-04
 
 ### Fixed

@@ -46,6 +46,9 @@ Global flags (before the subcommand):
 -v, --verbose            Show native model-loading and inference logs (also enabled by $RUST_LOG)
 ```
 
+`rqmd mcp --host` (env `$RQMD_MCP_HOST`) accepts an IPv4 address, a hostname,
+or an IPv6 literal, bare (`::1`) or bracketed (`[::1]`).
+
 `rqmd mcp`'s `--allow-non-loopback` (env `$RQMD_MCP_ALLOW_NON_LOOPBACK`) is not
 global — it only applies to the `mcp` subcommand, alongside a non-loopback
 `--host`. See [MCP.md](MCP.md#binding-beyond-localhost) and

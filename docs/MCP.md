@@ -56,6 +56,11 @@ address for `--http`/`--daemon` mode; `--port` (default `8181`, env
 `RQMD_MCP_PORT`) controls the port. `127.0.0.1`, `localhost`, and `::1` count
 as loopback; anything else is non-loopback.
 
+`--host` takes an IPv4 address, a hostname, or an IPv6 literal. IPv6 may be
+given bare (`--host ::1`) or bracketed (`--host '[::1]'`); rqmd binds the
+address and accepts the bracketed `Host: [::1]:<port>` form in requests. Use
+`--host ::1` for IPv6 loopback — it is not served by `127.0.0.1`.
+
 Passing a non-loopback `--host` to `--http`/`--daemon` **refuses to start**
 with an error, not just a warning:
 
@@ -91,8 +96,14 @@ Exact input fields per tool, as accepted by the JSON-RPC tool call
 | | `limit` | `number`, optional | Default 10 |
 | `get` | `file` | `string` (required) | Path or `#docid` |
 | | `from_line` | `number`, optional | Start line for partial retrieval |
-| | `max_lines` | `number`, optional | Cap on lines returned |
+| | `max_lines` | `number`, optional | Cap on lines returned (default 2000) |
 | `multi_get` | `pattern` | `string` (required) | Glob pattern |
 | | `collections` | `string[]`, optional | Scope to these collections |
-| | `max_lines` | `number`, optional | Cap on lines returned per document |
-| `status` | *(none)* | | Takes no input |
+| | `max_lines` | `number`, optional | Cap on lines returned per document (default 2000) |
+| `status` | *(none)* | | Takes no input. Reports document/vector counts and per-collection document counts; it does not disclose filesystem paths |
+
+`get` and `multi_get` also cap each document body at 256 KiB, and `multi_get`
+caps the whole response at 4 MiB. A response cut short by a cap ends with a
+`[truncated: …]` note (or, for `multi_get`, an `Output budget` note naming how
+many documents were omitted); use `from_line`/`max_lines` on `get` to page
+through the rest.
