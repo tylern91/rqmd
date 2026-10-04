@@ -63,6 +63,12 @@ Qwen3-1.7B model, producing `lex`, `vec`, and `hyde` variants that are fused wit
 original query via RRF. `rqmd search` and `rqmd vsearch` do **not** expand — they run
 their respective single-mode search only.
 
+The expansion prompt asks the model to write in the query's language. As a backstop, an
+expanded line whose script family differs from the query's — Latin against Han/Kana/Hangul, in
+either direction — is dropped, so a stray Japanese `lex:` line cannot replace an English
+query's keywords. Two languages in the same script (French and English, say) cannot be told
+apart this way and are not filtered.
+
 **`rqmd query` flags:**
 
 | Flag | Default | Description |

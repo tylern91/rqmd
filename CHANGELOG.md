@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-10-04
+
+### Fixed
+- Query expansion no longer lets the model switch language. The prompt now says to write all
+  three lines in the query's language, and an expanded `lex:`/`vec:`/`hyde:` line whose script
+  family differs from the query's (Latin against Han/Kana/Hangul, either way) is dropped, so a
+  Japanese `lex:` line cannot stand in for an English query's keywords. Languages that share a
+  script are not distinguished. See [CLI.md](docs/CLI.md#query-syntax-and-expansion).
+
+---
+
 ## [0.21.0] - 2026-10-04
 
 ### Changed
