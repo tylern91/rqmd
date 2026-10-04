@@ -73,6 +73,7 @@ subsequent `rqmd update` run — you only need to specify them once.
 | `RQMD_MCP_HOST` | host/IP | `127.0.0.1` | Bind address for `rqmd mcp --http`/`--daemon` |
 | `RQMD_MCP_PORT` | port number | `8181` | Bind port for `rqmd mcp --http`/`--daemon` |
 | `RQMD_MCP_ALLOW_NON_LOOPBACK` | `1` | *(unset)* | Required alongside a non-loopback `RQMD_MCP_HOST`/`--host` — confirms you understand this exposes the index's full-text and semantic search (and `get`, which returns file content) with no authentication; see [SECURITY.md](../SECURITY.md) |
+| `RQMD_MCP_FTS_READERS` | count | `min(4, cores)` | MCP server: number of read-only store handles serving `search`/`get`/`multi_get`/`status` concurrently (`1`–`16`); each holds its own SQLite connection, Tantivy reader and mmap'd vector index |
 | `RQMD_MODEL_IDLE_TTL` | seconds | `300` | MCP daemon: unload an idle model after this many seconds of no use; `0` disables eviction |
 | `RQMD_NO_EXPAND` | `1` | *(unset)* | Equivalent to always passing `--no-expand` to `rqmd query` |
 | `RQMD_VERBOSE` | `1` | *(unset)* | Verbose ORT backend logging |

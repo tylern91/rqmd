@@ -1,7 +1,10 @@
 use anyhow::Context as _;
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError, TryLockError,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -45,26 +48,99 @@ fn clamp_limit(limit: Option<usize>, default: usize) -> usize {
     limit.unwrap_or(default).clamp(1, MAX_SEARCH_LIMIT)
 }
 
+/// Default number of read-only FTS store handles when `RQMD_MCP_FTS_READERS`
+/// is unset: enough to overlap a few concurrent clients without opening a
+/// handle per core on large machines.
+const DEFAULT_FTS_READERS: usize = 4;
+const MAX_FTS_READERS: usize = 16;
+
+fn fts_readers_from_env() -> usize {
+    std::env::var("RQMD_MCP_FTS_READERS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map_or(DEFAULT_FTS_READERS, |n| n.get().min(DEFAULT_FTS_READERS))
+        })
+        .clamp(1, MAX_FTS_READERS)
+}
+
+// ── FTS reader pool ───────────────────────────────────────────────────────────
+
+/// Several read-only FTS stores. `Store` owns a `rusqlite::Connection`, which
+/// is `Send` but not `Sync`, and `reload_if_stale` needs `&mut self`, so one
+/// shared store cannot serve concurrent readers — separate handles can.
+struct FtsPool {
+    handles: Vec<Mutex<Store>>,
+    next: AtomicUsize,
+}
+
+impl FtsPool {
+    fn open(index_dir: &Path, size: usize) -> anyhow::Result<Self> {
+        let handles = (0..size.max(1))
+            .map(|_| {
+                Ok(Mutex::new(Store::open(
+                    make_config(index_dir),
+                    no_backend(),
+                )?))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Self {
+            handles,
+            next: AtomicUsize::new(0),
+        })
+    }
+
+    /// An idle handle if there is one, otherwise wait on the next in
+    /// round-robin order. A handle poisoned by a panicking request is reused:
+    /// these stores are read-only, so the panic cannot have left shared state
+    /// half-written.
+    fn checkout(&self) -> anyhow::Result<MutexGuard<'_, Store>> {
+        for handle in &self.handles {
+            match handle.try_lock() {
+                Ok(guard) => return Self::fresh(guard),
+                Err(TryLockError::Poisoned(p)) => return Self::fresh(p.into_inner()),
+                Err(TryLockError::WouldBlock) => {}
+            }
+        }
+        let i = self.next.fetch_add(1, Ordering::Relaxed) % self.handles.len();
+        let guard = self.handles[i]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Self::fresh(guard)
+    }
+
+    /// Same staleness handling as [`RqmdServer::ml`] — see its doc comment.
+    fn fresh(mut guard: MutexGuard<'_, Store>) -> anyhow::Result<MutexGuard<'_, Store>> {
+        guard.reload_if_stale().context("reload fts store")?;
+        Ok(guard)
+    }
+}
+
 // ── Server struct ─────────────────────────────────────────────────────────────
 
 /// Shared MCP server; Clone is cheap (all fields are Arc).
 #[derive(Clone)]
 pub struct RqmdServer {
     index_dir: Arc<PathBuf>,
-    /// FTS store for search/get/status (no ML model loaded).
-    fts_store: Arc<std::sync::Mutex<Store>>,
+    /// Read-only FTS stores for search/get/status (no ML model loaded).
+    fts_pool: Arc<FtsPool>,
     /// ML store for hybrid query (lazily initialised on first `query` call).
     ml_store: Arc<once_cell::sync::OnceCell<Arc<std::sync::Mutex<Store>>>>,
 }
 
 impl RqmdServer {
     pub fn new(index_dir: PathBuf) -> anyhow::Result<Self> {
+        Self::with_fts_readers(index_dir, fts_readers_from_env())
+    }
+
+    /// Like [`Self::new`] with an explicit number of concurrent FTS readers.
+    pub fn with_fts_readers(index_dir: PathBuf, readers: usize) -> anyhow::Result<Self> {
         std::fs::create_dir_all(&index_dir)?;
-        let config = make_config(&index_dir);
-        let fts = Store::open(config, no_backend())?;
+        let fts_pool = FtsPool::open(&index_dir, readers)?;
         Ok(Self {
             index_dir: Arc::new(index_dir),
-            fts_store: Arc::new(std::sync::Mutex::new(fts)),
+            fts_pool: Arc::new(fts_pool),
             ml_store: Arc::new(once_cell::sync::OnceCell::new()),
         })
     }
@@ -101,14 +177,8 @@ impl RqmdServer {
         Ok(guard)
     }
 
-    /// Same staleness handling as [`Self::ml`] — see its doc comment.
-    fn fts(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Store>> {
-        let mut guard = self
-            .fts_store
-            .lock()
-            .map_err(|e| anyhow::anyhow!("fts store lock poisoned: {e}"))?;
-        guard.reload_if_stale().context("reload fts store")?;
-        Ok(guard)
+    fn fts(&self) -> anyhow::Result<MutexGuard<'_, Store>> {
+        self.fts_pool.checkout()
     }
 
     /// Release any GGUF model idle for at least `ttl`. Returns how many were
@@ -201,7 +271,53 @@ impl RqmdServer {
     #[tool(
         description = "Hybrid search (BM25 + vector + rerank). Best for most queries. Provide a natural-language question or keyword phrase. Set expand:false to skip LLM query-expansion for lower latency."
     )]
-    fn query(&self, Parameters(p): Parameters<QueryInput>) -> Result<String, String> {
+    async fn query(&self, Parameters(p): Parameters<QueryInput>) -> Result<String, String> {
+        let this = self.clone();
+        run_blocking(move || this.query_blocking(p)).await
+    }
+
+    /// BM25 full-text keyword search. No LLM required — instant results.
+    #[tool(
+        description = "BM25 keyword search. Fast, no model required. Supports \"quoted phrases\" and -negation. Use for known terms or exact phrases."
+    )]
+    async fn search(&self, Parameters(p): Parameters<SearchInput>) -> Result<String, String> {
+        let this = self.clone();
+        run_blocking(move || this.search_blocking(p)).await
+    }
+
+    /// Retrieve full document content by file path or docid.
+    #[tool(
+        description = "Retrieve a document by file path or docid (#abc123) from search results. Supports line range: 'file.md:100:40' reads 40 lines from line 100."
+    )]
+    async fn get(&self, Parameters(p): Parameters<GetInput>) -> Result<String, String> {
+        let this = self.clone();
+        run_blocking(move || this.get_blocking(p)).await
+    }
+
+    /// Retrieve multiple documents by glob pattern or comma-separated list.
+    #[tool(
+        description = "Retrieve multiple documents matching a glob pattern (e.g. 'journals/2025-05*.md') or a comma-separated list of paths/docids."
+    )]
+    async fn multi_get(&self, Parameters(p): Parameters<MultiGetInput>) -> Result<String, String> {
+        let this = self.clone();
+        run_blocking(move || this.multi_get_blocking(p)).await
+    }
+
+    /// Show index status: collections, document counts, and storage sizes.
+    #[tool(
+        description = "Show the RQMD index status: collections, document counts, and index health."
+    )]
+    async fn status(&self) -> Result<String, String> {
+        let this = self.clone();
+        run_blocking(move || this.status_blocking()).await
+    }
+}
+
+/// Tool bodies run on the blocking pool: they take std mutexes and call into
+/// SQLite, Tantivy and llama.cpp, any of which would otherwise pin a tokio
+/// worker — starving other requests and `/health` while a slow call waits.
+impl RqmdServer {
+    fn query_blocking(&self, p: QueryInput) -> Result<String, String> {
         let no_rerank = !p.rerank.unwrap_or(true);
         let no_expand = !p.expand.unwrap_or(true);
         let limit = clamp_limit(p.limit, 10);
@@ -216,11 +332,7 @@ impl RqmdServer {
         Ok(format_results(&results, &p.query))
     }
 
-    /// BM25 full-text keyword search. No LLM required — instant results.
-    #[tool(
-        description = "BM25 keyword search. Fast, no model required. Supports \"quoted phrases\" and -negation. Use for known terms or exact phrases."
-    )]
-    fn search(&self, Parameters(p): Parameters<SearchInput>) -> Result<String, String> {
+    fn search_blocking(&self, p: SearchInput) -> Result<String, String> {
         let limit = clamp_limit(p.limit, 10);
         let cols = p.collections.as_deref();
         let store = self
@@ -232,11 +344,7 @@ impl RqmdServer {
         Ok(format_results(&results, &p.query))
     }
 
-    /// Retrieve full document content by file path or docid.
-    #[tool(
-        description = "Retrieve a document by file path or docid (#abc123) from search results. Supports line range: 'file.md:100:40' reads 40 lines from line 100."
-    )]
-    fn get(&self, Parameters(p): Parameters<GetInput>) -> Result<String, String> {
+    fn get_blocking(&self, p: GetInput) -> Result<String, String> {
         let (lookup, from_line, max_lines) = parse_file_spec(&p.file, p.from_line, p.max_lines);
         let store = self
             .fts()
@@ -244,27 +352,28 @@ impl RqmdServer {
         get_document(&store, &lookup, from_line, max_lines)
     }
 
-    /// Retrieve multiple documents by glob pattern or comma-separated list.
-    #[tool(
-        description = "Retrieve multiple documents matching a glob pattern (e.g. 'journals/2025-05*.md') or a comma-separated list of paths/docids."
-    )]
-    fn multi_get(&self, Parameters(p): Parameters<MultiGetInput>) -> Result<String, String> {
+    fn multi_get_blocking(&self, p: MultiGetInput) -> Result<String, String> {
         let store = self
             .fts()
             .map_err(|e| format!("Error opening store: {e:#}"))?;
         multi_get_documents(&store, &p.pattern, p.collections.as_deref(), p.max_lines)
     }
 
-    /// Show index status: collections, document counts, and storage sizes.
-    #[tool(
-        description = "Show the RQMD index status: collections, document counts, and index health."
-    )]
-    fn status(&self) -> Result<String, String> {
+    fn status_blocking(&self) -> Result<String, String> {
         let store = self
             .fts()
             .map_err(|e| format!("Error opening store: {e:#}"))?;
         Ok(build_status(&store))
     }
+}
+
+async fn run_blocking<F>(f: F) -> Result<String, String>
+where
+    F: FnOnce() -> Result<String, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("Tool task failed: {e}"))?
 }
 
 #[tool_handler]
@@ -781,5 +890,106 @@ mod tests {
                 "home dir leaked: {out}"
             );
         }
+    }
+
+    fn pool_server(readers: usize) -> (tempfile::TempDir, RqmdServer) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server =
+            RqmdServer::with_fts_readers(dir.path().join("index"), readers).expect("server");
+        {
+            let mut store = server.fts().expect("fts store");
+            store
+                .index_document_fts_only("col", "doc1.md", "Doc 1", "hello world")
+                .expect("index doc");
+            store.flush().expect("commit");
+        }
+        (dir, server)
+    }
+
+    #[test]
+    fn concurrent_readers_overlap_instead_of_queueing() {
+        let (_dir, server) = pool_server(2);
+        let held = server.fts().expect("first handle");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let other = server.clone();
+        let worker = std::thread::spawn(move || {
+            let store = other.fts().expect("second handle");
+            let hits = store.search_fts_multi("hello", 5, None).expect("search");
+            tx.send(hits.len()).unwrap();
+        });
+        let hits = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("second reader must not wait for the first");
+        assert_eq!(hits, 1);
+        drop(held);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn single_reader_pool_still_serializes() {
+        let (_dir, server) = pool_server(1);
+        let held = server.fts().expect("only handle");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let other = server.clone();
+        let worker = std::thread::spawn(move || {
+            drop(other.fts().expect("handle after release"));
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "second caller got the handle while it was held"
+        );
+        drop(held);
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn poisoned_reader_is_reused_not_fatal() {
+        let (_dir, server) = pool_server(1);
+        let poisoner = server.clone();
+        let crashed = std::thread::spawn(move || {
+            let _guard = poisoner.fts().expect("handle");
+            panic!("request handler panicked");
+        })
+        .join();
+        assert!(crashed.is_err());
+
+        let store = server.fts().expect("poisoned handle must still be served");
+        assert_eq!(store.search_fts_multi("hello", 5, None).unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_tool_call_does_not_stall_the_async_runtime() {
+        let (_dir, server) = pool_server(1);
+        let held = server.fts().expect("only handle");
+
+        let caller = server.clone();
+        let pending = tokio::spawn(async move {
+            caller
+                .search(Parameters(SearchInput {
+                    query: "hello".to_string(),
+                    collections: None,
+                    limit: None,
+                }))
+                .await
+        });
+
+        // The search is parked on the busy handle. With an inline handler it
+        // would hold this single runtime thread and the timer below could
+        // never fire.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::time::sleep(Duration::from_millis(50)),
+        )
+        .await
+        .expect("runtime thread was blocked by a tool call");
+        assert!(!pending.is_finished());
+
+        drop(held);
+        let out = pending.await.unwrap().unwrap();
+        assert!(out.contains("Doc 1"), "got: {out}");
     }
 }

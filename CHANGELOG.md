@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-04
+
+### Changed
+- MCP `search`, `get`, `multi_get` and `status` no longer serialize behind one mutex. They are
+  served from a pool of read-only store handles (`RQMD_MCP_FTS_READERS`, default `min(4, cores)`,
+  range 1–16), so two clients issuing read-only calls overlap instead of adding their latencies.
+  A handle poisoned by a panicking request is reused rather than failing every later call.
+- Every MCP tool call now runs on tokio's blocking pool instead of an async worker. The handlers
+  were synchronous, so a call waiting on a store lock or a long llama.cpp inference pinned a
+  worker thread; enough of them starved the runtime, including `/health`, whose 500 ms client
+  timeout could then make the daemon look stale.
+- `query` is still one call at a time: its models need exclusive access and a copy per request
+  would multiply a multi-gigabyte footprint. It no longer delays `search`/`get`/`status`.
+  See [MCP.md](docs/MCP.md#concurrency).
+
+---
+
 ## [0.17.6] - 2026-10-04
 
 ### Fixed
