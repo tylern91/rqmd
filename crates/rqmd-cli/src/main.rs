@@ -132,6 +132,16 @@ enum Commands {
         #[arg(long, conflicts_with_all = ["rebuild", "collection"])]
         cleanup: bool,
     },
+    /// Remove the write lock left by a crashed or hung `embed`/`update`
+    Unlock {
+        /// Allow removing a lock whose holder is alive but has made no progress
+        /// for `RQMD_LOCK_STALE_SECS` (default 600)
+        #[arg(long)]
+        force: bool,
+        /// Skip the interactive confirmation for `--force`
+        #[arg(long, requires = "force")]
+        yes: bool,
+    },
     /// Re-index all collections
     Update {
         #[arg(short = 'c', long)]
@@ -393,6 +403,7 @@ fn main() -> Result<()> {
                 commands::index::run_embed(&index_dir, collection.as_deref(), rebuild)
             }
         }
+        Commands::Unlock { force, yes } => commands::unlock::run_unlock(&index_dir, force, yes),
         Commands::Update {
             collection,
             run_hooks,
