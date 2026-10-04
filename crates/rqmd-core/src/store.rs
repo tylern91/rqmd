@@ -1352,13 +1352,26 @@ impl Store {
         let mut metas: Vec<RankedListMeta> = Vec::new();
         let original_trimmed = original_query.trim();
         let mut seen: HashSet<(&'static str, &str)> = HashSet::new();
+        let language_mismatch = |text: &str| {
+            let mismatch = expansion_language_mismatch(original_query, text);
+            if mismatch {
+                tracing::debug!(
+                    "dropped expansion line in a different script than the query: {text}"
+                );
+            }
+            mismatch
+        };
 
         for line in expansion.lines() {
             deadline.check("an expansion query")?;
             let line = line.trim();
             if let Some(text) = line.strip_prefix("lex:") {
                 let text = text.trim();
-                if !text.is_empty() && text != original_trimmed && seen.insert(("lex", text)) {
+                if !text.is_empty()
+                    && text != original_trimmed
+                    && !language_mismatch(text)
+                    && seen.insert(("lex", text))
+                {
                     let hits = self.fts.search_fts_multi(text, fetch_size, collections)?;
                     if !hits.is_empty() {
                         lists.push(fts_hits_to_ranked(&hits));
@@ -1370,7 +1383,11 @@ impl Store {
                 }
             } else if let Some(text) = line.strip_prefix("vec:") {
                 let text = text.trim();
-                if !text.is_empty() && text != original_trimmed && seen.insert(("vec", text)) {
+                if !text.is_empty()
+                    && text != original_trimmed
+                    && !language_mismatch(text)
+                    && seen.insert(("vec", text))
+                {
                     let emb = self
                         .backend
                         .embed_query(text)
@@ -1386,7 +1403,11 @@ impl Store {
                 }
             } else if let Some(text) = line.strip_prefix("hyde:") {
                 let text = text.trim();
-                if !text.is_empty() && text != original_trimmed && seen.insert(("hyde", text)) {
+                if !text.is_empty()
+                    && text != original_trimmed
+                    && !language_mismatch(text)
+                    && seen.insert(("hyde", text))
+                {
                     // Passage-side prompt — see the QueryType::Hyde comment above for why.
                     let emb = self
                         .backend
@@ -1460,6 +1481,7 @@ fn build_expansion_prompt(query: &str, intent: Option<&str>) -> String {
          lex: <keyword or phrase for BM25 search>\n\
          vec: <natural language question for vector search>\n\
          hyde: <a 50-100 word hypothetical passage that would answer the query>\n\
+         Write all three lines in the same language as the query.\n\
          Output only those three lines. No explanation.\
          <|im_end|>\n\
          <|im_start|>user\n\
@@ -1467,6 +1489,58 @@ fn build_expansion_prompt(query: &str, intent: Option<&str>) -> String {
          <|im_end|>\n\
          <|im_start|>assistant\n"
     )
+}
+
+/// Coarse script family of a piece of text, for the expansion language guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Script {
+    Latin,
+    /// Han, Hiragana, Katakana and Hangul.
+    Cjk,
+    /// Anything else, or no letters at all.
+    Other,
+}
+
+fn script_of(c: char) -> Script {
+    match c {
+        '\u{3040}'..='\u{30FF}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{4E00}'..='\u{9FFF}'
+        | '\u{AC00}'..='\u{D7AF}' => Script::Cjk,
+        c if c.is_ascii_alphabetic() || ('\u{00C0}'..='\u{024F}').contains(&c) => Script::Latin,
+        _ => Script::Other,
+    }
+}
+
+/// The script most of `text`'s letters belong to. A CJK character carries
+/// roughly a word of meaning, so it counts double against a Latin letter —
+/// "Rust の 所有権" is Japanese, not English.
+fn dominant_script(text: &str) -> Script {
+    let (mut latin, mut cjk, mut other) = (0usize, 0usize, 0usize);
+    for c in text.chars().filter(|c| c.is_alphabetic()) {
+        match script_of(c) {
+            Script::Latin => latin += 1,
+            Script::Cjk => cjk += 2,
+            Script::Other => other += 1,
+        }
+    }
+    if cjk >= latin && cjk >= other && cjk > 0 {
+        Script::Cjk
+    } else if latin >= other && latin > 0 {
+        Script::Latin
+    } else {
+        Script::Other
+    }
+}
+
+/// An expansion line is dropped when it is clearly in a different script
+/// family than the query: a Latin query with CJK lines, or the reverse. Other
+/// scripts and languages sharing a script (French vs English) are not
+/// detectable here and are kept.
+fn expansion_language_mismatch(query: &str, line: &str) -> bool {
+    use Script::{Cjk, Latin};
+    let (q, l) = (dominant_script(query), dominant_script(line));
+    matches!((q, l), (Latin, Cjk) | (Cjk, Latin))
 }
 
 fn fts_hits_to_ranked(hits: &[(String, i64, f32)]) -> Vec<RankedResult> {
@@ -1800,6 +1874,90 @@ mod tests {
     fn timed_out(err: &anyhow::Error) -> TimedOut {
         *err.downcast_ref::<TimedOut>()
             .unwrap_or_else(|| panic!("expected TimedOut, got {err:#}"))
+    }
+
+    #[test]
+    fn expansion_prompt_asks_for_the_query_language() {
+        let prompt = build_expansion_prompt("所有権とは", None);
+        assert!(prompt.contains("in the same language as the query"));
+    }
+
+    #[test]
+    fn dominant_script_classifies_by_weighted_letters() {
+        assert_eq!(dominant_script("ownership rules"), Script::Latin);
+        assert_eq!(dominant_script("café résumé"), Script::Latin);
+        assert_eq!(dominant_script("所有権について"), Script::Cjk);
+        assert_eq!(dominant_script("Rust の 所有権"), Script::Cjk);
+        assert_eq!(dominant_script("abc 所有"), Script::Cjk);
+        assert_eq!(dominant_script("한국어 검색"), Script::Cjk);
+        assert_eq!(dominant_script("правила владения"), Script::Other);
+        assert_eq!(dominant_script("2024 -- 15"), Script::Other);
+    }
+
+    #[test]
+    fn language_mismatch_only_fires_between_latin_and_cjk() {
+        assert!(expansion_language_mismatch(
+            "ownership rules",
+            "所有権 ルール"
+        ));
+        assert!(expansion_language_mismatch(
+            "所有権について",
+            "ownership rules"
+        ));
+        assert!(!expansion_language_mismatch("ownership", "borrowing"));
+        assert!(!expansion_language_mismatch("所有権", "借用"));
+        assert!(!expansion_language_mismatch("правила", "ownership"));
+        assert!(!expansion_language_mismatch("2024", "所有権"));
+    }
+
+    /// Documents hit by the expansion's `lex:` legs. The Japanese word is
+    /// space-delimited so the default tokenizer indexes it, which gives the
+    /// Japanese line real hits to lose: only the guard decides whether it runs.
+    fn expansion_hits(query: &str) -> Vec<String> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let backend = StubBackend {
+            name: "stub".to_string(),
+            caps: rqmd_llm::BackendCapabilities {
+                embed: false,
+                rerank: false,
+                generate: false,
+            },
+        };
+        let mut store = open_stub_store(dir.path(), backend);
+        store
+            .index_document("coll", "japanese.md", "T", "所有権 ルール")
+            .unwrap();
+        store
+            .index_document("coll", "english.md", "T", "ownership notes")
+            .unwrap();
+        store.flush().unwrap();
+
+        let (lists, _) = store
+            .parse_and_run_expansion(
+                "lex: 所有権\nlex: ownership",
+                query,
+                None,
+                10,
+                Deadline::none(),
+            )
+            .unwrap();
+        let mut hits: Vec<String> = lists.iter().flatten().map(|r| r.filepath.clone()).collect();
+        hits.sort();
+        hits
+    }
+
+    #[test]
+    fn expansion_lines_in_another_script_than_the_query_are_dropped() {
+        assert_eq!(
+            expansion_hits("what is owned"),
+            vec!["coll/english.md"],
+            "the Japanese line must not run for an English query"
+        );
+        assert_eq!(
+            expansion_hits("所有権について"),
+            vec!["coll/japanese.md"],
+            "the English line must not run for a Japanese query"
+        );
     }
 
     #[test]
