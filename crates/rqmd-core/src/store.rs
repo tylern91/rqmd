@@ -1666,6 +1666,10 @@ fn embed_fingerprint(model: &str, rel_path: &str) -> String {
     );
     if embed_fingerprint_applies_ast(rel_path) {
         sig.push_str("\nast_chunking:1");
+    } else {
+        // Only the markdown chunker repeats table headers; AST-chunked source
+        // vectors are unaffected and keep their fingerprint.
+        sig.push_str("\ntable_header_chunking:1");
     }
     let hash = Sha256::digest(sig.as_bytes());
     hex::encode(&hash[..3]) // 6 hex chars
@@ -2228,6 +2232,38 @@ mod tests {
     /// `embed_fingerprint_applies_ast` is the single eligibility predicate the
     /// CLI and SQL builder share — assert it agrees with the extension list
     /// `chunking::ast_chunking_extensions()` publishes, not a restated one.
+    fn fingerprint_of(sig: &str) -> String {
+        hex::encode(&Sha256::digest(sig.as_bytes())[..3])
+    }
+
+    fn base_signature(model: &str) -> String {
+        format!(
+            "model:{model}\nchunk_size_chars:{}\nchunk_overlap_chars:{}\nchunk_strategy_version:{}",
+            crate::chunking::CHUNK_SIZE_CHARS,
+            crate::chunking::CHUNK_OVERLAP_CHARS,
+            crate::chunking::CHUNK_STRATEGY_VERSION,
+        )
+    }
+
+    /// Markdown vectors carry the table-header marker, so they are re-embedded
+    /// once; AST-chunked source vectors do not, so they are left alone.
+    #[test]
+    fn only_non_ast_paths_carry_the_table_header_marker() {
+        let md = embed_fingerprint("m", "notes/a.md");
+        assert_eq!(
+            md,
+            fingerprint_of(&format!("{}\ntable_header_chunking:1", base_signature("m")))
+        );
+        assert_ne!(md, fingerprint_of(&base_signature("m")));
+
+        if crate::chunking::ast_chunking_compiled() {
+            assert_eq!(
+                embed_fingerprint("m", "src/a.py"),
+                fingerprint_of(&format!("{}\nast_chunking:1", base_signature("m")))
+            );
+        }
+    }
+
     #[test]
     fn embed_fingerprint_applies_ast_matches_extension_list() {
         for ext in crate::chunking::ast_chunking_extensions() {
