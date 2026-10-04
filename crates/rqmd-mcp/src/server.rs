@@ -961,6 +961,9 @@ mod tests {
         assert_eq!(store.search_fts_multi("hello", 5, None).unwrap().len(), 1);
     }
 
+    // The test holds the pool's only handle across awaits on purpose: that is
+    // what parks the search call under test.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn blocked_tool_call_does_not_stall_the_async_runtime() {
         let (_dir, server) = pool_server(1);
