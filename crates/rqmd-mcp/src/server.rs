@@ -15,7 +15,7 @@ use rmcp::{
     schemars, serde, tool, tool_handler, tool_router,
 };
 
-use rqmd_core::{Document, Store, StoreConfig, db, resolve, snap_char_boundary_backward};
+use rqmd_core::{Deadline, Document, Store, StoreConfig, db, resolve, snap_char_boundary_backward};
 use rqmd_llm::{BackendKind, create_backend, no_backend};
 
 /// Hard cap on documents returned by a single `multi_get` call. Without this,
@@ -63,6 +63,22 @@ fn fts_readers_from_env() -> usize {
                 .map_or(DEFAULT_FTS_READERS, |n| n.get().min(DEFAULT_FTS_READERS))
         })
         .clamp(1, MAX_FTS_READERS)
+}
+
+/// Default ceiling on one `query` call, from the moment it holds the model
+/// store. Cold model loading before that point is not charged.
+const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A positive whole number of seconds; anything else falls back to the default.
+fn parse_tool_timeout(value: Option<&str>) -> Duration {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map_or(DEFAULT_TOOL_TIMEOUT, Duration::from_secs)
+}
+
+fn tool_timeout_from_env() -> Duration {
+    parse_tool_timeout(std::env::var("RQMD_MCP_TOOL_TIMEOUT_SECS").ok().as_deref())
 }
 
 // ── FTS reader pool ───────────────────────────────────────────────────────────
@@ -127,6 +143,8 @@ pub struct RqmdServer {
     fts_pool: Arc<FtsPool>,
     /// ML store for hybrid query (lazily initialised on first `query` call).
     ml_store: Arc<once_cell::sync::OnceCell<Arc<std::sync::Mutex<Store>>>>,
+    /// Ceiling on one `query` call once it holds the model store.
+    tool_timeout: Duration,
 }
 
 impl RqmdServer {
@@ -142,7 +160,14 @@ impl RqmdServer {
             index_dir: Arc::new(index_dir),
             fts_pool: Arc::new(fts_pool),
             ml_store: Arc::new(once_cell::sync::OnceCell::new()),
+            tool_timeout: tool_timeout_from_env(),
         })
+    }
+
+    /// Override the `query` ceiling (default `RQMD_MCP_TOOL_TIMEOUT_SECS`, else 120 s).
+    pub fn with_tool_timeout(mut self, timeout: Duration) -> Self {
+        self.tool_timeout = timeout;
+        self
     }
 
     /// The index directory this server was opened against — used by the HTTP
@@ -327,7 +352,15 @@ impl RqmdServer {
             .ml()
             .map_err(|e| format!("Error loading inference backend: {e:#}"))?;
         let results = store
-            .hybrid_query_multi(&p.query, intent, limit, cols, no_rerank, no_expand)
+            .hybrid_query_multi_with_deadline(
+                &p.query,
+                intent,
+                limit,
+                cols,
+                no_rerank,
+                no_expand,
+                Deadline::after(self.tool_timeout),
+            )
             .map_err(|e| format!("Error running query: {e:#}"))?;
         Ok(format_results(&results, &p.query))
     }
@@ -904,6 +937,83 @@ mod tests {
             store.flush().expect("commit");
         }
         (dir, server)
+    }
+
+    /// Backend whose query expansion outlasts any short deadline; `rerank`
+    /// must never be reached.
+    struct SlowGenerateBackend;
+
+    impl rqmd_llm::InferenceBackend for SlowGenerateBackend {
+        fn embed(&mut self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.1; rqmd_llm::EMBED_DIM])
+        }
+        fn rerank(&mut self, _query: &str, _docs: &[&str]) -> anyhow::Result<Vec<f32>> {
+            panic!("rerank must not run after the deadline")
+        }
+        fn generate(&mut self, _prompt: &str) -> anyhow::Result<String> {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok("lex: alpha beta\nvec: gamma delta\n".to_string())
+        }
+        fn embed_model_name(&self) -> &str {
+            "slow-embed"
+        }
+        fn rerank_model_name(&self) -> &str {
+            "slow-rerank"
+        }
+        fn generate_model_name(&self) -> &str {
+            "slow-generate"
+        }
+    }
+
+    fn server_with_slow_ml_store(timeout: Duration) -> (tempfile::TempDir, RqmdServer) {
+        let (dir, server) = pool_server(1);
+        let store = Store::open(
+            make_config(&dir.path().join("index")),
+            Box::new(SlowGenerateBackend),
+        )
+        .expect("ml store");
+        assert!(
+            server
+                .ml_store
+                .set(Arc::new(std::sync::Mutex::new(store)))
+                .is_ok()
+        );
+        (dir, server.with_tool_timeout(timeout))
+    }
+
+    fn unmatched_query() -> QueryInput {
+        QueryInput {
+            query: "unmatched words".to_string(),
+            intent: None,
+            collections: None,
+            limit: None,
+            rerank: None,
+            expand: None,
+        }
+    }
+
+    #[test]
+    fn query_past_the_tool_timeout_returns_a_timeout_error() {
+        let (_dir, server) = server_with_slow_ml_store(Duration::from_millis(50));
+
+        let err = server.query_blocking(unmatched_query()).unwrap_err();
+
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[test]
+    fn query_within_the_tool_timeout_completes() {
+        let (_dir, server) = server_with_slow_ml_store(Duration::from_secs(60));
+
+        assert!(server.query_blocking(unmatched_query()).is_ok());
+    }
+
+    #[test]
+    fn tool_timeout_must_be_a_positive_whole_number_of_seconds() {
+        assert_eq!(parse_tool_timeout(Some("30")), Duration::from_secs(30));
+        assert_eq!(parse_tool_timeout(Some("0")), DEFAULT_TOOL_TIMEOUT);
+        assert_eq!(parse_tool_timeout(Some("soon")), DEFAULT_TOOL_TIMEOUT);
+        assert_eq!(parse_tool_timeout(None), DEFAULT_TOOL_TIMEOUT);
     }
 
     #[test]

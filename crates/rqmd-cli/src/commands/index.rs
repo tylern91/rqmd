@@ -2,11 +2,11 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
 use rqmd_core::{
-    Collection, Document, IndexLock, IndexOutcome, PendingVectorMeta, db,
+    Collection, Deadline, Document, IndexLock, IndexOutcome, PendingVectorMeta, TimedOut, db,
     snap_char_boundary_backward,
 };
 
@@ -368,6 +368,7 @@ impl EmbedRun {
 enum EmbedFlow {
     Continue,
     Abort,
+    TimedOut(TimedOut),
 }
 
 /// Embed `docs` in order. A document whose embedding fails is recorded in
@@ -375,17 +376,23 @@ enum EmbedFlow {
 /// after a document embeds successfully are its superseded vectors evicted and
 /// queued for deletion — in the same iteration, so a checkpoint triggered by
 /// this document already covers them. Returns [`EmbedFlow::Abort`] once
-/// [`MAX_CONSECUTIVE_EMBED_FAILURES`] documents fail in a row. Errors from the
-/// index itself (not from embedding) are returned as `Err`.
+/// [`MAX_CONSECUTIVE_EMBED_FAILURES`] documents fail in a row, and
+/// [`EmbedFlow::TimedOut`] when `deadline` passes before the next document
+/// starts. Errors from the index itself (not from embedding) are returned as
+/// `Err`.
 fn embed_docs(
     s: &mut rqmd_core::Store,
     run: &mut EmbedRun,
     docs: &[&Document],
+    deadline: Deadline,
     mut on_progress: impl FnMut(usize, usize, usize),
 ) -> Result<EmbedFlow> {
     let mut done = 0usize;
     let mut bytes_processed = 0usize;
     for doc in docs {
+        if let Err(timed_out) = deadline.check("the next document") {
+            return Ok(EmbedFlow::TimedOut(timed_out));
+        }
         let body = db::get_content(&s.db, &doc.hash)?.unwrap_or_default();
         if body.is_empty() {
             continue;
@@ -427,38 +434,47 @@ fn embed_docs(
     Ok(EmbedFlow::Continue)
 }
 
-/// Print the skipped documents and turn them into the run's exit status.
-fn finish_embed(run: &EmbedRun, aborted: bool) -> Result<()> {
-    if run.failures.is_empty() {
-        return Ok(());
-    }
-    eprintln!(
-        "\nCould not embed {} document(s); their existing vectors were left as they were:",
-        run.failures.len()
-    );
-    for f in run.failures.iter().take(MAX_LISTED_EMBED_FAILURES) {
-        eprintln!("  {}/{}: {}", f.collection, f.path, f.error);
-    }
-    if run.failures.len() > MAX_LISTED_EMBED_FAILURES {
+/// Print the skipped documents and turn how the run ended into its exit status.
+fn finish_embed(run: &EmbedRun, flow: &EmbedFlow) -> Result<()> {
+    if !run.failures.is_empty() {
         eprintln!(
-            "  ... and {} more",
-            run.failures.len() - MAX_LISTED_EMBED_FAILURES
+            "\nCould not embed {} document(s); their existing vectors were left as they were:",
+            run.failures.len()
         );
+        for f in run.failures.iter().take(MAX_LISTED_EMBED_FAILURES) {
+            eprintln!("  {}/{}: {}", f.collection, f.path, f.error);
+        }
+        if run.failures.len() > MAX_LISTED_EMBED_FAILURES {
+            eprintln!(
+                "  ... and {} more",
+                run.failures.len() - MAX_LISTED_EMBED_FAILURES
+            );
+        }
     }
-    if aborted {
-        anyhow::bail!(
+    match flow {
+        EmbedFlow::Abort => anyhow::bail!(
             "stopped after {MAX_CONSECUTIVE_EMBED_FAILURES} consecutive embed failures \
              (likely a model or GPU problem); embedded work was saved — fix the cause and rerun to resume"
-        );
+        ),
+        EmbedFlow::TimedOut(timed_out) => {
+            eprintln!("Embedded work so far was saved; rerun `rqmd embed` to resume.");
+            Err((*timed_out).into())
+        }
+        EmbedFlow::Continue if run.failures.is_empty() => Ok(()),
+        EmbedFlow::Continue => Err(PartialFailure(format!(
+            "{} document(s) could not be embedded",
+            run.failures.len()
+        ))
+        .into()),
     }
-    Err(PartialFailure(format!(
-        "{} document(s) could not be embedded",
-        run.failures.len()
-    ))
-    .into())
 }
 
-pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> Result<()> {
+pub fn run_embed(
+    index_dir: &Path,
+    collection: Option<&str>,
+    rebuild: bool,
+    timeout: Option<Duration>,
+) -> Result<()> {
     // Held for the whole command: `Store::open`'s next_vid floor and the
     // HNSW file are both unguarded against a second concurrent writer.
     let _lock = IndexLock::acquire(index_dir)?;
@@ -569,7 +585,9 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
 
     // Pending vector metadata is flushed every CHECKPOINT_INTERVAL docs.
     let mut run = EmbedRun::new(CHECKPOINT_INTERVAL);
-    let mut aborted = false;
+    let mut end = EmbedFlow::Continue;
+    // Starts once the store is open, so index and model load are not charged.
+    let deadline = timeout.map_or(Deadline::none(), Deadline::after);
 
     // Track hashes queued in this run to prevent duplicate-hash drift: multiple documents
     // with identical bodies share a hash, and embedding each copy adds a vector to HNSW
@@ -608,7 +626,7 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
         }
 
         let todo: Vec<&Document> = todo_indices.iter().map(|i| &docs[*i]).collect();
-        let flow = embed_docs(&mut s, &mut run, &todo, |done, bytes, chunks| {
+        let flow = embed_docs(&mut s, &mut run, &todo, deadline, |done, bytes, chunks| {
             if is_tty {
                 let line = render_embed_progress_line(
                     done,
@@ -621,14 +639,14 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
                 eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
             }
         })?;
-        if flow == EmbedFlow::Abort {
-            aborted = true;
+        if flow != EmbedFlow::Continue {
+            end = flow;
             break;
         }
     }
 
     // Final 100% bar before the summary line.
-    if is_tty && aborted {
+    if is_tty && end != EmbedFlow::Continue {
         eprint!("\r\x1b[2K");
     } else if is_tty {
         let bar = fmt::render_progress_bar(100.0, 30);
@@ -646,7 +664,7 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
         "\n\x1b[32m✓ Done!\x1b[0m Embedded \x1b[1m{}\x1b[0m chunks from \x1b[1m{}\x1b[0m documents in \x1b[1m{elapsed}\x1b[0m",
         run.new_chunks, run.new_docs
     );
-    finish_embed(&run, aborted)
+    finish_embed(&run, &end)
 }
 
 /// `rqmd embed --cleanup`: reclaim space without loading a model or touching
@@ -1416,10 +1434,12 @@ mod tests {
         model: &'static str,
         /// Embedding any text containing this marker fails.
         fail_on: Option<&'static str>,
+        delay: Duration,
     }
 
     impl rqmd_llm::InferenceBackend for TestBackend {
         fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
+            std::thread::sleep(self.delay);
             if self.fail_on.is_some_and(|marker| text.contains(marker)) {
                 anyhow::bail!("injected embed failure");
             }
@@ -1451,7 +1471,11 @@ mod tests {
     ) -> rqmd_core::Store {
         rqmd_core::Store::open(
             store::store_config(dir, false),
-            Box::new(TestBackend { model, fail_on }),
+            Box::new(TestBackend {
+                model,
+                fail_on,
+                delay: Duration::ZERO,
+            }),
         )
         .unwrap()
     }
@@ -1488,7 +1512,7 @@ mod tests {
     ) -> (EmbedRun, EmbedFlow) {
         let mut run = EmbedRun::new(interval);
         let refs: Vec<&Document> = docs.iter().collect();
-        let flow = embed_docs(s, &mut run, &refs, |_, _, _| {}).unwrap();
+        let flow = embed_docs(s, &mut run, &refs, Deadline::none(), |_, _, _| {}).unwrap();
         checkpoint(s, &mut run.pending, &mut run.pending_deletes).unwrap();
         (run, flow)
     }
@@ -1573,6 +1597,41 @@ mod tests {
     }
 
     #[test]
+    fn embedding_stops_at_the_deadline_and_keeps_what_was_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = rqmd_core::Store::open(
+            store::store_config(dir.path(), false),
+            Box::new(TestBackend {
+                model: "m",
+                fail_on: None,
+                delay: Duration::from_millis(200),
+            }),
+        )
+        .unwrap();
+        let docs = seed_docs(&mut s, &["first body", "second body", "third body"]);
+        let mut run = EmbedRun::new(50);
+        let refs: Vec<&Document> = docs.iter().collect();
+
+        let flow = embed_docs(
+            &mut s,
+            &mut run,
+            &refs,
+            Deadline::after(Duration::from_millis(100)),
+            |_, _, _| {},
+        )
+        .unwrap();
+        checkpoint(&mut s, &mut run.pending, &mut run.pending_deletes).unwrap();
+
+        assert!(matches!(flow, EmbedFlow::TimedOut(t) if t.stage == "the next document"));
+        assert_eq!(run.new_docs, 1);
+        assert!(db::hash_has_any_vector(&s.db, &docs[0].hash));
+        assert!(!db::hash_has_any_vector(&s.db, &docs[1].hash));
+
+        let end = finish_embed(&run, &flow).unwrap_err();
+        assert!(end.downcast_ref::<TimedOut>().is_some());
+    }
+
+    #[test]
     fn consecutive_failures_abort_the_run() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = embed_store(dir.path(), "m", Some(POISON));
@@ -1612,17 +1671,17 @@ mod tests {
     #[test]
     fn finish_embed_maps_failures_to_partial_failure_or_a_hard_error() {
         let mut run = EmbedRun::new(50);
-        assert!(finish_embed(&run, false).is_ok());
+        assert!(finish_embed(&run, &EmbedFlow::Continue).is_ok());
 
         run.failures.push(EmbedFailure {
             collection: "c".into(),
             path: "a.md".into(),
             error: "boom".into(),
         });
-        let partial = finish_embed(&run, false).unwrap_err();
+        let partial = finish_embed(&run, &EmbedFlow::Continue).unwrap_err();
         assert!(partial.downcast_ref::<PartialFailure>().is_some());
 
-        let abort = finish_embed(&run, true).unwrap_err();
+        let abort = finish_embed(&run, &EmbedFlow::Abort).unwrap_err();
         assert!(abort.downcast_ref::<PartialFailure>().is_none());
         assert!(abort.to_string().contains("consecutive"));
     }

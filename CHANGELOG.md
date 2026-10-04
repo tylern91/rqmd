@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-04
+
+### Added
+- `rqmd query --timeout SECS` and `rqmd embed --timeout SECS` stop with exit `124` once the
+  deadline has passed. The clock starts after the index is open and is checked between stages
+  (before the query embedding, query expansion, each expanded sub-query and rerank; before each
+  document when embedding). A model call already running is not interrupted. A timed-out `query`
+  leaves the index untouched; a timed-out `embed` saves what it has embedded, and a rerun
+  resumes. `search` and `vsearch` take no `--timeout`: each is a single index lookup. See
+  [CLI.md](docs/CLI.md#timeouts).
+- MCP `query` calls are bounded by `RQMD_MCP_TOOL_TIMEOUT_SECS` (default 120), counted from the
+  moment the call holds the model store, so waiting behind another `query` or loading models
+  does not use it up. A call past the deadline returns a `timed out after …` error at the next
+  stage boundary instead of holding the model store for as long as the query takes.
+- `rqmd-core` gains `Deadline` and `TimedOut`, and
+  `Store::hybrid_query_multi_with_deadline`; `hybrid_query_multi` is unchanged and runs without
+  a deadline.
+
+---
+
 ## [0.19.0] - 2026-10-04
 
 ### Added

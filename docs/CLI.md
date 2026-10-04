@@ -6,14 +6,14 @@
 
 | Command | Description |
 |---------|-------------|
-| `rqmd query <text> [--no-expand]` | Hybrid search: BM25 + vector + rerank + LLM query expansion |
+| `rqmd query <text> [--no-expand] [--timeout SECS]` | Hybrid search: BM25 + vector + rerank + LLM query expansion. `--timeout` gives up after that many seconds (exit 124); see [Timeouts](#timeouts) |
 | `rqmd search <text>` | BM25 keyword search only |
 | `rqmd vsearch <text>` | Vector similarity only |
 | `rqmd similar <path\|#docid>` | Find documents most similar to an already-indexed one |
 | `rqmd get <path\|#docid>` | Retrieve document by path or content hash |
 | `rqmd multi-get <glob>` | Retrieve multiple documents |
 | `rqmd ls [collection[/path]]` | List collections or files |
-| `rqmd embed [-c collection] [--rebuild]` | Generate embeddings (`--rebuild`: clear vectors and re-embed from scratch). A document that fails to embed is skipped and listed at the end; see [Exit codes](#exit-codes) |
+| `rqmd embed [-c collection] [--rebuild] [--timeout SECS]` | Generate embeddings (`--rebuild`: clear vectors and re-embed from scratch). A document that fails to embed is skipped and listed at the end; see [Exit codes](#exit-codes). `--timeout` stops after that many seconds with the work so far saved; see [Timeouts](#timeouts) |
 | `rqmd embed --cleanup` | Reclaim orphaned vectors and unreferenced content — no model, no re-embed |
 | `rqmd update [-c collection] [--run-hooks]` | Re-index: reports new, updated, unchanged, and removed (soft-deleted) document counts. `--run-hooks` runs each collection's `update_command` even when the index was picked up implicitly from a project-local `.rqmd/` — see [Update hook trust](SECURITY.md#update-hook-trust). A hook that runs longer than `RQMD_HOOK_TIMEOUT_SECS` (default 300) is killed; a failed or timed-out hook never stops the other collections, and is listed at the end |
 | `rqmd status` | Index health and collection summary |
@@ -132,6 +132,7 @@ Full grammar (typed lines, lex phrase/negation operators, MCP `searches` array):
 | `0` | Success |
 | `1` | Error — the command did not complete |
 | `2` | Completed with failures: `rqmd update` ran every collection but one or more update hooks failed or timed out, or `rqmd embed` finished but skipped documents it could not embed. Everything else was still indexed or embedded. (Command-line usage errors also exit `2`; they print usage text instead of a summary.) |
+| `124` | Stopped by `--timeout` (the `timeout(1)` convention) |
 
 `rqmd embed` stops early, with exit `1`, after five documents in a row fail to embed — that
 pattern points at the model or GPU rather than at a document. Work embedded up to that point
@@ -141,3 +142,16 @@ On timeout a hook is sent `SIGKILL`. When stdin is not a terminal the hook runs 
 process group and the whole group is killed; when stdin is a terminal the hook stays in the
 foreground group (so Ctrl-C and credential prompts keep working) and only the hook's shell is
 killed, so a background child it started can outlive it.
+
+## Timeouts
+
+`rqmd query --timeout SECS` and `rqmd embed --timeout SECS` stop with exit `124` once the
+deadline has passed. The clock starts after the index is open, so opening the index and loading
+models are not charged, and it is checked between stages: before embedding the query, before
+query expansion and each expanded sub-query, and before reranking for `query`; before each
+document for `embed`. A model call that is already running (one llama.cpp inference) cannot be
+interrupted, so a run can overrun by the length of its longest single call.
+
+A timed-out `query` only reads, so the index is untouched. A timed-out `embed` checkpoints what it
+has embedded first; rerun `rqmd embed` to resume. `rqmd search` and `rqmd vsearch` take no
+`--timeout`: each is one index lookup with no stage between which to stop.

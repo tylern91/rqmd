@@ -91,6 +91,12 @@ models are held once and need exclusive access, and giving each request its own
 copy would multiply a multi-gigabyte footprint. Concurrent `query` calls wait
 for each other; they no longer delay `search`, `get` or `status`.
 
+A `query` call is also bounded by `RQMD_MCP_TOOL_TIMEOUT_SECS` (default 120): once the call
+holds the model store, it returns a `timed out after …` error as soon as the deadline has
+passed at the next stage boundary (before expansion, each expanded sub-query, or rerank). A
+model call already running is not interrupted, so a call can overrun by one stage. The other
+tools are single index lookups and have no such bound.
+
 ## MCP tool parameters
 
 Exact input fields per tool, as accepted by the JSON-RPC tool call

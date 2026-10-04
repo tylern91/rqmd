@@ -18,6 +18,7 @@ use crate::{
         self, content_hash, doc_for_vid_meta, doc_for_vid_meta_in, docid_from_hash,
         get_context_for_path, open_db, upsert_content, upsert_document, upsert_vector_meta,
     },
+    deadline::Deadline,
     fts::FtsIndex,
     hnsw::VectorIndex,
     query::parse_query,
@@ -831,6 +832,33 @@ impl Store {
         skip_rerank: bool,
         no_expand: bool,
     ) -> Result<Vec<SearchResult>> {
+        self.hybrid_query_multi_with_deadline(
+            query,
+            intent,
+            limit,
+            collections,
+            skip_rerank,
+            no_expand,
+            Deadline::none(),
+        )
+    }
+
+    /// [`Self::hybrid_query_multi`] that gives up with a [`crate::TimedOut`] error
+    /// once `deadline` has passed. The deadline is checked before each model
+    /// stage (query embedding, expansion, each expansion leg, rerank); a model
+    /// call already running is not interrupted. A query only reads, so giving
+    /// up leaves the index untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hybrid_query_multi_with_deadline(
+        &mut self,
+        query: &str,
+        intent: Option<&str>,
+        limit: usize,
+        collections: Option<&[String]>,
+        skip_rerank: bool,
+        no_expand: bool,
+        deadline: Deadline,
+    ) -> Result<Vec<SearchResult>> {
         let effective = self.effective_collections(collections)?;
         if matches!(effective, Some(ref cols) if cols.is_empty()) {
             return Ok(vec![]);
@@ -874,6 +902,7 @@ impl Store {
             collections,
             fetch_size,
             no_expand,
+            deadline,
         )?;
 
         // Step 4: RRF fusion. Step 5: resolve fused candidates to full documents.
@@ -882,6 +911,8 @@ impl Store {
         if candidate_docs.is_empty() {
             return Ok(vec![]);
         }
+
+        deadline.check("rerank")?;
 
         // Step 6: chunk selection + rerank.
         let (best_chunks, rerank_scores) = self.select_chunks_and_rerank(
@@ -901,6 +932,7 @@ impl Store {
     /// expansion on the raw query text ("expand mode") — without fusing them
     /// yet. Returns the ranked lists alongside metadata (source + query type)
     /// used by `rrf_weights` to weight each list during fusion.
+    #[allow(clippy::too_many_arguments)]
     fn retrieve_ranked_lists(
         &mut self,
         parsed: &crate::query::ParsedQuery,
@@ -909,6 +941,7 @@ impl Store {
         collections: Option<&[String]>,
         fetch_size: usize,
         no_expand: bool,
+        deadline: Deadline,
     ) -> Result<(Vec<Vec<RankedResult>>, Vec<RankedListMeta>)> {
         let mut ranked_lists: Vec<Vec<RankedResult>> = Vec::new();
         let mut list_meta: Vec<RankedListMeta> = Vec::new();
@@ -917,6 +950,7 @@ impl Store {
             // ── Query document mode ────────────────────────────────────────────
             // First sub-query gets weight 2.0 (Original); the rest get 1.0.
             for (idx, sub) in parsed.subqueries.iter().enumerate() {
+                deadline.check("a sub-query")?;
                 let qt = if idx == 0 {
                     QueryType::Original
                 } else {
@@ -996,6 +1030,7 @@ impl Store {
             }
 
             // Step 2: Embed original query for vector search.
+            deadline.check("embedding the query")?;
             let query_embedding = self
                 .backend
                 .embed_query(expand_text)
@@ -1018,6 +1053,7 @@ impl Store {
                          generation — falling back to BM25+vector fusion only"
                     );
                 } else {
+                    deadline.check("query expansion")?;
                     let prompt = build_expansion_prompt(expand_text, effective_intent);
                     match self.backend.generate(&prompt) {
                         Ok(expansion) => {
@@ -1026,6 +1062,7 @@ impl Store {
                                 expand_text,
                                 collections,
                                 fetch_size,
+                                deadline,
                             )?;
                             ranked_lists.extend(expansion_lists.0);
                             list_meta.extend(expansion_lists.1);
@@ -1309,6 +1346,7 @@ impl Store {
         original_query: &str,
         collections: Option<&[String]>,
         fetch_size: usize,
+        deadline: Deadline,
     ) -> Result<(Vec<Vec<RankedResult>>, Vec<RankedListMeta>)> {
         let mut lists: Vec<Vec<RankedResult>> = Vec::new();
         let mut metas: Vec<RankedListMeta> = Vec::new();
@@ -1316,6 +1354,7 @@ impl Store {
         let mut seen: HashSet<(&'static str, &str)> = HashSet::new();
 
         for line in expansion.lines() {
+            deadline.check("an expansion query")?;
             let line = line.trim();
             if let Some(text) = line.strip_prefix("lex:") {
                 let text = text.trim();
@@ -1580,6 +1619,7 @@ pub fn expected_embed_fingerprint_for_path(embed_model_name: &str, rel_path: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deadline::TimedOut;
 
     #[test]
     fn format_rfc3339_epoch() {
@@ -1705,6 +1745,140 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(hnsw.size(), before);
+    }
+
+    /// Backend whose `generate` is slow and whose `rerank` must never run:
+    /// stands in for a model call that outlasts the query's deadline.
+    struct SlowBackend {
+        embed_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        embed_delay: Duration,
+    }
+
+    impl rqmd_llm::InferenceBackend for SlowBackend {
+        fn embed(&mut self, _text: &str) -> Result<Vec<f32>> {
+            self.embed_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(self.embed_delay);
+            Ok(vec![0.1; rqmd_llm::EMBED_DIM])
+        }
+        fn rerank(&mut self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>> {
+            panic!("rerank must not run after the deadline")
+        }
+        fn generate(&mut self, _prompt: &str) -> Result<String> {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok("lex: alpha beta\nvec: gamma delta\n".to_string())
+        }
+        fn embed_model_name(&self) -> &str {
+            "slow-embed"
+        }
+        fn rerank_model_name(&self) -> &str {
+            "slow-rerank"
+        }
+        fn generate_model_name(&self) -> &str {
+            "slow-generate"
+        }
+    }
+
+    fn slow_store(
+        dir: &std::path::Path,
+        embed_delay: Duration,
+    ) -> (Store, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let embed_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let config = StoreConfig {
+            db_path: dir.join("test.sqlite"),
+            tantivy_dir: dir.join("tantivy"),
+            hnsw_path: dir.join("hnsw.usearch"),
+            read_only: false,
+        };
+        let backend = SlowBackend {
+            embed_calls: embed_calls.clone(),
+            embed_delay,
+        };
+        (Store::open(config, Box::new(backend)).unwrap(), embed_calls)
+    }
+
+    fn timed_out(err: &anyhow::Error) -> TimedOut {
+        *err.downcast_ref::<TimedOut>()
+            .unwrap_or_else(|| panic!("expected TimedOut, got {err:#}"))
+    }
+
+    #[test]
+    fn query_with_an_expired_deadline_stops_before_the_first_model_call() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, embed_calls) = slow_store(dir.path(), Duration::ZERO);
+
+        let err = store
+            .hybrid_query_multi_with_deadline(
+                "unmatched words",
+                None,
+                5,
+                None,
+                false,
+                false,
+                Deadline::after(Duration::ZERO),
+            )
+            .unwrap_err();
+
+        assert_eq!(timed_out(&err).stage, "embedding the query");
+        assert_eq!(embed_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn query_stops_at_the_next_stage_after_a_slow_generate_passes_the_deadline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, _) = slow_store(dir.path(), Duration::ZERO);
+
+        let started = std::time::Instant::now();
+        let err = store
+            .hybrid_query_multi_with_deadline(
+                "unmatched words",
+                None,
+                5,
+                None,
+                false,
+                false,
+                Deadline::after(Duration::from_millis(50)),
+            )
+            .unwrap_err();
+
+        assert_eq!(timed_out(&err).stage, "an expansion query");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn query_with_candidates_stops_before_rerank_when_the_deadline_passes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, _) = slow_store(dir.path(), Duration::from_millis(200));
+        store
+            .index_document("coll", "a.md", "Title", "uniquerankterm body text")
+            .unwrap();
+        store.flush().unwrap();
+
+        let err = store
+            .hybrid_query_multi_with_deadline(
+                "uniquerankterm",
+                None,
+                5,
+                None,
+                false,
+                true,
+                Deadline::after(Duration::from_millis(50)),
+            )
+            .unwrap_err();
+
+        assert_eq!(timed_out(&err).stage, "rerank");
+    }
+
+    #[test]
+    fn query_without_a_deadline_runs_the_same_pipeline_to_completion() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, _) = slow_store(dir.path(), Duration::ZERO);
+
+        let results = store
+            .hybrid_query_multi("unmatched words", None, 5, None, false, false)
+            .unwrap();
+
+        assert!(results.is_empty());
     }
 
     /// A stub `InferenceBackend` with a configurable identity and capability
@@ -2001,6 +2175,7 @@ mod tests {
                 "original query",
                 None,
                 10,
+                Deadline::none(),
             )
             .unwrap();
 
