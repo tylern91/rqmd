@@ -12,7 +12,7 @@ use rmcp::{
     schemars, serde, tool, tool_handler, tool_router,
 };
 
-use rqmd_core::{Document, Store, StoreConfig, db, resolve};
+use rqmd_core::{Document, Store, StoreConfig, db, resolve, snap_char_boundary_backward};
 use rqmd_llm::{BackendKind, create_backend, no_backend};
 
 /// Hard cap on documents returned by a single `multi_get` call. Without this,
@@ -28,6 +28,16 @@ const MULTI_GET_MAX_DOCS: usize = 200;
 /// bounding at the boundary rather than trusting every downstream caller to
 /// do it (github.com/tylern91/rqmd#86, AC-2).
 const MAX_SEARCH_LIMIT: usize = 1000;
+
+/// Line cap applied to `get`/`multi_get` when the caller gives no `max_lines`.
+const DEFAULT_MAX_LINES: usize = 2000;
+
+/// Byte cap on one document body in a response, applied even when the caller
+/// passes `max_lines` — a single huge line defeats any line cap.
+const MAX_DOC_BYTES: usize = 256 * 1024;
+
+/// Byte budget across all documents in one `multi_get` response.
+const MULTI_GET_MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 
 /// Clamp a client-supplied `limit` to `1..=MAX_SEARCH_LIMIT`, defaulting to
 /// `default` when omitted.
@@ -253,7 +263,7 @@ impl RqmdServer {
         let store = self
             .fts()
             .map_err(|e| format!("Error opening store: {e:#}"))?;
-        Ok(build_status(&store, &self.index_dir))
+        Ok(build_status(&store))
     }
 }
 
@@ -369,19 +379,90 @@ fn get_document(
         .unwrap_or_default()
         .unwrap_or_default();
 
-    let start = from_line.map(|n| n.saturating_sub(1)).unwrap_or(0);
-    let text: String = body
-        .lines()
-        .skip(start)
-        .take(max_lines.unwrap_or(usize::MAX))
+    let window = cap_body(&body, from_line, max_lines, MAX_DOC_BYTES);
+    let mut text: String = window
+        .lines
+        .iter()
         .enumerate()
-        .map(|(i, l)| format!("{:>4}: {l}\n", start + i + 1))
+        .map(|(i, l)| format!("{:>4}: {l}\n", window.start + i + 1))
         .collect();
+    text.push_str(&window.truncation_note());
 
     Ok(format!(
         "# {}\n── rqmd://{}/{} ──\n\n{text}",
         doc.title, doc.collection, doc.path
     ))
+}
+
+/// The slice of a document body a response will carry.
+struct BodyWindow<'a> {
+    lines: Vec<&'a str>,
+    /// Zero-based index of the first returned line.
+    start: usize,
+    total_lines: usize,
+    /// Stopped early because of a server-side cap, not the caller's `max_lines`.
+    capped: bool,
+}
+
+impl BodyWindow<'_> {
+    fn bytes(&self) -> usize {
+        self.lines.iter().map(|l| l.len() + 1).sum()
+    }
+
+    fn truncation_note(&self) -> String {
+        if !self.capped {
+            return String::new();
+        }
+        let first = self.start + 1;
+        let last = self.start + self.lines.len();
+        format!(
+            "[truncated: lines {first}–{last} of {}; pass from_line/max_lines to read more]\n",
+            self.total_lines
+        )
+    }
+}
+
+/// Select the lines of `body` to return: from `from_line`, at most
+/// `max_lines` (or `DEFAULT_MAX_LINES` when unset), and never more than
+/// `byte_cap` bytes. A line that alone exceeds the remaining bytes is cut on a
+/// char boundary.
+fn cap_body(
+    body: &str,
+    from_line: Option<usize>,
+    max_lines: Option<usize>,
+    byte_cap: usize,
+) -> BodyWindow<'_> {
+    let start = from_line.map_or(0, |n| n.saturating_sub(1));
+    let line_limit = max_lines.unwrap_or(DEFAULT_MAX_LINES);
+    let total_lines = body.lines().count();
+
+    let mut lines = Vec::new();
+    let mut used = 0usize;
+    let mut capped = false;
+    for line in body.lines().skip(start) {
+        if lines.len() >= line_limit {
+            capped = max_lines.is_none();
+            break;
+        }
+        let room = byte_cap.saturating_sub(used);
+        if line.len() < room {
+            used += line.len() + 1;
+            lines.push(line);
+            continue;
+        }
+        capped = true;
+        let cut = snap_char_boundary_backward(line, room.saturating_sub(1));
+        if cut > 0 {
+            lines.push(&line[..cut]);
+        }
+        break;
+    }
+    BodyWindow {
+        lines,
+        start,
+        total_lines,
+        capped,
+    }
 }
 
 /// Truncate `docs` to at most `max` entries, reporting the original count and
@@ -406,17 +487,23 @@ fn multi_get_documents(
 
     let mut out = String::new();
     let mut count = 0usize;
+    let mut budget = MULTI_GET_MAX_TOTAL_BYTES;
 
     for doc in &docs {
+        if budget == 0 {
+            break;
+        }
         let filepath = format!("{}/{}", doc.collection, doc.path);
         let body = db::get_document_raw(&store.db, doc.id)
             .unwrap_or_default()
             .unwrap_or_default();
-        let text: String = body
-            .lines()
-            .take(max_lines.unwrap_or(usize::MAX))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let window = cap_body(&body, None, max_lines, MAX_DOC_BYTES.min(budget));
+        budget = budget.saturating_sub(window.bytes());
+        let mut text = window.lines.join("\n");
+        if window.capped {
+            text.push('\n');
+            text.push_str(window.truncation_note().trim_end());
+        }
 
         if count > 0 {
             out.push_str("\n────────────────────────\n\n");
@@ -437,10 +524,17 @@ fn multi_get_documents(
              {MULTI_GET_MAX_DOCS} per call.]\n"
         ));
     }
+    if count < docs.len() {
+        out.push_str(&format!(
+            "\n[Output budget of {MULTI_GET_MAX_TOTAL_BYTES} bytes reached after {count} \
+             documents; {} more matched and were omitted — narrow the pattern or use get.]\n",
+            docs.len() - count
+        ));
+    }
     Ok(out)
 }
 
-fn build_status(store: &Store, index_dir: &Path) -> String {
+fn build_status(store: &Store) -> String {
     let total_docs: i64 = store
         .db
         .query_row("SELECT COUNT(*) FROM documents WHERE active=1", [], |r| {
@@ -452,22 +546,20 @@ fn build_status(store: &Store, index_dir: &Path) -> String {
         .query_row("SELECT COUNT(*) FROM content_vectors", [], |r| r.get(0))
         .unwrap_or(0);
 
-    let mut out = format!(
-        "RQMD Index Status\n  Path:     {}\n  Docs:     {total_docs}\n  Vectors:  {total_vecs}\n\n",
-        index_dir.display()
-    );
+    let mut out =
+        format!("RQMD Index Status\n  Docs:     {total_docs}\n  Vectors:  {total_vecs}\n\n");
 
     let cols = db::list_collections(&store.db).unwrap_or_default();
     if cols.is_empty() {
         out.push_str("  No collections.\n");
     } else {
-        out.push_str(&format!("  {:<28}  {:>6}  PATH\n", "COLLECTION", "DOCS"));
-        out.push_str(&format!("  {}\n", "─".repeat(70)));
+        out.push_str(&format!("  {:<28}  {:>6}\n", "COLLECTION", "DOCS"));
+        out.push_str(&format!("  {}\n", "─".repeat(36)));
         for col in &cols {
             let count = db::list_documents(&store.db, Some(&col.name))
                 .map(|d| d.len())
                 .unwrap_or(0);
-            out.push_str(&format!("  {:<28}  {:>6}  {}\n", col.name, count, col.path));
+            out.push_str(&format!("  {:<28}  {:>6}\n", col.name, count));
         }
     }
     out
@@ -574,5 +666,120 @@ mod tests {
         let store = server.fts().expect("fts store");
         let text = multi_get_documents(&store, "does-not-exist-*", None, None).unwrap();
         assert!(text.contains("No documents matched"), "got: {text}");
+    }
+    fn index_numbered_doc(server: &RqmdServer, path: &str, body: &str) {
+        let mut store = server.fts().expect("fts store");
+        store
+            .index_document_fts_only("col", path, "Big", body)
+            .expect("index doc");
+    }
+
+    fn numbered_body(lines: usize) -> String {
+        (1..=lines)
+            .map(|n| format!("line{n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn get_without_max_lines_is_capped_and_says_so() {
+        let (_dir, server) = test_server_with_doc();
+        index_numbered_doc(&server, "big.md", &numbered_body(5000));
+        let store = server.fts().expect("fts store");
+        let text = get_document(&store, "col/big.md", None, None).unwrap();
+        assert!(text.contains("line2000"), "last capped line missing");
+        assert!(!text.contains("line2001"), "cap not applied");
+        assert!(
+            text.contains("[truncated: lines 1–2000 of 5000;"),
+            "got tail: {}",
+            &text[text.len().saturating_sub(120)..]
+        );
+    }
+
+    #[test]
+    fn get_with_explicit_max_lines_is_respected_without_a_marker() {
+        let (_dir, server) = test_server_with_doc();
+        index_numbered_doc(&server, "big.md", &numbered_body(5000));
+        let store = server.fts().expect("fts store");
+        let text = get_document(&store, "col/big.md", Some(10), Some(3)).unwrap();
+        assert!(text.contains("line10") && text.contains("line12"));
+        assert!(!text.contains("line13") && !text.contains("line9\n"));
+        assert!(!text.contains("[truncated"));
+    }
+
+    #[test]
+    fn get_caps_a_single_huge_line_by_bytes_on_a_char_boundary() {
+        let (_dir, server) = test_server_with_doc();
+        index_numbered_doc(&server, "minified.md", &"é".repeat(MAX_DOC_BYTES));
+        let store = server.fts().expect("fts store");
+        let text = get_document(&store, "col/minified.md", None, None).unwrap();
+        assert!(text.len() < MAX_DOC_BYTES + 512, "len {}", text.len());
+        assert!(text.contains("[truncated"));
+    }
+
+    #[test]
+    fn cap_body_exact_default_limit_is_not_truncated() {
+        let body = numbered_body(DEFAULT_MAX_LINES);
+        let w = cap_body(&body, None, None, MAX_DOC_BYTES);
+        assert_eq!(w.lines.len(), DEFAULT_MAX_LINES);
+        assert!(!w.capped);
+    }
+
+    #[test]
+    fn multi_get_caps_each_document_and_the_whole_response() {
+        let (_dir, server) = test_server_with_doc();
+        let big = "x".repeat(100) + "\n";
+        let body = big.repeat(MAX_DOC_BYTES / 101 + 10);
+        for i in 0..30 {
+            index_numbered_doc(&server, &format!("m{i:02}.md"), &body);
+        }
+        let store = server.fts().expect("fts store");
+        let text = multi_get_documents(&store, "col/m*.md", None, None).unwrap();
+        assert!(text.contains("[truncated"), "per-doc cap not reported");
+        assert!(
+            text.len() <= MULTI_GET_MAX_TOTAL_BYTES + 16 * 1024,
+            "response {} bytes",
+            text.len()
+        );
+        assert!(text.contains("Output budget"), "total budget not reported");
+    }
+
+    #[test]
+    fn status_does_not_disclose_filesystem_paths() {
+        let (dir, server) = test_server_with_doc();
+        let secret = dir.path().join("secret-project-dir");
+        {
+            let store = server.fts().expect("fts store");
+            db::upsert_collection(
+                &store.db,
+                &rqmd_core::Collection {
+                    name: "col".to_string(),
+                    path: secret.to_string_lossy().to_string(),
+                    pattern: "**/*.md".to_string(),
+                    ignore: vec![],
+                    include_by_default: true,
+                    update_command: None,
+                    allow_hidden: false,
+                },
+            )
+            .unwrap();
+        }
+        let store = server.fts().expect("fts store");
+        let out = build_status(&store);
+        assert!(out.contains("col"), "collection name still reported: {out}");
+        assert!(
+            !out.contains("secret-project-dir"),
+            "collection path leaked: {out}"
+        );
+        assert!(
+            !out.contains(dir.path().to_str().unwrap()),
+            "index path leaked: {out}"
+        );
+        if let Some(home) = std::env::var_os("HOME") {
+            assert!(
+                !out.contains(home.to_str().unwrap()),
+                "home dir leaked: {out}"
+            );
+        }
     }
 }

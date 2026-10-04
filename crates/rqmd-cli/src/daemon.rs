@@ -38,7 +38,7 @@ pub enum Identity {
 }
 
 pub fn is_loopback(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
+    matches!(rqmd_mcp::bare_host(host), "127.0.0.1" | "localhost" | "::1")
 }
 
 pub fn pidfile_path(index_dir: &Path) -> PathBuf {
@@ -85,7 +85,10 @@ pub fn fetch_health(host: &str, port: u16) -> Option<HealthResponse> {
         .timeout(Duration::from_millis(500))
         .build()
         .ok()?
-        .get(format!("http://{host}:{port}/health/daemon"))
+        .get(format!(
+            "http://{}/health/daemon",
+            rqmd_mcp::host_port(host, port)
+        ))
         .send()
         .ok()?;
     if !resp.status().is_success() {
@@ -106,7 +109,7 @@ pub fn verify_identity(record: &PidRecord) -> Identity {
 /// racy against whatever binds next (the daemon child, in our case) — this is
 /// a fail-fast check, not a reservation.
 pub fn check_port_free(host: &str, port: u16) -> Result<()> {
-    std::net::TcpListener::bind((host, port))
+    std::net::TcpListener::bind((rqmd_mcp::bare_host(host), port))
         .with_context(|| format!("port {port} on {host} is already in use"))?;
     Ok(())
 }
@@ -124,7 +127,10 @@ pub fn wait_for_health(host: &str, port: u16, expected_pid: u32, timeout: Durati
             );
         }
         if std::time::Instant::now() >= deadline {
-            bail!("no response from http://{host}:{port}/health within {timeout:?}");
+            bail!(
+                "no response from http://{}/health within {timeout:?}",
+                rqmd_mcp::host_port(host, port)
+            );
         }
         std::thread::sleep(Duration::from_millis(150));
     }
@@ -195,7 +201,10 @@ pub fn status_daemon(index_dir: &Path) -> Result<()> {
                 .unwrap_or(record.started_at_unix);
             println!("rqmd MCP daemon: running");
             println!("  pid:        {}", record.pid);
-            println!("  address:    http://{}:{}", record.host, record.port);
+            println!(
+                "  address:    http://{}",
+                rqmd_mcp::host_port(&record.host, record.port)
+            );
             println!("  index_dir:  {}", health.index_dir);
             println!("  started_at: {}", record.started_at);
             println!(
@@ -292,6 +301,16 @@ mod tests {
     fn read_pidfile_missing_file_is_none() {
         let dir = tempfile::tempdir().unwrap();
         assert!(read_pidfile(dir.path()).is_none());
+    }
+
+    #[test]
+    fn is_loopback_accepts_bracketed_and_bare_ipv6_but_not_other_hosts() {
+        for h in ["127.0.0.1", "localhost", "::1", "[::1]"] {
+            assert!(is_loopback(h), "{h}");
+        }
+        for h in ["0.0.0.0", "::", "[::]", "192.168.1.5", "example.com"] {
+            assert!(!is_loopback(h), "{h}");
+        }
     }
 
     #[test]
