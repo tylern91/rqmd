@@ -78,6 +78,19 @@ document. Treat `--host 0.0.0.0` (or any other non-loopback address) plus
 `--allow-non-loopback` as production-network-exposure, not a convenience
 flag. See [SECURITY.md](../SECURITY.md) for the full security posture.
 
+## Concurrency
+
+`search`, `get`, `multi_get` and `status` are served from a small pool of
+read-only store handles (`RQMD_MCP_FTS_READERS`, default `min(4, cores)`), so
+concurrent clients overlap instead of queueing. Every tool call runs on the
+blocking thread pool, so a slow call cannot stall other requests or the
+`/health` endpoint.
+
+`query` still runs one call at a time: the embedding, rerank and generation
+models are held once and need exclusive access, and giving each request its own
+copy would multiply a multi-gigabyte footprint. Concurrent `query` calls wait
+for each other; they no longer delay `search`, `get` or `status`.
+
 ## MCP tool parameters
 
 Exact input fields per tool, as accepted by the JSON-RPC tool call
