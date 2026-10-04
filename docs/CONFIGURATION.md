@@ -69,7 +69,7 @@ subsequent `rqmd update` run — you only need to specify them once.
 | `RQMD_INDEX_DIR` | path | `~/.cache/rqmd/` (Linux) / `~/Library/Caches/rqmd/` (macOS) | Index storage directory |
 | `RQMD_INFERENCE_BACKEND` | `llama`, `ort` | `llama` | Inference backend |
 | `RQMD_ORT_EP` | `auto`, `coreml`, `cuda`, `directml`, `cpu` | `auto` | ONNX Runtime EP |
-| `RQMD_FORCE_CPU` | `1` | *(unset)* | Disable GPU layers in LlamaCppBackend |
+| `RQMD_FORCE_CPU` | `1` | *(unset)* | Disable GPU layers in LlamaCppBackend. Without it, a model that fails to load on the GPU (or whose context cannot be allocated there) is retried on the CPU with a warning, and stays on the CPU for the rest of the process |
 | `RQMD_MCP_HOST` | host/IP | `127.0.0.1` | Bind address for `rqmd mcp --http`/`--daemon` |
 | `RQMD_MCP_PORT` | port number | `8181` | Bind port for `rqmd mcp --http`/`--daemon` |
 | `RQMD_MCP_ALLOW_NON_LOOPBACK` | `1` | *(unset)* | Required alongside a non-loopback `RQMD_MCP_HOST`/`--host` — confirms you understand this exposes the index's full-text and semantic search (and `get`, which returns file content) with no authentication; see [SECURITY.md](../SECURITY.md) |

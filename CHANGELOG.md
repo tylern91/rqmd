@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-04
+
+### Changed
+- The llama.cpp backend now retries a model on the CPU, with a warning, when loading it on the
+  GPU fails — a driver mismatch, an unsupported GPU, or no memory left for the weights. Each
+  load also creates and drops one throwaway context, because the KV cache is allocated there:
+  a GPU that fits the weights but not the context used to fail on the first real call and now
+  falls back at load time. The layer count that worked is kept, so an idle-eviction reload does
+  not try the GPU again. If the CPU load fails too, the error reports both causes.
+  `RQMD_FORCE_CPU=1` is unchanged and loads once on the CPU.
+- A GPU failure that aborts the process inside ggml/Metal rather than returning an error cannot
+  be caught; that case still needs `RQMD_FORCE_CPU=1`.
+
+---
+
 ## [0.20.0] - 2026-10-04
 
 ### Added
