@@ -698,6 +698,56 @@ pub struct LlamaCppBackend {
     generate_model_name: String,
 }
 
+/// Load a model offloading `gpu_layers` layers, then create and drop one
+/// throwaway context: the KV cache is allocated by `new_context`, so a GPU
+/// that fits the weights but not the context fails here rather than on the
+/// first real call.
+fn load_probed(
+    backend: &LlamaBackend,
+    path: &std::path::Path,
+    gpu_layers: u32,
+    ctx_params: &LlamaContextParams,
+) -> Result<LlamaModel> {
+    let model = LlamaModel::load_from_file(
+        backend,
+        path,
+        &LlamaModelParams::default().with_n_gpu_layers(gpu_layers),
+    )
+    .context("model load")?;
+    model
+        .new_context(backend, ctx_params.clone())
+        .context("context probe")?;
+    Ok(model)
+}
+
+/// Run `load` with `gpu_layers` layers offloaded; if that fails, warn and run
+/// it again on the CPU (`0` layers). Returns the value together with the layer
+/// count that worked, so the caller can keep using it instead of retrying the
+/// GPU on every reload. With `gpu_layers == 0` (`RQMD_FORCE_CPU`) there is
+/// nothing to fall back from and `load` runs once.
+fn load_with_cpu_fallback<T>(
+    what: &str,
+    gpu_layers: u32,
+    load: impl Fn(u32) -> Result<T>,
+) -> Result<(T, u32)> {
+    if gpu_layers == 0 {
+        return Ok((load(0).with_context(|| format!("{what} load"))?, 0));
+    }
+    match load(gpu_layers) {
+        Ok(value) => Ok((value, gpu_layers)),
+        Err(gpu_err) => {
+            tracing::warn!(
+                "{what}: loading with {gpu_layers} GPU layers failed ({gpu_err:#}); \
+                 falling back to CPU"
+            );
+            let value = load(0).with_context(|| {
+                format!("{what} load failed on the GPU ({gpu_err:#}) and again on the CPU")
+            })?;
+            Ok((value, 0))
+        }
+    }
+}
+
 impl LlamaCppBackend {
     /// Download models via hf-hub and initialize. Blocks the current thread.
     pub fn new(mut config: LlamaCppConfig) -> Result<Self> {
@@ -786,14 +836,17 @@ impl LlamaCppBackend {
     /// either way so a burst of calls doesn't get evicted mid-use.
     fn ensure_embed(&mut self) -> Result<()> {
         if self.embed_model.is_none() {
-            self.embed_model = Some(
-                LlamaModel::load_from_file(
-                    &self._backend,
-                    &self.embed_path,
-                    &LlamaModelParams::default().with_n_gpu_layers(self.config.embed_n_gpu_layers),
-                )
-                .context("embed model load")?,
-            );
+            let (model, layers) =
+                load_with_cpu_fallback("embed model", self.config.embed_n_gpu_layers, |layers| {
+                    load_probed(
+                        &self._backend,
+                        &self.embed_path,
+                        layers,
+                        &self.embed_ctx_params,
+                    )
+                })?;
+            self.config.embed_n_gpu_layers = layers;
+            self.embed_model = Some(model);
         }
         self.embed_last_used = Some(Instant::now());
         Ok(())
@@ -801,14 +854,20 @@ impl LlamaCppBackend {
 
     fn ensure_rerank(&mut self) -> Result<()> {
         if self.rerank_model.is_none() {
-            self.rerank_model = Some(
-                LlamaModel::load_from_file(
-                    &self._backend,
-                    &self.rerank_path,
-                    &LlamaModelParams::default().with_n_gpu_layers(self.config.rerank_n_gpu_layers),
-                )
-                .context("rerank model load")?,
-            );
+            let (model, layers) = load_with_cpu_fallback(
+                "rerank model",
+                self.config.rerank_n_gpu_layers,
+                |layers| {
+                    load_probed(
+                        &self._backend,
+                        &self.rerank_path,
+                        layers,
+                        &self.rerank_ctx_params,
+                    )
+                },
+            )?;
+            self.config.rerank_n_gpu_layers = layers;
+            self.rerank_model = Some(model);
         }
         self.rerank_last_used = Some(Instant::now());
         Ok(())
@@ -816,15 +875,20 @@ impl LlamaCppBackend {
 
     fn ensure_generate(&mut self) -> Result<()> {
         if self.generate_model.is_none() {
-            self.generate_model = Some(
-                LlamaModel::load_from_file(
-                    &self._backend,
-                    &self.generate_path,
-                    &LlamaModelParams::default()
-                        .with_n_gpu_layers(self.config.generate_n_gpu_layers),
-                )
-                .context("generate model load")?,
-            );
+            let (model, layers) = load_with_cpu_fallback(
+                "generate model",
+                self.config.generate_n_gpu_layers,
+                |layers| {
+                    load_probed(
+                        &self._backend,
+                        &self.generate_path,
+                        layers,
+                        &self.generate_ctx_params,
+                    )
+                },
+            )?;
+            self.config.generate_n_gpu_layers = layers;
+            self.generate_model = Some(model);
         }
         self.generate_last_used = Some(Instant::now());
         Ok(())
@@ -1242,6 +1306,74 @@ pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::cell::RefCell;
+
+    /// Loader that fails whenever it is asked to offload layers, and records
+    /// every layer count it was called with.
+    fn gpu_hostile_loader(calls: &RefCell<Vec<u32>>) -> impl Fn(u32) -> Result<&'static str> + '_ {
+        move |layers| {
+            calls.borrow_mut().push(layers);
+            if layers > 0 {
+                anyhow::bail!("Metal: failed to allocate KV cache");
+            }
+            Ok("loaded")
+        }
+    }
+
+    #[test]
+    fn gpu_load_failure_falls_back_to_cpu_and_reports_zero_layers() {
+        let calls = RefCell::new(Vec::new());
+
+        let (value, layers) =
+            load_with_cpu_fallback("embed model", 99, gpu_hostile_loader(&calls)).unwrap();
+
+        assert_eq!((value, layers), ("loaded", 0));
+        assert_eq!(*calls.borrow(), vec![99, 0]);
+    }
+
+    #[test]
+    fn successful_gpu_load_is_kept_without_a_cpu_retry() {
+        let calls = RefCell::new(Vec::new());
+
+        let (_, layers) = load_with_cpu_fallback("embed model", 14, |layers| {
+            calls.borrow_mut().push(layers);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(layers, 14);
+        assert_eq!(*calls.borrow(), vec![14]);
+    }
+
+    #[test]
+    fn forced_cpu_loads_once_and_never_retries() {
+        let calls = RefCell::new(Vec::new());
+
+        let err = load_with_cpu_fallback("embed model", 0, |layers| -> Result<()> {
+            calls.borrow_mut().push(layers);
+            anyhow::bail!("corrupt model file")
+        })
+        .unwrap_err();
+
+        assert_eq!(*calls.borrow(), vec![0]);
+        assert!(format!("{err:#}").contains("corrupt model file"), "{err:#}");
+    }
+
+    #[test]
+    fn failure_on_both_gpu_and_cpu_reports_both_causes() {
+        let err = load_with_cpu_fallback("rerank model", 14, |layers| -> Result<()> {
+            if layers > 0 {
+                anyhow::bail!("gpu out of memory");
+            }
+            anyhow::bail!("cpu out of memory")
+        })
+        .unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("gpu out of memory"), "{message}");
+        assert!(message.contains("cpu out of memory"), "{message}");
+    }
     use serial_test::serial;
 
     // `cargo test` runs tests concurrently on a thread pool within one process,

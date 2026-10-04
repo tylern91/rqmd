@@ -2641,7 +2641,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-cli"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-core"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "globset",
@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-llm"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -2709,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "rqmd-mcp"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "axum",
