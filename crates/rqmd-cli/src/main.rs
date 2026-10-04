@@ -5,7 +5,9 @@ mod commands;
 mod daemon;
 mod document;
 mod exclusions;
+mod exit;
 mod format;
+mod hook;
 mod store;
 
 /// rqmd — hybrid local document search
@@ -265,7 +267,11 @@ fn collections_filter(v: &[String]) -> Option<&[String]> {
     if v.is_empty() { None } else { Some(v) }
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    exit::report(run())
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
 
     // SAFETY: single-threaded — this runs at the top of main() before any

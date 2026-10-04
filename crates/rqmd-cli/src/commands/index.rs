@@ -6,9 +6,12 @@ use std::time::Instant;
 use walkdir::WalkDir;
 
 use rqmd_core::{
-    Collection, IndexLock, IndexOutcome, PendingVectorMeta, db, snap_char_boundary_backward,
+    Collection, Document, IndexLock, IndexOutcome, PendingVectorMeta, db,
+    snap_char_boundary_backward,
 };
 
+use crate::exit::PartialFailure;
+use crate::hook::{self, HookConfig, HookOutcome};
 use crate::{document, exclusions, format as fmt, store};
 
 pub fn run_status(index_dir: &Path) -> Result<()> {
@@ -320,6 +323,141 @@ fn render_embed_progress_line(
     )
 }
 
+/// Documents in a row that may fail to embed before the run stops: that many
+/// consecutive failures point at the model or GPU, not at one bad document.
+const MAX_CONSECUTIVE_EMBED_FAILURES: usize = 5;
+
+/// Failed documents listed in the end-of-run summary before it elides the rest.
+const MAX_LISTED_EMBED_FAILURES: usize = 20;
+
+struct EmbedFailure {
+    collection: String,
+    path: String,
+    error: String,
+}
+
+/// State shared by every collection's pass of the embed loop.
+struct EmbedRun {
+    /// Vector metadata staged for the next checkpoint.
+    pending: Vec<PendingVectorMeta>,
+    /// Hashes whose superseded `content_vectors` rows are dropped at the next
+    /// checkpoint (see `checkpoint`).
+    pending_deletes: HashSet<String>,
+    failures: Vec<EmbedFailure>,
+    consecutive_failures: usize,
+    new_docs: usize,
+    new_chunks: usize,
+    checkpoint_interval: usize,
+}
+
+impl EmbedRun {
+    fn new(checkpoint_interval: usize) -> Self {
+        Self {
+            pending: Vec::new(),
+            pending_deletes: HashSet::new(),
+            failures: Vec::new(),
+            consecutive_failures: 0,
+            new_docs: 0,
+            new_chunks: 0,
+            checkpoint_interval,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum EmbedFlow {
+    Continue,
+    Abort,
+}
+
+/// Embed `docs` in order. A document whose embedding fails is recorded in
+/// `run.failures` and skipped, leaving its existing vectors untouched; only
+/// after a document embeds successfully are its superseded vectors evicted and
+/// queued for deletion — in the same iteration, so a checkpoint triggered by
+/// this document already covers them. Returns [`EmbedFlow::Abort`] once
+/// [`MAX_CONSECUTIVE_EMBED_FAILURES`] documents fail in a row. Errors from the
+/// index itself (not from embedding) are returned as `Err`.
+fn embed_docs(
+    s: &mut rqmd_core::Store,
+    run: &mut EmbedRun,
+    docs: &[&Document],
+    mut on_progress: impl FnMut(usize, usize, usize),
+) -> Result<EmbedFlow> {
+    let mut done = 0usize;
+    let mut bytes_processed = 0usize;
+    for doc in docs {
+        let body = db::get_content(&s.db, &doc.hash)?.unwrap_or_default();
+        if body.is_empty() {
+            continue;
+        }
+        on_progress(done, bytes_processed, run.new_chunks + run.pending.len());
+
+        match s.embed_document_chunks(&doc.hash, &doc.path, &body) {
+            Ok(new_chunks) => {
+                if db::hash_has_any_vector(&s.db, &doc.hash) {
+                    let stale_vids = db::vids_for_hash(&s.db, &doc.hash)?;
+                    s.evict_hnsw_vectors(&stale_vids)?;
+                    run.pending_deletes.insert(doc.hash.clone());
+                }
+                run.consecutive_failures = 0;
+                run.new_chunks += new_chunks.len();
+                run.new_docs += 1;
+                run.pending.extend(new_chunks);
+                done += 1;
+                bytes_processed += body.len();
+
+                // Checkpoint every N docs so an interrupt only re-embeds the last batch.
+                if done.is_multiple_of(run.checkpoint_interval) {
+                    checkpoint(s, &mut run.pending, &mut run.pending_deletes)?;
+                }
+            }
+            Err(e) => {
+                run.consecutive_failures += 1;
+                run.failures.push(EmbedFailure {
+                    collection: doc.collection.clone(),
+                    path: doc.path.clone(),
+                    error: format!("{e:#}"),
+                });
+                if run.consecutive_failures >= MAX_CONSECUTIVE_EMBED_FAILURES {
+                    return Ok(EmbedFlow::Abort);
+                }
+            }
+        }
+    }
+    Ok(EmbedFlow::Continue)
+}
+
+/// Print the skipped documents and turn them into the run's exit status.
+fn finish_embed(run: &EmbedRun, aborted: bool) -> Result<()> {
+    if run.failures.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "\nCould not embed {} document(s); their existing vectors were left as they were:",
+        run.failures.len()
+    );
+    for f in run.failures.iter().take(MAX_LISTED_EMBED_FAILURES) {
+        eprintln!("  {}/{}: {}", f.collection, f.path, f.error);
+    }
+    if run.failures.len() > MAX_LISTED_EMBED_FAILURES {
+        eprintln!(
+            "  ... and {} more",
+            run.failures.len() - MAX_LISTED_EMBED_FAILURES
+        );
+    }
+    if aborted {
+        anyhow::bail!(
+            "stopped after {MAX_CONSECUTIVE_EMBED_FAILURES} consecutive embed failures \
+             (likely a model or GPU problem); embedded work was saved — fix the cause and rerun to resume"
+        );
+    }
+    Err(PartialFailure(format!(
+        "{} document(s) could not be embedded",
+        run.failures.len()
+    ))
+    .into())
+}
+
 pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> Result<()> {
     // Held for the whole command: `Store::open`'s next_vid floor and the
     // HNSW file are both unguarded against a second concurrent writer.
@@ -429,14 +567,9 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     let is_tty = fmt::atty_stderr();
     let start = Instant::now();
 
-    let mut total_new_docs = 0usize;
-    let mut total_new_chunks = 0usize;
-
-    // Buffer for pending vector metadata — flushed every CHECKPOINT_INTERVAL docs.
-    let mut pending: Vec<PendingVectorMeta> = Vec::new();
-    // Hashes whose stale content_vectors rows must be deleted at the next checkpoint,
-    // superseding vectors embedded under a since-changed fingerprint (see `checkpoint`).
-    let mut pending_deletes: HashSet<String> = HashSet::new();
+    // Pending vector metadata is flushed every CHECKPOINT_INTERVAL docs.
+    let mut run = EmbedRun::new(CHECKPOINT_INTERVAL);
+    let mut aborted = false;
 
     // Track hashes queued in this run to prevent duplicate-hash drift: multiple documents
     // with identical bodies share a hash, and embedding each copy adds a vector to HNSW
@@ -474,56 +607,30 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
             continue;
         }
 
-        let mut done = 0usize;
-        let mut bytes_processed = 0usize;
-        for idx in &todo_indices {
-            let doc = &docs[*idx];
-            let body = db::get_content(&s.db, &doc.hash)?.unwrap_or_default();
-            if body.is_empty() {
-                continue;
-            }
-
+        let todo: Vec<&Document> = todo_indices.iter().map(|i| &docs[*i]).collect();
+        let flow = embed_docs(&mut s, &mut run, &todo, |done, bytes, chunks| {
             if is_tty {
                 let line = render_embed_progress_line(
                     done,
                     todo_total,
-                    total_new_chunks + pending.len(),
-                    bytes_processed,
+                    chunks,
+                    bytes,
                     start.elapsed().as_secs_f64(),
                 );
                 let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
                 eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
             }
-
-            // This hash has vectors, just not at the current fingerprint (the
-            // todo-selection check above is fingerprint-aware) — supersede them:
-            // evict the old vids from HNSW now, and queue the DB rows for delete
-            // in the same transaction as the new rows' insert (see `checkpoint`).
-            if db::hash_has_any_vector(&s.db, &doc.hash) {
-                let stale_vids = db::vids_for_hash(&s.db, &doc.hash)?;
-                s.evict_hnsw_vectors(&stale_vids)?;
-                pending_deletes.insert(doc.hash.clone());
-            }
-
-            // Embed and stage — do NOT write to DB yet.
-            let new_chunks = s.embed_document_chunks(&doc.hash, &doc.path, &body)?;
-            let chunk_count = new_chunks.len();
-            pending.extend(new_chunks);
-            done += 1;
-            bytes_processed += body.len();
-            total_new_chunks += chunk_count;
-
-            // Checkpoint every N docs so an interrupt only re-embeds the last batch.
-            if done.is_multiple_of(CHECKPOINT_INTERVAL) {
-                checkpoint(&mut s, &mut pending, &mut pending_deletes)?;
-            }
+        })?;
+        if flow == EmbedFlow::Abort {
+            aborted = true;
+            break;
         }
-
-        total_new_docs += done;
     }
 
     // Final 100% bar before the summary line.
-    if is_tty {
+    if is_tty && aborted {
+        eprint!("\r\x1b[2K");
+    } else if is_tty {
         let bar = fmt::render_progress_bar(100.0, 30);
         let line = format!("\x1b[32m{bar}\x1b[0m \x1b[1m100% input\x1b[0m");
         let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
@@ -531,14 +638,15 @@ pub fn run_embed(index_dir: &Path, collection: Option<&str>, rebuild: bool) -> R
     }
 
     // Final checkpoint for any remaining pending rows.
-    checkpoint(&mut s, &mut pending, &mut pending_deletes)?;
+    checkpoint(&mut s, &mut run.pending, &mut run.pending_deletes)?;
 
     // Summary — matches qmd's "✓ Done!" line (qmd.ts:1938).
     let elapsed = fmt::format_eta(start.elapsed().as_secs_f64());
     println!(
-        "\n\x1b[32m✓ Done!\x1b[0m Embedded \x1b[1m{total_new_chunks}\x1b[0m chunks from \x1b[1m{total_new_docs}\x1b[0m documents in \x1b[1m{elapsed}\x1b[0m"
+        "\n\x1b[32m✓ Done!\x1b[0m Embedded \x1b[1m{}\x1b[0m chunks from \x1b[1m{}\x1b[0m documents in \x1b[1m{elapsed}\x1b[0m",
+        run.new_chunks, run.new_docs
     );
-    Ok(())
+    finish_embed(&run, aborted)
 }
 
 /// `rqmd embed --cleanup`: reclaim space without loading a model or touching
@@ -587,6 +695,15 @@ pub fn run_cleanup(index_dir: &Path) -> Result<()> {
 }
 
 pub fn run_update(index_dir: &Path, collection: Option<&str>, hooks_allowed: bool) -> Result<()> {
+    run_update_with(index_dir, collection, hooks_allowed, HookConfig::from_env())
+}
+
+fn run_update_with(
+    index_dir: &Path,
+    collection: Option<&str>,
+    hooks_allowed: bool,
+    hook_config: HookConfig,
+) -> Result<()> {
     // Shares IndexLock with run_embed: an `update` mutating `documents` rows
     // mid-way through a concurrent `embed`'s snapshot is a separate hazard
     // from the vid race, but the two commands never need to run at once.
@@ -630,6 +747,7 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>, hooks_allowed: boo
     // empty-string default for those rows permanently, since the marker
     // suppresses `warn_if_raw_backfill_pending` forever once set.
     let mut all_collections_clean = true;
+    let mut hook_failures: Vec<(String, String)> = Vec::new();
 
     for (ci, col) in cols.iter().enumerate() {
         // Per-collection header: [i/n] name (pattern)
@@ -641,8 +759,10 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>, hooks_allowed: boo
             col.pattern
         );
 
-        if !update_one_collection(&mut s, col, is_tty, hooks_allowed)? {
-            all_collections_clean = false;
+        let outcome = update_one_collection(&mut s, col, is_tty, hooks_allowed, hook_config)?;
+        all_collections_clean &= outcome.clean;
+        if let Some(reason) = outcome.hook_failure {
+            hook_failures.push((col.name.clone(), reason));
         }
     }
 
@@ -672,15 +792,40 @@ pub fn run_update(index_dir: &Path, collection: Option<&str>, hooks_allowed: boo
     if collection.is_none() && all_collections_clean {
         store::mark_raw_split_backfilled(&s)?;
     }
-    Ok(())
+
+    if hook_failures.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "\nUpdate hook failed for {} collection(s):",
+        hook_failures.len()
+    );
+    for (name, reason) in &hook_failures {
+        eprintln!("  {name}: {reason}");
+    }
+    Err(PartialFailure(format!(
+        "{} update hook(s) failed; all collections were still indexed",
+        hook_failures.len()
+    ))
+    .into())
+}
+
+/// What `update_one_collection` reports back to `run_update`.
+struct CollectionOutcome {
+    /// The collection was fully walked and every file indexed without error.
+    clean: bool,
+    /// Why the collection's update hook failed or timed out, if it did.
+    hook_failure: Option<String>,
 }
 
 /// Re-walk one collection's directory, run its update hook, re-index changed
 /// files, and prune deleted ones. Extracted from `run_update`'s per-collection
 /// loop body; the `IndexOutcome`-based tally counters and every WARN-on-failure
-/// path are preserved bit-for-bit. Returns `false` if any part of the
+/// path are preserved bit-for-bit. `clean` is `false` if any part of the
 /// collection was skipped or any file failed to index — the caller uses this
 /// to decide whether the run is clean enough to certify the raw-split backfill.
+/// A failing or timed-out hook never stops the walk; it is reported in
+/// `hook_failure`.
 ///
 /// `hooks_allowed` gates `col.update_command`: a project-local `.rqmd/` index
 /// (picked up implicitly from the current directory) can belong to a repo the
@@ -691,15 +836,20 @@ fn update_one_collection(
     col: &Collection,
     is_tty: bool,
     hooks_allowed: bool,
-) -> Result<bool> {
+    hook_config: HookConfig,
+) -> Result<CollectionOutcome> {
     let dir = Path::new(&col.path);
     if !dir.exists() {
         eprintln!("  WARN: directory not found: {}", dir.display());
-        return Ok(false);
+        return Ok(CollectionOutcome {
+            clean: false,
+            hook_failure: None,
+        });
     }
 
     // Run the collection's pre-update hook (e.g. `git fetch && git pull ...`)
     // before walking the directory, so indexing sees freshly synced content.
+    let mut hook_failure = None;
     if let Some(cmd) = col.update_command.as_deref()
         && !cmd.trim().is_empty()
     {
@@ -709,19 +859,16 @@ fn update_one_collection(
             );
         } else {
             println!("  \x1b[2m$ {cmd}\x1b[0m");
-            match std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(cmd)
-                .current_dir(dir)
-                .status()
-            {
-                Ok(status) if !status.success() => {
-                    eprintln!("  WARN: update hook exited with {status}");
-                }
-                Err(e) => {
-                    eprintln!("  WARN: update hook failed to run: {e}");
-                }
-                _ => {}
+            hook_failure = match hook::run_hook(cmd, dir, hook_config) {
+                HookOutcome::Succeeded => None,
+                HookOutcome::Failed(reason) => Some(reason),
+                HookOutcome::TimedOut(limit) => Some(format!(
+                    "timed out after {}s and was killed",
+                    limit.as_secs()
+                )),
+            };
+            if let Some(reason) = &hook_failure {
+                eprintln!("  WARN: update hook {reason}");
             }
         }
     }
@@ -733,7 +880,10 @@ fn update_one_collection(
                 "  WARN: {}: invalid mask '{}': {e:#}",
                 col.name, col.pattern
             );
-            return Ok(false);
+            return Ok(CollectionOutcome {
+                clean: false,
+                hook_failure,
+            });
         }
     };
     let ignore_set = exclusions::build_ignore_set(&col.ignore);
@@ -844,7 +994,10 @@ fn update_one_collection(
     println!(
         "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, {removed_count} removed{skip_suffix}"
     );
-    Ok(clean)
+    Ok(CollectionOutcome {
+        clean,
+        hook_failure,
+    })
 }
 
 pub fn run_init() -> Result<()> {
@@ -1033,6 +1186,11 @@ fn truncate_context_preview(ctx: &str) -> String {
 mod tests {
     use super::*;
 
+    const TEST_HOOKS: HookConfig = HookConfig {
+        timeout: std::time::Duration::from_secs(30),
+        own_process_group: true,
+    };
+
     #[test]
     fn truncate_context_preview_snaps_multibyte_boundary() {
         // 56 ASCII bytes followed by a 2-byte 'é' straddling the fixed
@@ -1094,8 +1252,8 @@ mod tests {
         db::upsert_collection(&s.db, &coll_col).unwrap();
 
         // Initial walk indexes both collections' files as active documents.
-        update_one_collection(&mut s, &keep_col, false, true).unwrap();
-        update_one_collection(&mut s, &coll_col, false, true).unwrap();
+        update_one_collection(&mut s, &keep_col, false, true, TEST_HOOKS).unwrap();
+        update_one_collection(&mut s, &coll_col, false, true, TEST_HOOKS).unwrap();
 
         let shared_hash =
             db::hashes_for_paths(&s.db, "keep", &["shared.md".to_string()]).unwrap()[0].clone();
@@ -1118,7 +1276,7 @@ mod tests {
         // and "keep" still references shared_hash, so only unique_hash
         // should be reclaimed.
         std::fs::remove_file(coll_src.path().join("unique.md")).unwrap();
-        update_one_collection(&mut s, &coll_col, false, true).unwrap();
+        update_one_collection(&mut s, &coll_col, false, true, TEST_HOOKS).unwrap();
         s.reclaim_orphaned_vectors().unwrap();
 
         assert!(
@@ -1252,5 +1410,277 @@ mod tests {
     fn conn_deactivate(conn: &Connection, path: &str) {
         conn.execute("UPDATE documents SET active = 0 WHERE path = ?1", [path])
             .unwrap();
+    }
+
+    struct TestBackend {
+        model: &'static str,
+        /// Embedding any text containing this marker fails.
+        fail_on: Option<&'static str>,
+    }
+
+    impl rqmd_llm::InferenceBackend for TestBackend {
+        fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
+            if self.fail_on.is_some_and(|marker| text.contains(marker)) {
+                anyhow::bail!("injected embed failure");
+            }
+            Ok(vec![0.1; rqmd_llm::EMBED_DIM])
+        }
+        fn rerank(&mut self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>> {
+            unreachable!()
+        }
+        fn generate(&mut self, _prompt: &str) -> Result<String> {
+            unreachable!()
+        }
+        fn embed_model_name(&self) -> &str {
+            self.model
+        }
+        fn rerank_model_name(&self) -> &str {
+            "test-rerank"
+        }
+        fn generate_model_name(&self) -> &str {
+            "test-generate"
+        }
+    }
+
+    const POISON: &str = "POISONED-BODY";
+
+    fn embed_store(
+        dir: &Path,
+        model: &'static str,
+        fail_on: Option<&'static str>,
+    ) -> rqmd_core::Store {
+        rqmd_core::Store::open(
+            store::store_config(dir, false),
+            Box::new(TestBackend { model, fail_on }),
+        )
+        .unwrap()
+    }
+
+    fn test_collection(name: &str, path: &Path) -> Collection {
+        Collection {
+            name: name.into(),
+            path: path.to_string_lossy().to_string(),
+            pattern: "**/*.md".into(),
+            ignore: vec![],
+            include_by_default: true,
+            update_command: None,
+            allow_hidden: false,
+        }
+    }
+
+    /// Index `bodies` as documents `doc0.md`, `doc1.md`, … of collection `c`.
+    fn seed_docs(s: &mut rqmd_core::Store, bodies: &[&str]) -> Vec<Document> {
+        db::upsert_collection(&s.db, &test_collection("c", Path::new("/unused"))).unwrap();
+        for (i, body) in bodies.iter().enumerate() {
+            let path = format!("doc{i}.md");
+            s.index_document_fts_only_with_raw("c", &path, &path, body, body)
+                .unwrap();
+        }
+        let mut docs = db::list_documents(&s.db, Some("c")).unwrap();
+        docs.sort_by(|a, b| a.path.cmp(&b.path));
+        docs
+    }
+
+    fn run_embed_docs(
+        s: &mut rqmd_core::Store,
+        docs: &[Document],
+        interval: usize,
+    ) -> (EmbedRun, EmbedFlow) {
+        let mut run = EmbedRun::new(interval);
+        let refs: Vec<&Document> = docs.iter().collect();
+        let flow = embed_docs(s, &mut run, &refs, |_, _, _| {}).unwrap();
+        checkpoint(s, &mut run.pending, &mut run.pending_deletes).unwrap();
+        (run, flow)
+    }
+
+    fn vector_models(s: &rqmd_core::Store, hash: &str) -> Vec<String> {
+        let mut stmt =
+            s.db.prepare("SELECT model FROM content_vectors WHERE hash = ?1")
+                .unwrap();
+        stmt.query_map([hash], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_failing_document_is_skipped_and_the_rest_are_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = embed_store(dir.path(), "m", Some(POISON));
+        let docs = seed_docs(&mut s, &["first body", POISON, "third body"]);
+
+        let (run, flow) = run_embed_docs(&mut s, &docs, 50);
+
+        assert_eq!(flow, EmbedFlow::Continue);
+        assert_eq!(run.new_docs, 2);
+        assert_eq!(run.failures.len(), 1);
+        assert_eq!(run.failures[0].path, "doc1.md");
+        assert!(run.failures[0].error.contains("injected embed failure"));
+        assert!(db::hash_has_any_vector(&s.db, &docs[0].hash));
+        assert!(!db::hash_has_any_vector(&s.db, &docs[1].hash));
+        assert!(db::hash_has_any_vector(&s.db, &docs[2].hash));
+    }
+
+    #[test]
+    fn a_failed_document_keeps_its_existing_vectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = {
+            let mut old = embed_store(dir.path(), "old-model", None);
+            let docs = seed_docs(&mut old, &["first body", POISON, "third body"]);
+            run_embed_docs(&mut old, &docs, 50);
+            docs
+        };
+
+        let mut s = embed_store(dir.path(), "new-model", Some(POISON));
+        let before = db::vids_for_hash(&s.db, &docs[1].hash).unwrap();
+        assert_eq!(before.len(), 1);
+        let (run, _) = run_embed_docs(&mut s, &docs, 50);
+
+        assert_eq!(run.failures.len(), 1);
+        assert_eq!(
+            db::vids_for_hash(&s.db, &docs[1].hash).unwrap(),
+            before,
+            "the failed document's old vector rows must survive"
+        );
+        assert_eq!(vector_models(&s, &docs[1].hash), vec!["old-model"]);
+        assert_eq!(vector_models(&s, &docs[0].hash), vec!["new-model"]);
+        assert_eq!(vector_models(&s, &docs[2].hash), vec!["new-model"]);
+        assert_eq!(
+            s.hnsw_size(),
+            3,
+            "the failed document's old vector must still be in the index"
+        );
+    }
+
+    #[test]
+    fn a_stale_document_that_triggers_a_checkpoint_keeps_its_new_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = {
+            let mut old = embed_store(dir.path(), "old-model", None);
+            let docs = seed_docs(&mut old, &["fresh body", "stale body"]);
+            run_embed_docs(&mut old, &docs[1..], 50);
+            docs
+        };
+
+        let mut s = embed_store(dir.path(), "new-model", None);
+        // Interval 2: the stale second document's own success fires a checkpoint.
+        let (run, flow) = run_embed_docs(&mut s, &docs, 2);
+
+        assert_eq!(flow, EmbedFlow::Continue);
+        assert_eq!(run.new_docs, 2);
+        assert_eq!(vector_models(&s, &docs[1].hash), vec!["new-model"]);
+        assert_eq!(vector_models(&s, &docs[0].hash), vec!["new-model"]);
+    }
+
+    #[test]
+    fn consecutive_failures_abort_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = embed_store(dir.path(), "m", Some(POISON));
+        let bodies: Vec<String> = (0..8).map(|i| format!("{POISON} {i}")).collect();
+        let docs = seed_docs(
+            &mut s,
+            &bodies.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+
+        let (run, flow) = run_embed_docs(&mut s, &docs, 50);
+
+        assert_eq!(flow, EmbedFlow::Abort);
+        assert_eq!(run.failures.len(), MAX_CONSECUTIVE_EMBED_FAILURES);
+    }
+
+    #[test]
+    fn a_success_resets_the_consecutive_failure_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = embed_store(dir.path(), "m", Some(POISON));
+        let mut bodies: Vec<String> = Vec::new();
+        for round in 0..2 {
+            bodies.extend((0..4).map(|i| format!("{POISON} {round}-{i}")));
+            bodies.push(format!("good body {round}"));
+        }
+        let docs = seed_docs(
+            &mut s,
+            &bodies.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+
+        let (run, flow) = run_embed_docs(&mut s, &docs, 50);
+
+        assert_eq!(flow, EmbedFlow::Continue);
+        assert_eq!(run.failures.len(), 8);
+        assert_eq!(run.new_docs, 2);
+    }
+
+    #[test]
+    fn finish_embed_maps_failures_to_partial_failure_or_a_hard_error() {
+        let mut run = EmbedRun::new(50);
+        assert!(finish_embed(&run, false).is_ok());
+
+        run.failures.push(EmbedFailure {
+            collection: "c".into(),
+            path: "a.md".into(),
+            error: "boom".into(),
+        });
+        let partial = finish_embed(&run, false).unwrap_err();
+        assert!(partial.downcast_ref::<PartialFailure>().is_some());
+
+        let abort = finish_embed(&run, true).unwrap_err();
+        assert!(abort.downcast_ref::<PartialFailure>().is_none());
+        assert!(abort.to_string().contains("consecutive"));
+    }
+
+    fn hook_collection(name: &str, src: &Path, hook: Option<&str>) -> Collection {
+        let mut col = test_collection(name, src);
+        col.update_command = hook.map(str::to_string);
+        col
+    }
+
+    /// A hung hook and a failing hook must not stop later collections from being
+    /// indexed, and the run must still end as a `PartialFailure`.
+    #[test]
+    fn run_update_survives_hook_timeout_and_failure_and_reports_them() {
+        let index_dir = tempfile::tempdir().unwrap();
+        let srcs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        for (i, src) in srcs.iter().enumerate() {
+            std::fs::write(src.path().join("note.md"), format!("# note {i}\nbody {i}")).unwrap();
+        }
+        {
+            let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+            let hooks = [Some("sleep 20"), Some("exit 3"), None];
+            for (i, (src, hook)) in srcs.iter().zip(hooks).enumerate() {
+                db::upsert_collection(&s.db, &hook_collection(&format!("c{i}"), src.path(), hook))
+                    .unwrap();
+            }
+        }
+        let config = HookConfig {
+            timeout: std::time::Duration::from_millis(300),
+            own_process_group: true,
+        };
+
+        let err = run_update_with(index_dir.path(), None, true, config).unwrap_err();
+
+        let partial = err
+            .downcast_ref::<PartialFailure>()
+            .expect("PartialFailure");
+        assert!(partial.0.contains("2 update hook"), "{partial}");
+        let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
+        for name in ["c0", "c1", "c2"] {
+            assert_eq!(
+                db::list_documents(&s.db, Some(name)).unwrap().len(),
+                1,
+                "{name} must be indexed despite the earlier hooks failing"
+            );
+        }
+    }
+
+    #[test]
+    fn run_update_succeeds_when_every_hook_succeeds() {
+        let index_dir = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("note.md"), "# note\nbody").unwrap();
+        {
+            let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+            db::upsert_collection(&s.db, &hook_collection("c", src.path(), Some("exit 0")))
+                .unwrap();
+        }
+        run_update_with(index_dir.path(), None, true, TEST_HOOKS).unwrap();
     }
 }

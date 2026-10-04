@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-04
+
+### Added
+- `rqmd update` kills a collection's `update_command` hook after `RQMD_HOOK_TIMEOUT_SECS`
+  (default 300). A hook that hung — a `git pull` against an unreachable remote — used to block
+  the whole run. When stdin is not a terminal the hook runs in its own process group and the
+  entire group is killed; on a terminal only the hook's shell is, so Ctrl-C and credential
+  prompts keep working.
+- `rqmd update` lists every failed or timed-out hook at the end of the run. Indexing of all
+  collections still completes first.
+- `rqmd embed` skips a document whose embedding fails, leaves that document's existing vectors
+  in place, and lists the skipped documents at the end. It stops after five consecutive
+  failures, which indicate a model or GPU fault rather than a bad document; vectors embedded up
+  to that point are saved.
+
+### Changed
+- **Exit codes.** `rqmd update` and `rqmd embed` now exit `2` when they finish but some work
+  failed (hooks that failed or timed out, documents that could not be embedded). They exited
+  `0` after a hook failure, and `1` — with nothing after the failing document embedded — after
+  an embed failure. Scripts that treat any non-zero status as fatal now see `2` for a partial
+  success; see [CLI.md](docs/CLI.md#exit-codes).
+- A superseded document's old vectors are now evicted only after its new embedding succeeds,
+  and are queued for deletion in the same iteration, so a checkpoint cannot separate the new
+  rows from the delete that replaces the old ones. If a document's vectors fail to add to the
+  index partway through, the ones already added are removed instead of being left without a
+  database row.
+
+---
+
 ## [0.18.0] - 2026-10-04
 
 ### Changed

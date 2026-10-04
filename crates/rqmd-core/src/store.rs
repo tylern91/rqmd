@@ -146,6 +146,30 @@ pub struct PendingVectorMeta {
     pub now: String,
 }
 
+/// Add every embedding to `index`, or none: if an add fails partway, the vids
+/// already added are passed to `remove` so no vector is left in the index
+/// without a `content_vectors` row pointing at it.
+fn add_all_or_rollback<T>(
+    index: &mut T,
+    embeddings: &[Vec<f32>],
+    add: impl Fn(&mut T, &[f32]) -> Result<u64>,
+    remove: impl Fn(&mut T, u64),
+) -> Result<Vec<u64>> {
+    let mut vids = Vec::with_capacity(embeddings.len());
+    for embedding in embeddings {
+        match add(index, embedding) {
+            Ok(vid) => vids.push(vid),
+            Err(e) => {
+                for vid in vids {
+                    remove(index, vid);
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(vids)
+}
+
 impl Store {
     /// Open or create a store at the given paths.
     pub fn open(config: StoreConfig, backend: Box<dyn InferenceBackend>) -> Result<Self> {
@@ -442,11 +466,21 @@ impl Store {
             .context("embed batch")?;
         let now = rfc3339_now();
 
-        let mut pending = Vec::with_capacity(total);
-        for (seq, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
-            let vid = self.hnsw.add(embedding).context("hnsw add")?;
-            self.hnsw_dirty = true;
-            pending.push(PendingVectorMeta {
+        let vids = add_all_or_rollback(
+            &mut self.hnsw,
+            &embeddings,
+            |hnsw, embedding| hnsw.add(embedding).context("hnsw add"),
+            |hnsw, vid| {
+                let _ = hnsw.remove(vid);
+            },
+        )?;
+        self.hnsw_dirty = true;
+
+        Ok(chunks
+            .iter()
+            .zip(vids)
+            .enumerate()
+            .map(|(seq, (chunk, vid))| PendingVectorMeta {
                 hash: hash.to_string(),
                 seq: seq as i64,
                 pos: chunk.pos as i64,
@@ -455,9 +489,8 @@ impl Store {
                 total_chunks: total as i64,
                 vid,
                 now: now.clone(),
-            });
-        }
-        Ok(pending)
+            })
+            .collect())
     }
 
     /// Number of vectors currently in the HNSW index (mirrors the usearch file's entry count).
@@ -1611,6 +1644,67 @@ mod tests {
         assert_eq!(store_alpha.len(), 0);
         assert_eq!(store_beta.len(), 1);
         assert_eq!(store_beta[0].body, "uniquebetatoken");
+    }
+
+    #[test]
+    fn add_all_or_rollback_removes_vids_added_before_the_failure() {
+        let mut state = (10u64, Vec::<u64>::new());
+        let err = add_all_or_rollback(
+            &mut state,
+            &vec![vec![0.0_f32]; 3],
+            |st, _| {
+                if st.0 == 12 {
+                    bail!("third add fails");
+                }
+                st.0 += 1;
+                Ok(st.0 - 1)
+            },
+            |st, vid| st.1.push(vid),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("third add fails"));
+        assert_eq!(state.1, vec![10, 11]);
+    }
+
+    #[test]
+    fn add_all_or_rollback_keeps_everything_when_all_adds_succeed() {
+        let mut state = (0u64, Vec::<u64>::new());
+        let vids = add_all_or_rollback(
+            &mut state,
+            &vec![vec![0.0_f32]; 3],
+            |st, _| {
+                st.0 += 1;
+                Ok(st.0)
+            },
+            |st, vid| st.1.push(vid),
+        )
+        .unwrap();
+        assert_eq!(vids, vec![1, 2, 3]);
+        assert!(state.1.is_empty());
+    }
+
+    #[test]
+    fn rolled_back_adds_leave_the_hnsw_size_unchanged() {
+        let mut hnsw = VectorIndex::new().unwrap();
+        let before = hnsw.size();
+        let embeddings = vec![vec![0.1_f32; rqmd_llm::EMBED_DIM]; 3];
+        let calls = std::cell::Cell::new(0);
+        let result = add_all_or_rollback(
+            &mut hnsw,
+            &embeddings,
+            |h, e| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 3 {
+                    bail!("injected");
+                }
+                h.add(e)
+            },
+            |h, vid| {
+                h.remove(vid).unwrap();
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(hnsw.size(), before);
     }
 
     /// A stub `InferenceBackend` with a configurable identity and capability
