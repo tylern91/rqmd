@@ -1,6 +1,7 @@
 use anyhow::Result;
-use rqmd_core::{SearchResult, Store};
+use rqmd_core::{Deadline, SearchResult, Store};
 use std::path::Path;
+use std::time::Duration;
 
 use crate::format::Format;
 use crate::{format, store};
@@ -42,17 +43,21 @@ pub struct QueryOptions<'a> {
     pub no_rerank: bool,
     pub full: bool,
     pub no_expand: bool,
+    pub timeout: Option<Duration>,
 }
 
 pub fn run_query(index_dir: &Path, query: &str, opts: QueryOptions) -> Result<()> {
     run_search_command(index_dir, query, opts.fmt, opts.full, true, |s| {
-        s.hybrid_query_multi(
+        // Starts once the store is open, so index and model load are not charged.
+        let deadline = opts.timeout.map_or(Deadline::none(), Deadline::after);
+        s.hybrid_query_multi_with_deadline(
             query,
             opts.intent,
             opts.num,
             opts.collections,
             opts.no_rerank,
             opts.no_expand,
+            deadline,
         )
     })
 }

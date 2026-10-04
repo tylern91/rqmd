@@ -65,6 +65,10 @@ enum Commands {
         /// Skip the LLM query-expansion / HyDE round-trip (faster; pure hybrid retrieval).
         #[arg(long, env = "RQMD_NO_EXPAND")]
         no_expand: bool,
+        /// Give up after this many seconds (exit 124). Checked between stages — a model
+        /// call already running is not interrupted — and starts once the index is open.
+        #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: Option<u64>,
     },
     /// Full-text keyword search (BM25 only, no LLM)
     Search {
@@ -133,6 +137,11 @@ enum Commands {
         /// Reclaim orphaned vectors and unreferenced content — no model, no re-embed
         #[arg(long, conflicts_with_all = ["rebuild", "collection"])]
         cleanup: bool,
+        /// Stop after this many seconds (exit 124). Work embedded so far is saved and a
+        /// rerun resumes. Checked between documents; starts once the index is open.
+        #[arg(long, value_name = "SECS", conflicts_with = "cleanup",
+              value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: Option<u64>,
     },
     /// Remove the write lock left by a crashed or hung `embed`/`update`
     Unlock {
@@ -343,6 +352,7 @@ fn run() -> Result<()> {
             no_rerank,
             intent,
             no_expand,
+            timeout,
         } => commands::query::run_query(
             &index_dir,
             &query,
@@ -354,6 +364,7 @@ fn run() -> Result<()> {
                 no_rerank,
                 full: scope.full,
                 no_expand,
+                timeout: timeout.map(std::time::Duration::from_secs),
             },
         ),
         Commands::Search { query, scope } => commands::query::run_search(
@@ -402,11 +413,17 @@ fn run() -> Result<()> {
             collection,
             rebuild,
             cleanup,
+            timeout,
         } => {
             if cleanup {
                 commands::index::run_cleanup(&index_dir)
             } else {
-                commands::index::run_embed(&index_dir, collection.as_deref(), rebuild)
+                commands::index::run_embed(
+                    &index_dir,
+                    collection.as_deref(),
+                    rebuild,
+                    timeout.map(std::time::Duration::from_secs),
+                )
             }
         }
         Commands::Unlock { force, yes } => commands::unlock::run_unlock(&index_dir, force, yes),

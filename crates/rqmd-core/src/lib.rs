@@ -2,6 +2,7 @@
 mod ast_chunk;
 pub mod chunking;
 pub mod db;
+pub mod deadline;
 pub mod fts;
 pub mod hnsw;
 pub mod lock;
@@ -12,6 +13,7 @@ pub mod store;
 pub mod types;
 
 pub use chunking::{SnippetResult, extract_snippet, snap_char_boundary_backward};
+pub use deadline::{Deadline, TimedOut};
 pub use lock::{DEFAULT_STALE_AFTER, Holder, IndexLock, LockState, lock_state, remove_lock};
 pub use store::{IndexOutcome, PendingVectorMeta, Store, StoreConfig};
 pub use types::{Collection, Document, SearchResult};

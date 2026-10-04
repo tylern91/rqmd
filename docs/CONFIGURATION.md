@@ -75,6 +75,7 @@ subsequent `rqmd update` run — you only need to specify them once.
 | `RQMD_MCP_ALLOW_NON_LOOPBACK` | `1` | *(unset)* | Required alongside a non-loopback `RQMD_MCP_HOST`/`--host` — confirms you understand this exposes the index's full-text and semantic search (and `get`, which returns file content) with no authentication; see [SECURITY.md](../SECURITY.md) |
 | `RQMD_MCP_FTS_READERS` | count | `min(4, cores)` | MCP server: number of read-only store handles serving `search`/`get`/`multi_get`/`status` concurrently (`1`–`16`); each holds its own SQLite connection, Tantivy reader and mmap'd vector index |
 | `RQMD_HOOK_TIMEOUT_SECS` | seconds | `300` | `rqmd update`: kill a collection's `update_command` hook after this long (positive whole number; anything else uses the default) |
+| `RQMD_MCP_TOOL_TIMEOUT_SECS` | seconds | `120` | MCP server: give up on a `query` call after this long (positive whole number; anything else uses the default). Starts once the call holds the model store, so waiting for another `query` or for model load is not charged; checked between stages, so one running model call is not interrupted |
 | `RQMD_MODEL_IDLE_TTL` | seconds | `300` | MCP daemon: unload an idle model after this many seconds of no use; `0` disables eviction |
 | `RQMD_NO_EXPAND` | `1` | *(unset)* | Equivalent to always passing `--no-expand` to `rqmd query` |
 | `RQMD_VERBOSE` | `1` | *(unset)* | Verbose ORT backend logging |
