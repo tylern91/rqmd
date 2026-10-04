@@ -477,7 +477,7 @@ pub fn run_embed(
 ) -> Result<()> {
     // Held for the whole command: `Store::open`'s next_vid floor and the
     // HNSW file are both unguarded against a second concurrent writer.
-    let _lock = IndexLock::acquire(index_dir)?;
+    let lock = IndexLock::acquire(index_dir)?;
 
     let cols = {
         let s = store::open_store_no_backend(index_dir, true)?;
@@ -627,6 +627,7 @@ pub fn run_embed(
 
         let todo: Vec<&Document> = todo_indices.iter().map(|i| &docs[*i]).collect();
         let flow = embed_docs(&mut s, &mut run, &todo, deadline, |done, bytes, chunks| {
+            lock.heartbeat();
             if is_tty {
                 let line = render_embed_progress_line(
                     done,
@@ -725,7 +726,7 @@ fn run_update_with(
     // Shares IndexLock with run_embed: an `update` mutating `documents` rows
     // mid-way through a concurrent `embed`'s snapshot is a separate hazard
     // from the vid race, but the two commands never need to run at once.
-    let _lock = IndexLock::acquire(index_dir)?;
+    let lock = IndexLock::acquire(index_dir)?;
 
     // Re-walk each collection's directory and re-index changed files.
     let cols = {
@@ -777,7 +778,10 @@ fn run_update_with(
             col.pattern
         );
 
-        let outcome = update_one_collection(&mut s, col, is_tty, hooks_allowed, hook_config)?;
+        let outcome =
+            update_one_collection(&mut s, col, is_tty, hooks_allowed, hook_config, &|| {
+                lock.heartbeat()
+            })?;
         all_collections_clean &= outcome.clean;
         if let Some(reason) = outcome.hook_failure {
             hook_failures.push((col.name.clone(), reason));
@@ -855,6 +859,7 @@ fn update_one_collection(
     is_tty: bool,
     hooks_allowed: bool,
     hook_config: HookConfig,
+    heartbeat: &dyn Fn(),
 ) -> Result<CollectionOutcome> {
     let dir = Path::new(&col.path);
     if !dir.exists() {
@@ -931,6 +936,7 @@ fn update_one_collection(
     }
 
     for path in &files {
+        heartbeat();
         let doc = match document::prepare(path, dir) {
             Ok(doc) => doc,
             Err(reason) => {
@@ -1270,8 +1276,8 @@ mod tests {
         db::upsert_collection(&s.db, &coll_col).unwrap();
 
         // Initial walk indexes both collections' files as active documents.
-        update_one_collection(&mut s, &keep_col, false, true, TEST_HOOKS).unwrap();
-        update_one_collection(&mut s, &coll_col, false, true, TEST_HOOKS).unwrap();
+        update_one_collection(&mut s, &keep_col, false, true, TEST_HOOKS, &|| {}).unwrap();
+        update_one_collection(&mut s, &coll_col, false, true, TEST_HOOKS, &|| {}).unwrap();
 
         let shared_hash =
             db::hashes_for_paths(&s.db, "keep", &["shared.md".to_string()]).unwrap()[0].clone();
@@ -1294,7 +1300,7 @@ mod tests {
         // and "keep" still references shared_hash, so only unique_hash
         // should be reclaimed.
         std::fs::remove_file(coll_src.path().join("unique.md")).unwrap();
-        update_one_collection(&mut s, &coll_col, false, true, TEST_HOOKS).unwrap();
+        update_one_collection(&mut s, &coll_col, false, true, TEST_HOOKS, &|| {}).unwrap();
         s.reclaim_orphaned_vectors().unwrap();
 
         assert!(
