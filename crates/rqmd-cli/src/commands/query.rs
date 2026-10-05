@@ -26,6 +26,7 @@ fn run_search_command(
         store::open_store_no_backend(index_dir, true)?
     };
     store::warn_if_raw_backfill_pending(&s);
+    store::warn_if_fts_rebuild_pending(&s);
     let results = search(&mut s)?;
     let roots = store::collection_roots(&s, fmt)?;
     format::print_results(&results, fmt, full, query, &roots);

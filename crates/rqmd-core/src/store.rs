@@ -55,6 +55,14 @@ const BLEND_LO: f32 = 0.25;
 /// persisted on every checkpoint (see `Self::next_vid` and `Self::open`'s reconciliation).
 pub const NEXT_VID_CONFIG_KEY: &str = "next_vid";
 
+/// `store_config` key recording which FTS tokenizer built the Tantivy index.
+pub const FTS_TOKENIZER_CONFIG_KEY: &str = "fts_tokenizer_version";
+
+/// Bump whenever the FTS analyzer changes what a given text tokenizes to: the
+/// index then no longer matches what queries produce, and
+/// [`Store::rebuild_fts_if_needed`] re-indexes it. `2` = CJK bigrams.
+pub const FTS_TOKENIZER_VERSION: &str = "2";
+
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 /// The hybrid search engine — opens the SQLite/Tantivy/HNSW triad and exposes
@@ -588,6 +596,47 @@ impl Store {
     /// the delete in the writer, it does not commit.
     pub fn remove_from_fts(&mut self, filepath: &str) -> Result<()> {
         self.fts.delete_by_filepath(filepath)
+    }
+
+    /// Whether the Tantivy index was built by an older tokenizer than this
+    /// binary's, so some text (CJK today) is indexed in a form queries no
+    /// longer produce.
+    pub fn fts_rebuild_pending(&self) -> Result<bool> {
+        if db::get_config(&self.db, FTS_TOKENIZER_CONFIG_KEY)?.as_deref()
+            == Some(FTS_TOKENIZER_VERSION)
+        {
+            return Ok(false);
+        }
+        // An index with no documents has nothing indexed under an old tokenizer.
+        let any_active: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM documents WHERE active = 1)",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(any_active)
+    }
+
+    /// Re-index every active document into Tantivy when the index predates
+    /// [`FTS_TOKENIZER_VERSION`]. Returns whether a rebuild ran. Reads each
+    /// document's text from `content`, so call it only when `content` is
+    /// trustworthy (after a full `update` pass), and only from a writer that
+    /// holds the index lock — it replaces the whole index.
+    pub fn rebuild_fts_if_needed(&mut self) -> Result<bool> {
+        if !self.fts_rebuild_pending()? {
+            return Ok(false);
+        }
+        let mut stmt = self.db.prepare(
+            "SELECT d.collection || '/' || d.path, d.title, c.doc, d.id \
+             FROM documents d JOIN content c ON c.hash = d.hash \
+             WHERE d.active = 1",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        self.fts
+            .rebuild(rows.map(|row| row.map_err(anyhow::Error::from)))
+            .context("rebuild full-text index")?;
+        drop(stmt);
+        db::set_config(&self.db, FTS_TOKENIZER_CONFIG_KEY, FTS_TOKENIZER_VERSION)?;
+        Ok(true)
     }
 
     // ── Search ────────────────────────────────────────────────────────────────
@@ -2232,6 +2281,45 @@ mod tests {
     /// `embed_fingerprint_applies_ast` is the single eligibility predicate the
     /// CLI and SQL builder share — assert it agrees with the extension list
     /// `chunking::ast_chunking_extensions()` publishes, not a restated one.
+    #[test]
+    fn fts_rebuild_is_pending_only_until_it_has_run_over_existing_documents() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = open_stub_store(
+            dir.path(),
+            StubBackend {
+                name: "stub".to_string(),
+                caps: rqmd_llm::BackendCapabilities {
+                    embed: false,
+                    rerank: false,
+                    generate: false,
+                },
+            },
+        );
+        assert!(!store.fts_rebuild_pending().unwrap(), "empty index");
+        assert!(!store.rebuild_fts_if_needed().unwrap());
+
+        store
+            .index_document("coll", "jp.md", "T", "私は昨日東京都庁を訪れました")
+            .unwrap();
+        store.flush().unwrap();
+        assert!(store.fts_rebuild_pending().unwrap());
+
+        // Simulate an index built by the old tokenizer: the entry is absent.
+        store.remove_from_fts("coll/jp.md").unwrap();
+        store.flush().unwrap();
+        assert!(store.search_fts("東京都", 10, None).unwrap().is_empty());
+
+        assert!(store.rebuild_fts_if_needed().unwrap());
+        assert_eq!(store.search_fts("東京都", 10, None).unwrap().len(), 1);
+        assert!(!store.fts_rebuild_pending().unwrap());
+
+        // A second call must not rebuild again.
+        store.remove_from_fts("coll/jp.md").unwrap();
+        store.flush().unwrap();
+        assert!(!store.rebuild_fts_if_needed().unwrap());
+        assert!(store.search_fts("東京都", 10, None).unwrap().is_empty());
+    }
+
     fn fingerprint_of(sig: &str) -> String {
         hex::encode(&Sha256::digest(sig.as_bytes())[..3])
     }

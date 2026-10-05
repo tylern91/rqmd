@@ -29,6 +29,22 @@ raw query already returns a dominant top result (score above a fixed
 threshold with a clear gap to the runner-up), expansion is skipped entirely
 and the pipeline proceeds directly to reranking that candidate set.
 
+### Full-text tokenization
+
+BM25 runs on Tantivy's default analyzer (split on whitespace and punctuation, drop tokens over
+40 bytes, lowercase) with one addition: Han, Hiragana, Katakana and Hangul runs are split into
+overlapping bigrams, and a lone CJK character stays a single token. Japanese and Chinese have
+no spaces, so without this a sentence was one token — dropped past 40 bytes, and matchable only
+as a whole. Now `東京都` finds `私は昨日東京都庁を訪れました`; a query is tokenized the same way,
+so it matches as an adjacent-bigram phrase. A single-character query matches only where that
+character stands alone, and CJK postings are larger than word-level ones. Latin-script text
+tokenizes exactly as before.
+
+The analyzer is part of what the index contains, so `store_config` records the tokenizer version
+that built it (`fts_tokenizer_version`). After an upgrade that changes it, a full
+`rqmd update` rebuilds the Tantivy index once from the stored document text; `rqmd doctor` and
+search warn until then.
+
 ### Smart chunking
 
 Documents longer than the chunk size are split at content-aware break

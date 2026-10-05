@@ -813,6 +813,13 @@ fn run_update_with(
     // `documents.raw` rows at their empty-string default.
     if collection.is_none() && all_collections_clean {
         store::mark_raw_split_backfilled(&s)?;
+        // The rebuild reads document text from `content`, which is only
+        // trustworthy once this same pass has healed it.
+        if s.rebuild_fts_if_needed()? {
+            println!("Rebuilt the full-text index with CJK-aware tokenization.");
+        }
+    } else {
+        store::warn_if_fts_rebuild_pending(&s);
     }
 
     if hook_failures.is_empty() {
@@ -1108,6 +1115,7 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         print_doctor_stale_fingerprint_check(&s.db);
         print_doctor_orphaned_vector_check(&s.db);
         store::warn_if_raw_backfill_pending(&s);
+        store::warn_if_fts_rebuild_pending(&s);
 
         // Recommended next steps.
         let needs_embed: i64 = db::count_docs_needing_embed(
@@ -1734,6 +1742,60 @@ mod tests {
                 "{name} must be indexed despite the earlier hooks failing"
             );
         }
+    }
+
+    #[test]
+    fn run_update_rebuilds_a_legacy_full_text_index() {
+        let index_dir = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src.path().join("jp.md"),
+            "# 旅行記\n\n私は昨日東京都庁を訪れました",
+        )
+        .unwrap();
+        {
+            let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+            db::upsert_collection(&s.db, &test_collection("c", src.path())).unwrap();
+        }
+        run_update_with(index_dir.path(), None, true, TEST_HOOKS).unwrap();
+
+        // Make the index look like one built by the previous tokenizer: no
+        // version marker, and the document absent from Tantivy. The file is
+        // unchanged, so only the rebuild can bring it back.
+        {
+            let mut s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+            db::delete_config(&s.db, rqmd_core::store::FTS_TOKENIZER_CONFIG_KEY).unwrap();
+            s.remove_from_fts("c/jp.md").unwrap();
+            s.flush().unwrap();
+            assert!(s.search_fts("東京都", 10, None).unwrap().is_empty());
+            assert!(s.fts_rebuild_pending().unwrap());
+        }
+
+        run_update_with(index_dir.path(), None, true, TEST_HOOKS).unwrap();
+
+        let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
+        assert_eq!(s.search_fts("東京都", 10, None).unwrap().len(), 1);
+        assert!(!s.fts_rebuild_pending().unwrap());
+    }
+
+    #[test]
+    fn a_collection_scoped_update_leaves_the_full_text_rebuild_pending() {
+        let index_dir = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src.path().join("jp.md"),
+            "# 旅行記\n\n私は昨日東京都庁を訪れました",
+        )
+        .unwrap();
+        {
+            let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+            db::upsert_collection(&s.db, &test_collection("c", src.path())).unwrap();
+        }
+
+        run_update_with(index_dir.path(), Some("c"), true, TEST_HOOKS).unwrap();
+
+        let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
+        assert!(s.fts_rebuild_pending().unwrap());
     }
 
     #[test]

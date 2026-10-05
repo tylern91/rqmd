@@ -37,6 +37,14 @@ specific token instead of the cached one.
 `OrtBackend` handles embeddings only. Reranking uses `LlamaCppBackend`
 automatically as a fallback.
 
+## Japanese, Chinese or Korean search finds nothing
+
+If `rqmd search` warns that the full-text index predates CJK tokenization, the index was built
+before CJK text was split into searchable bigrams. Run a full `rqmd update` (not
+`--collection`-scoped) once: it rebuilds the Tantivy index from the stored document text and
+prints `Rebuilt the full-text index`. Latin-script search is unaffected in the meantime. A
+single-character query only matches where that character stands alone; use two or more.
+
 ## `rqmd doctor` reports orphaned vectors
 
 An orphaned vector is a `content_vectors` row whose hash has no active

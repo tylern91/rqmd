@@ -1,6 +1,7 @@
 #[cfg(feature = "ast-chunking")]
 mod ast_chunk;
 pub mod chunking;
+mod cjk_tokenizer;
 pub mod db;
 pub mod deadline;
 pub mod fts;
