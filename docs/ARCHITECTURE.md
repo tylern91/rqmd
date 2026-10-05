@@ -51,6 +51,13 @@ computed cut point is snapped forward or backward to the nearest valid
 character boundary before the text is sliced — cutting mid-character would
 otherwise corrupt the chunk and panic on decode.
 
+A markdown pipe table (a header row, a `|---|` separator row, then data rows, outside a
+code fence) is kept readable across chunk boundaries. Cuts inside a table already fall between
+rows, so the chunker only has to repair the continuation: a chunk that begins in a table's data
+rows starts at the next whole row and is prefixed with the table's header and separator rows,
+so its embedding sees the column names. A header longer than 800 characters is not repeated.
+This applies to the markdown chunker only; AST-chunked source files are unaffected.
+
 These three constants (embed model name, chunk size, chunk overlap) feed a
 short fingerprint hash that gets stored alongside the index. If any of them
 changes — a different embed model, or a future tuning pass on the chunking

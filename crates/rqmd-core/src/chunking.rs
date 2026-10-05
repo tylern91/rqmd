@@ -186,6 +186,111 @@ pub(crate) fn best_break_in_window(
         .map(|b| b.pos)
 }
 
+// ── Table continuity ──────────────────────────────────────────────────────────
+
+/// A header plus separator row longer than this is not repeated into
+/// continuation chunks: the copy would crowd out the rows it is meant to label.
+const MAX_TABLE_HEADER_CHARS: usize = CHUNK_WINDOW_CHARS;
+
+/// A GFM pipe table: `start..data_start` is its header row and separator row,
+/// `data_start..end` its data rows.
+#[derive(Debug, Clone, Copy)]
+struct Table {
+    start: usize,
+    data_start: usize,
+    end: usize,
+}
+
+fn is_table_row(line: &str) -> bool {
+    line.trim_start().starts_with('|')
+}
+
+fn is_separator_row(line: &str) -> bool {
+    let cells: Vec<&str> = line
+        .trim()
+        .trim_start_matches('|')
+        .trim_end_matches('|')
+        .split('|')
+        .map(str::trim)
+        .collect();
+    cells
+        .iter()
+        .all(|c| !c.is_empty() && c.contains('-') && c.chars().all(|ch| matches!(ch, '-' | ':')))
+}
+
+/// Pipe tables outside code fences: a run of consecutive `|` rows whose second
+/// row is a separator.
+fn scan_tables(text: &str, fences: &[CodeFenceRegion]) -> Vec<Table> {
+    let mut tables = Vec::new();
+    let mut run: Vec<(usize, &str)> = Vec::new();
+    let mut offset = 0;
+    let flush = |run: &mut Vec<(usize, &str)>, tables: &mut Vec<Table>| {
+        if run.len() >= 2 && is_separator_row(run[1].1) {
+            let (last_start, last) = run[run.len() - 1];
+            tables.push(Table {
+                start: run[0].0,
+                data_start: run.get(2).map_or(last_start + last.len(), |r| r.0),
+                end: last_start + last.len(),
+            });
+        }
+        run.clear();
+    };
+    for line in text.split_inclusive('\n') {
+        if is_table_row(line) && !inside_fence(offset, fences) {
+            run.push((offset, line));
+        } else {
+            flush(&mut run, &mut tables);
+        }
+        offset += line.len();
+    }
+    flush(&mut run, &mut tables);
+    tables
+}
+
+/// Keep every chunk of a table readable on its own. A chunk that starts inside
+/// a table's data rows is moved to the next row boundary and prefixed with the
+/// table's header and separator rows; one that starts inside the header is
+/// extended back to the table's first row. `pos` stays the offset of the
+/// chunk's first original byte.
+fn carry_table_headers(text: &str, chunks: Vec<Chunk>, tables: &[Table]) -> Vec<Chunk> {
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let Some(table) = tables
+                .iter()
+                .find(|t| t.start < chunk.pos && chunk.pos < t.end)
+            else {
+                return chunk;
+            };
+            let end = chunk.pos + chunk.text.len();
+            if chunk.pos < table.data_start {
+                return Chunk {
+                    text: text[table.start..end].to_string(),
+                    pos: table.start,
+                };
+            }
+            let header = &text[table.start..table.data_start];
+            if header.len() > MAX_TABLE_HEADER_CHARS {
+                return chunk;
+            }
+            let row_start = if text.as_bytes()[chunk.pos - 1] == b'\n' {
+                chunk.pos
+            } else {
+                text[chunk.pos..]
+                    .find('\n')
+                    .map_or(text.len(), |i| chunk.pos + i + 1)
+            };
+            if row_start >= end || row_start >= table.end {
+                return chunk;
+            }
+            Chunk {
+                text: format!("{header}{}", &text[row_start..end]),
+                pos: row_start,
+            }
+        })
+        .collect()
+}
+
 // ── Char-boundary helpers ─────────────────────────────────────────────────────
 
 /// Advance `pos` to the next UTF-8 char boundary (or text.len()).
@@ -268,7 +373,8 @@ pub(crate) fn chunk_from_break_points(text: &str, break_points: &[BreakPoint]) -
 }
 
 /// Split `text` into overlapping chunks of at most CHUNK_SIZE_CHARS characters,
-/// breaking at high-score positions (headings, paragraph breaks, etc.).
+/// breaking at high-score positions (headings, paragraph breaks, etc.). A
+/// chunk that begins inside a pipe table carries the table's header rows.
 pub fn chunk_document(text: &str) -> Vec<Chunk> {
     if text.len() <= CHUNK_SIZE_CHARS {
         return vec![Chunk {
@@ -279,7 +385,8 @@ pub fn chunk_document(text: &str) -> Vec<Chunk> {
 
     let fences = scan_code_fences(text);
     let break_points = scan_break_points(text, &fences);
-    chunk_from_break_points(text, &break_points)
+    let chunks = chunk_from_break_points(text, &break_points);
+    carry_table_headers(text, chunks, &scan_tables(text, &fences))
 }
 
 /// Chunk `text` from `path`, dispatching to AST-aware declaration-boundary
@@ -479,6 +586,125 @@ fn build_snippet_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TABLE_HEADER: &str = "| id | name | note |\n|----|------|------|\n";
+
+    fn table_doc(rows: usize) -> String {
+        let mut doc = String::from("# Inventory\n\nIntro paragraph.\n\n");
+        doc.push_str(TABLE_HEADER);
+        for i in 0..rows {
+            doc.push_str(&format!("| {i:04} | item-{i:04} | note for row {i:04} |\n"));
+        }
+        doc.push_str("\nClosing paragraph.\n");
+        doc
+    }
+
+    fn unadorned_chunks(text: &str) -> Vec<Chunk> {
+        let fences = scan_code_fences(text);
+        chunk_from_break_points(text, &scan_break_points(text, &fences))
+    }
+
+    #[test]
+    fn continuation_chunks_of_a_long_table_start_at_a_row_with_the_header() {
+        let doc = table_doc(400);
+        let chunks = chunk_document(&doc);
+        assert!(chunks.len() > 3, "fixture must span several chunks");
+
+        let mut continuations = 0;
+        for chunk in chunks.iter().filter(|c| c.pos > 0) {
+            let in_data_rows =
+                doc[chunk.pos..].starts_with("| ") && chunk.pos > doc.find(TABLE_HEADER).unwrap();
+            if !in_data_rows {
+                continue;
+            }
+            continuations += 1;
+            assert!(
+                chunk.text.starts_with(TABLE_HEADER),
+                "continuation chunk at {} lacks the header: {:?}",
+                chunk.pos,
+                &chunk.text[..chunk.text.len().min(80)]
+            );
+            let first_row = &chunk.text[TABLE_HEADER.len()..];
+            assert!(
+                first_row.starts_with("| 0"),
+                "must start on a whole row: {first_row:.40}"
+            );
+            assert!(doc[..chunk.pos].ends_with('\n'), "pos must be a row start");
+        }
+        assert!(continuations >= 2, "expected several table continuations");
+    }
+
+    #[test]
+    fn a_document_without_tables_chunks_exactly_as_before() {
+        let doc = "word ".repeat(2000);
+        let chunks = chunk_document(&doc);
+        let expected = unadorned_chunks(&doc);
+        assert_eq!(chunks.len(), expected.len());
+        for (a, b) in chunks.iter().zip(&expected) {
+            assert_eq!((&a.text, a.pos), (&b.text, b.pos));
+        }
+    }
+
+    #[test]
+    fn pipe_rows_inside_a_code_fence_are_not_a_table() {
+        let mut doc = String::from("```\n");
+        doc.push_str(TABLE_HEADER);
+        for i in 0..400 {
+            doc.push_str(&format!("| {i:04} | item-{i:04} | note for row {i:04} |\n"));
+        }
+        doc.push_str("```\n");
+        let chunks = chunk_document(&doc);
+        let expected = unadorned_chunks(&doc);
+        assert_eq!(chunks.len(), expected.len());
+        for (a, b) in chunks.iter().zip(&expected) {
+            assert_eq!((&a.text, a.pos), (&b.text, b.pos));
+        }
+    }
+
+    #[test]
+    fn scan_tables_needs_a_separator_row() {
+        let with_sep = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let without_sep = "| a | b |\n| 1 | 2 |\n| 3 | 4 |\n";
+        assert_eq!(scan_tables(with_sep, &[]).len(), 1);
+        assert!(scan_tables(without_sep, &[]).is_empty());
+        let t = scan_tables(with_sep, &[])[0];
+        assert_eq!(&with_sep[t.start..t.data_start], "| a | b |\n|---|---|\n");
+        assert_eq!(t.end, with_sep.len());
+    }
+
+    #[test]
+    fn a_chunk_starting_inside_the_header_is_extended_back_to_the_table_start() {
+        let doc = format!("intro\n\n{TABLE_HEADER}| 1 | a | b |\n| 2 | c | d |\n");
+        let tables = scan_tables(&doc, &[]);
+        let table_start = tables[0].start;
+        let mid_header = table_start + 4;
+        let chunk = Chunk {
+            text: doc[mid_header..].to_string(),
+            pos: mid_header,
+        };
+
+        let out = carry_table_headers(&doc, vec![chunk], &tables);
+
+        assert_eq!(out[0].pos, table_start);
+        assert_eq!(out[0].text, doc[table_start..]);
+    }
+
+    #[test]
+    fn an_oversized_header_is_not_repeated() {
+        let wide = "x".repeat(MAX_TABLE_HEADER_CHARS);
+        let doc = format!("| {wide} |\n|---|\n| 1 |\n| 2 |\n| 3 |\n");
+        let tables = scan_tables(&doc, &[]);
+        let pos = doc.find("| 2 |").unwrap();
+        let chunk = Chunk {
+            text: doc[pos..].to_string(),
+            pos,
+        };
+
+        let out = carry_table_headers(&doc, vec![chunk], &tables);
+
+        assert_eq!(out[0].pos, pos);
+        assert_eq!(out[0].text, doc[pos..]);
+    }
 
     #[test]
     fn short_doc_is_single_chunk() {

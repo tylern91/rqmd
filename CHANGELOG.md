@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-04
+
+### Changed
+- A markdown chunk that starts partway down a pipe table now begins at a whole row and repeats the
+  table's header and separator rows, so its embedding knows what the columns are. Cuts inside a
+  table already landed between rows; what was missing was the header, which only the first chunk
+  of a long table had. A chunk that starts inside the header is extended back to the table's first
+  row. Tables inside code fences, and headers longer than 800 characters, are left alone. Other
+  documents chunk exactly as before.
+- **Re-embedding.** The embedding fingerprint of every non-AST path (markdown, text and any other
+  extension the AST chunker does not handle) changes, so `rqmd embed` re-embeds those documents
+  once and `rqmd doctor` / `rqmd status` report them as stale until it does. The fingerprint
+  cannot depend on a document's content, so documents without tables are re-embedded too, to
+  identical vectors. AST-chunked source files keep their vectors.
+
+---
+
 ## [0.21.1] - 2026-10-04
 
 ### Fixed
