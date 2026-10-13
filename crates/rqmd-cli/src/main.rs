@@ -162,6 +162,10 @@ enum Commands {
         /// (that hook's command comes from whoever set up that repo, not you)
         #[arg(long)]
         run_hooks: bool,
+        /// Re-read and re-hash every file, ignoring the recorded size and
+        /// mtime that normally let unchanged files be skipped
+        #[arg(long)]
+        full: bool,
     },
     /// Diagnose config, index, model, and device issues
     Doctor,
@@ -430,10 +434,12 @@ fn run() -> Result<()> {
         Commands::Update {
             collection,
             run_hooks,
+            full,
         } => commands::index::run_update(
             &index_dir,
             collection.as_deref(),
             store::hooks_allowed(index_source, run_hooks),
+            full,
         ),
         Commands::Doctor => commands::index::run_doctor(&index_dir),
         Commands::Bench { rounds } => commands::bench::run_bench(&index_dir, rounds),

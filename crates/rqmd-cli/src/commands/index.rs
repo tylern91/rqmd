@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
@@ -713,14 +713,28 @@ pub fn run_cleanup(index_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn run_update(index_dir: &Path, collection: Option<&str>, hooks_allowed: bool) -> Result<()> {
-    run_update_with(index_dir, collection, hooks_allowed, HookConfig::from_env())
+pub fn run_update(
+    index_dir: &Path,
+    collection: Option<&str>,
+    hooks_allowed: bool,
+    full: bool,
+) -> Result<()> {
+    run_update_with(
+        index_dir,
+        collection,
+        hooks_allowed,
+        full,
+        HookConfig::from_env(),
+    )
 }
 
+/// `full` re-reads and re-hashes every file instead of trusting the recorded
+/// size and mtime of files that look unchanged.
 fn run_update_with(
     index_dir: &Path,
     collection: Option<&str>,
     hooks_allowed: bool,
+    full: bool,
     hook_config: HookConfig,
 ) -> Result<()> {
     // Shares IndexLock with run_embed: an `update` mutating `documents` rows
@@ -778,10 +792,17 @@ fn run_update_with(
             col.pattern
         );
 
-        let outcome =
-            update_one_collection(&mut s, col, is_tty, hooks_allowed, hook_config, &|| {
-                lock.heartbeat()
-            })?;
+        let outcome = update_one_collection(
+            &mut s,
+            col,
+            UpdateRun {
+                is_tty,
+                hooks_allowed,
+                full,
+                hook_config,
+            },
+            &|| lock.heartbeat(),
+        )?;
         all_collections_clean &= outcome.clean;
         if let Some(reason) = outcome.hook_failure {
             hook_failures.push((col.name.clone(), reason));
@@ -860,14 +881,27 @@ struct CollectionOutcome {
 /// (picked up implicitly from the current directory) can belong to a repo the
 /// current user does not control, so its hook command is skipped unless the
 /// caller opted in — see `store::hooks_allowed`.
+/// Per-invocation settings shared by every collection in one `rqmd update`.
+#[derive(Clone, Copy)]
+struct UpdateRun {
+    is_tty: bool,
+    hooks_allowed: bool,
+    full: bool,
+    hook_config: HookConfig,
+}
+
 fn update_one_collection(
     s: &mut rqmd_core::Store,
     col: &Collection,
-    is_tty: bool,
-    hooks_allowed: bool,
-    hook_config: HookConfig,
+    run: UpdateRun,
     heartbeat: &dyn Fn(),
 ) -> Result<CollectionOutcome> {
+    let UpdateRun {
+        is_tty,
+        hooks_allowed,
+        full,
+        hook_config,
+    } = run;
     let dir = Path::new(&col.path);
     if !dir.exists() {
         eprintln!("  WARN: directory not found: {}", dir.display());
@@ -942,8 +976,25 @@ fn update_one_collection(
         // stale — unlike a per-file failure below, which does.
     }
 
+    // Files whose size and mtime still match what they were last indexed from
+    // are counted unchanged without being read or hashed. A miss, or `--full`,
+    // falls through to the content hash, which stays the source of truth.
+    let stat_cache = if full {
+        HashMap::new()
+    } else {
+        db::load_doc_stat_cache(&s.db, &col.name).context("load document stat cache")?
+    };
+
     for path in &files {
         heartbeat();
+        let stat = document::stat_file(path);
+        if let Some(stat) = stat
+            && stat_cache.get(&document::rel_path_of(path, dir)) == Some(&stat)
+        {
+            processed += 1;
+            unchanged_count += 1;
+            continue;
+        }
         let doc = match document::prepare(path, dir) {
             Ok(doc) => doc,
             Err(reason) => {
@@ -972,9 +1023,20 @@ fn update_one_collection(
                 eprintln!("  WARN: {}: {e:#}", doc.rel_path);
                 clean = false;
             }
-            Ok(IndexOutcome::New) => new_count += 1,
-            Ok(IndexOutcome::Updated) => updated_count += 1,
-            Ok(IndexOutcome::Unchanged) => unchanged_count += 1,
+            Ok(outcome) => {
+                match outcome {
+                    IndexOutcome::New => new_count += 1,
+                    IndexOutcome::Updated => updated_count += 1,
+                    IndexOutcome::Unchanged => unchanged_count += 1,
+                }
+                db::set_document_stat(
+                    &s.db,
+                    &col.name,
+                    &doc.rel_path,
+                    stat.and_then(document::trusted_stat),
+                )
+                .context("record document stat")?;
+            }
         }
     }
 
@@ -1223,6 +1285,13 @@ mod tests {
         own_process_group: true,
     };
 
+    const TEST_RUN: UpdateRun = UpdateRun {
+        is_tty: false,
+        hooks_allowed: true,
+        full: false,
+        hook_config: TEST_HOOKS,
+    };
+
     #[test]
     fn truncate_context_preview_snaps_multibyte_boundary() {
         // 56 ASCII bytes followed by a 2-byte 'é' straddling the fixed
@@ -1284,8 +1353,8 @@ mod tests {
         db::upsert_collection(&s.db, &coll_col).unwrap();
 
         // Initial walk indexes both collections' files as active documents.
-        update_one_collection(&mut s, &keep_col, false, true, TEST_HOOKS, &|| {}).unwrap();
-        update_one_collection(&mut s, &coll_col, false, true, TEST_HOOKS, &|| {}).unwrap();
+        update_one_collection(&mut s, &keep_col, TEST_RUN, &|| {}).unwrap();
+        update_one_collection(&mut s, &coll_col, TEST_RUN, &|| {}).unwrap();
 
         let shared_hash =
             db::hashes_for_paths(&s.db, "keep", &["shared.md".to_string()]).unwrap()[0].clone();
@@ -1308,7 +1377,7 @@ mod tests {
         // and "keep" still references shared_hash, so only unique_hash
         // should be reclaimed.
         std::fs::remove_file(coll_src.path().join("unique.md")).unwrap();
-        update_one_collection(&mut s, &coll_col, false, true, TEST_HOOKS, &|| {}).unwrap();
+        update_one_collection(&mut s, &coll_col, TEST_RUN, &|| {}).unwrap();
         s.reclaim_orphaned_vectors().unwrap();
 
         assert!(
@@ -1728,7 +1797,7 @@ mod tests {
             own_process_group: true,
         };
 
-        let err = run_update_with(index_dir.path(), None, true, config).unwrap_err();
+        let err = run_update_with(index_dir.path(), None, true, false, config).unwrap_err();
 
         let partial = err
             .downcast_ref::<PartialFailure>()
@@ -1757,7 +1826,7 @@ mod tests {
             let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
             db::upsert_collection(&s.db, &test_collection("c", src.path())).unwrap();
         }
-        run_update_with(index_dir.path(), None, true, TEST_HOOKS).unwrap();
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
 
         // Make the index look like one built by the previous tokenizer: no
         // version marker, and the document absent from Tantivy. The file is
@@ -1771,7 +1840,7 @@ mod tests {
             assert!(s.fts_rebuild_pending().unwrap());
         }
 
-        run_update_with(index_dir.path(), None, true, TEST_HOOKS).unwrap();
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
 
         let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
         assert_eq!(s.search_fts("東京都", 10, None).unwrap().len(), 1);
@@ -1792,7 +1861,7 @@ mod tests {
             db::upsert_collection(&s.db, &test_collection("c", src.path())).unwrap();
         }
 
-        run_update_with(index_dir.path(), Some("c"), true, TEST_HOOKS).unwrap();
+        run_update_with(index_dir.path(), Some("c"), true, false, TEST_HOOKS).unwrap();
 
         let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
         assert!(s.fts_rebuild_pending().unwrap());
@@ -1808,6 +1877,6 @@ mod tests {
             db::upsert_collection(&s.db, &hook_collection("c", src.path(), Some("exit 0")))
                 .unwrap();
         }
-        run_update_with(index_dir.path(), None, true, TEST_HOOKS).unwrap();
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
     }
 }
