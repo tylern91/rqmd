@@ -963,7 +963,16 @@ fn update_one_collection(
     // enabling "Indexing: N/total" progress (matching qmd's output). Reuses the
     // same walk/filter logic `collection add` uses, so a re-index can't silently
     // disagree with the original add about which files belong in the collection.
-    let files = document::collect_candidates(dir, &include_set, &ignore_set, col.allow_hidden);
+    let document::Candidates {
+        files,
+        too_large: too_large_count,
+    } = document::collect_candidates(
+        dir,
+        &include_set,
+        &ignore_set,
+        document::WalkOptions::for_collection(col),
+    );
+    skips.too_large = too_large_count;
     let total = files.len();
     if total == 0 {
         eprintln!(
@@ -1339,6 +1348,8 @@ mod tests {
             include_by_default: true,
             update_command: None,
             allow_hidden: false,
+            respect_gitignore: false,
+            max_file_bytes: None,
         };
         let coll_col = Collection {
             name: "coll".into(),
@@ -1348,6 +1359,8 @@ mod tests {
             include_by_default: true,
             update_command: None,
             allow_hidden: false,
+            respect_gitignore: false,
+            max_file_bytes: None,
         };
         db::upsert_collection(&s.db, &keep_col).unwrap();
         db::upsert_collection(&s.db, &coll_col).unwrap();
@@ -1572,6 +1585,8 @@ mod tests {
             include_by_default: true,
             update_command: None,
             allow_hidden: false,
+            respect_gitignore: false,
+            max_file_bytes: None,
         }
     }
 

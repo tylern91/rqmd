@@ -79,7 +79,9 @@ fn init_schema(conn: &Connection) -> Result<()> {
             include_by_default INTEGER DEFAULT 1,
             update_command     TEXT,
             context            TEXT,
-            allow_hidden       INTEGER NOT NULL DEFAULT 0
+            allow_hidden       INTEGER NOT NULL DEFAULT 0,
+            respect_gitignore  INTEGER NOT NULL DEFAULT 0,
+            max_file_bytes     INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS store_config (
@@ -97,6 +99,18 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "store_collections",
         "allow_hidden",
         "allow_hidden INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "store_collections",
+        "respect_gitignore",
+        "respect_gitignore INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "store_collections",
+        "max_file_bytes",
+        "max_file_bytes INTEGER",
     )?;
     // `documents.raw` separates the per-document retrieval payload (the
     // verbatim file) from `content.doc`, which is keyed by `content.hash` —
@@ -868,15 +882,17 @@ pub fn upsert_collection(conn: &Connection, c: &Collection) -> Result<()> {
     let ignore = serde_json::to_string(&c.ignore)?;
     conn.execute(
         r#"
-        INSERT INTO store_collections(name, path, pattern, ignore_patterns, include_by_default, update_command, allow_hidden)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        INSERT INTO store_collections(name, path, pattern, ignore_patterns, include_by_default, update_command, allow_hidden, respect_gitignore, max_file_bytes)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ON CONFLICT(name) DO UPDATE SET
             path               = excluded.path,
             pattern            = excluded.pattern,
             ignore_patterns    = excluded.ignore_patterns,
             include_by_default = excluded.include_by_default,
             update_command     = excluded.update_command,
-            allow_hidden       = excluded.allow_hidden
+            allow_hidden       = excluded.allow_hidden,
+            respect_gitignore  = excluded.respect_gitignore,
+            max_file_bytes     = excluded.max_file_bytes
         "#,
         params![
             c.name,
@@ -886,6 +902,8 @@ pub fn upsert_collection(conn: &Connection, c: &Collection) -> Result<()> {
             c.include_by_default as i64,
             c.update_command,
             c.allow_hidden as i64,
+            c.respect_gitignore as i64,
+            c.max_file_bytes.map(|n| n as i64),
         ],
     )?;
     Ok(())
@@ -893,7 +911,7 @@ pub fn upsert_collection(conn: &Connection, c: &Collection) -> Result<()> {
 
 pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>> {
     let mut stmt = conn.prepare(
-        "SELECT name, path, pattern, ignore_patterns, include_by_default, update_command, allow_hidden FROM store_collections",
+        "SELECT name, path, pattern, ignore_patterns, include_by_default, update_command, allow_hidden, respect_gitignore, max_file_bytes FROM store_collections",
     )?;
     let rows = stmt
         .query_map([], |row| {
@@ -905,13 +923,25 @@ pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>> {
                 row.get::<_, i64>(4)?,
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, Option<i64>>(8)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     rows.into_iter()
         .map(
-            |(name, path, pattern, ignore_json, include, update, allow_hidden)| {
+            |(
+                name,
+                path,
+                pattern,
+                ignore_json,
+                include,
+                update,
+                allow_hidden,
+                respect_gitignore,
+                max_file_bytes,
+            )| {
                 let ignore: Vec<String> = ignore_json
                     .map(|j| serde_json::from_str(&j).unwrap_or_default())
                     .unwrap_or_default();
@@ -923,6 +953,8 @@ pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>> {
                     include_by_default: include != 0,
                     update_command: update,
                     allow_hidden: allow_hidden != 0,
+                    respect_gitignore: respect_gitignore != 0,
+                    max_file_bytes: max_file_bytes.and_then(|n| u64::try_from(n).ok()),
                 })
             },
         )

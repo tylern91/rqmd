@@ -5,8 +5,8 @@
 ## Excluding files
 
 By default rqmd indexes every file matching a collection's mask pattern
-(`**/*.md`). It reads **no** ignore files — `.gitignore` and `.ignore` are
-never consulted.
+(`**/*.md`). It reads **no** ignore files unless the collection opts in with
+`--respect-gitignore` (see below); `.ignore` is never consulted.
 
 **Built-in exclusions** (skipped unless overridden):
 
@@ -22,6 +22,31 @@ never consulted.
 ```sh
 # Index hidden files/dirs under the collection root too
 rqmd collection add ~/notes --hidden
+```
+
+**`--respect-gitignore` — skip what the tree's `.gitignore` files match:**
+
+Off by default, so a collection never silently loses documents. When on, the
+`.gitignore` files inside the collection tree are applied while walking it.
+The setting is stored with the collection and used by every later `update`.
+Only `.gitignore` files in the tree are read: no global ignore file, and the
+tree does not have to be a git repository. Symlinks that resolve outside the
+collection root stay excluded either way.
+
+```sh
+rqmd collection add ~/code/project --mask '**/*.md' --respect-gitignore
+```
+
+**`--max-file-bytes` — skip very large files:**
+
+Files larger than the limit are not read, chunked or embedded. The default is
+10485760 bytes (10 MiB). Files left out for size are counted in the
+`collection add` and `update` summaries (`skipped N (M over the size limit)`),
+and a file that grows past the limit is removed from the index on the next
+`update` like any file that is no longer present.
+
+```sh
+rqmd collection add ~/notes --max-file-bytes 1048576
 ```
 
 **`--mask` — which files are candidates for indexing:**

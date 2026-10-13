@@ -552,6 +552,8 @@ fn search_fts_multi_none_resolves_to_include_by_default_collections() {
             include_by_default: true,
             update_command: None,
             allow_hidden: false,
+            respect_gitignore: false,
+            max_file_bytes: None,
         },
     )
     .unwrap();
@@ -565,6 +567,8 @@ fn search_fts_multi_none_resolves_to_include_by_default_collections() {
             include_by_default: false,
             update_command: None,
             allow_hidden: false,
+            respect_gitignore: false,
+            max_file_bytes: None,
         },
     )
     .unwrap();
@@ -812,6 +816,8 @@ fn search_vec_multi_none_resolves_to_include_by_default_collections() {
             include_by_default: true,
             update_command: None,
             allow_hidden: false,
+            respect_gitignore: false,
+            max_file_bytes: None,
         },
     )
     .unwrap();
@@ -825,6 +831,8 @@ fn search_vec_multi_none_resolves_to_include_by_default_collections() {
             include_by_default: false,
             update_command: None,
             allow_hidden: false,
+            respect_gitignore: false,
+            max_file_bytes: None,
         },
     )
     .unwrap();

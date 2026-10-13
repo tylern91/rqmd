@@ -15,6 +15,14 @@ pub struct Collection {
     /// collection was created with.
     #[serde(default)]
     pub allow_hidden: bool,
+    /// Honor the collection tree's `.gitignore` files when walking. Off by
+    /// default so a collection never silently loses documents.
+    #[serde(default)]
+    pub respect_gitignore: bool,
+    /// Files larger than this many bytes are not indexed. `None` means the
+    /// built-in default cap.
+    #[serde(default)]
+    pub max_file_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
