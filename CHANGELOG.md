@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-10-13
+
+### Changed
+- Embedding a batch of chunks now builds one model context for the whole batch instead of one
+  per chunk. On the built-in `rqmd bench` sample, embedding throughput rose from about 80 to
+  about 134 texts per second (7.5 ms per text instead of 12.5 ms), with vectors unchanged.
+
 ## [0.25.0] - 2026-10-13
 
 ### Added

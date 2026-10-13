@@ -968,44 +968,73 @@ fn hyde_expansion_complete(out: &str) -> bool {
         .unwrap_or(false)
 }
 
-impl InferenceBackend for LlamaCppBackend {
-    fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
-        self.ensure_embed()?;
-        let mut tokens = self
-            .embed_model_ref()?
-            .str_to_token(text, AddBos::Always)
-            .context("embed tokenization")?;
-        // Guard: encoder (llama_encode) requires n_ubatch >= n_tokens.  Without this
-        // check a token-dense chunk can exceed EMBED_CONTEXT_SIZE and trigger a fatal
-        // GGML_ASSERT abort.  Mirrors qmd's truncateToContextSize (src/llm.ts:1279).
-        let safe_limit = EMBED_CONTEXT_SIZE - EMBED_TOKEN_MARGIN; // 2044
-        if tokens.len() > safe_limit {
-            tracing::debug!(
-                tokens = tokens.len(),
-                limit = safe_limit,
-                "embed input truncated to context window"
-            );
-            tokens.truncate(safe_limit);
+impl LlamaCppBackend {
+    /// Encode `texts` one after another through a single embedding context.
+    ///
+    /// The embedding model is an encoder (`llama_encode`), which keeps no KV
+    /// state between calls, so one context serves every text; building a new
+    /// context per text repeated the compute-buffer allocation for each chunk.
+    fn embed_texts(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
         }
-        let mut ctx = self
-            .embed_model_ref()?
+        self.ensure_embed()?;
+        let model = self.embed_model_ref()?;
+        let mut ctx = model
             .new_context(&self._backend, self.embed_ctx_params.clone())
             .context("embed context")?;
-        let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
-        // Mean pooling requires every token to be marked as an output so
-        // llama.cpp includes it in the pooled embedding.  Using false triggers
-        // "embeddings required but some input tokens were not marked as outputs
-        // -> overriding" at WARN level; using true is both correct and silent.
-        batch.add_sequence(&tokens, 0, true)?;
-        ctx.encode(&mut batch).context("encode")?;
-        let emb = ctx.embeddings_seq_ith(0).context("embedding extract")?;
-        anyhow::ensure!(
-            emb.len() == EMBED_DIM,
-            "embed model {} returned {}-dim vectors; index expects {EMBED_DIM}",
-            self.embed_model_name,
-            emb.len()
-        );
-        Ok(l2_normalize(emb.to_vec()))
+        // Encoder (llama_encode) requires n_ubatch >= n_tokens; without this limit a
+        // token-dense chunk can exceed EMBED_CONTEXT_SIZE and trigger a fatal
+        // GGML_ASSERT abort.
+        let safe_limit = EMBED_CONTEXT_SIZE - EMBED_TOKEN_MARGIN; // 2044
+        let mut out = Vec::with_capacity(texts.len());
+        for text in texts {
+            let mut tokens = model
+                .str_to_token(text, AddBos::Always)
+                .context("embed tokenization")?;
+            if tokens.len() > safe_limit {
+                tracing::debug!(
+                    tokens = tokens.len(),
+                    limit = safe_limit,
+                    "embed input truncated to context window"
+                );
+                tokens.truncate(safe_limit);
+            }
+            let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
+            // Mean pooling requires every token to be marked as an output so
+            // llama.cpp includes it in the pooled embedding.
+            batch.add_sequence(&tokens, 0, true)?;
+            ctx.encode(&mut batch).context("encode")?;
+            let emb = ctx.embeddings_seq_ith(0).context("embedding extract")?;
+            anyhow::ensure!(
+                emb.len() == EMBED_DIM,
+                "embed model {} returned {}-dim vectors; index expects {EMBED_DIM}",
+                self.embed_model_name,
+                emb.len()
+            );
+            out.push(l2_normalize(emb.to_vec()));
+        }
+        Ok(out)
+    }
+}
+
+impl InferenceBackend for LlamaCppBackend {
+    fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
+        let mut vectors = self.embed_texts(&[text.to_string()])?;
+        vectors.pop().context("embed returned no vector")
+    }
+
+    fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
+        self.embed_texts(&owned)
+    }
+
+    fn embed_batch_passage(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let owned: Vec<String> = texts
+            .iter()
+            .map(|t| format!("{EMBEDDINGGEMMA_PASSAGE_PREFIX}{t}"))
+            .collect();
+        self.embed_texts(&owned)
     }
 
     fn embed_query(&mut self, text: &str) -> Result<Vec<f32>> {
@@ -1633,5 +1662,30 @@ mod tests {
         assert!(!offline_from_env_value("0"));
         assert!(!offline_from_env_value("false"));
         assert!(!offline_from_env_value("no"));
+    }
+
+    /// Needs the cached embedding model; skips (passes) when it is absent, as in CI.
+    #[test]
+    fn batched_passage_embeddings_match_one_at_a_time() {
+        let config = LlamaCppConfig::default();
+        if !model_cache_report(&config).embed_cached {
+            eprintln!("skipping: embedding model not cached");
+            return;
+        }
+        let mut backend = LlamaCppBackend::new(config).expect("load backend");
+        let texts = [
+            "Regularization and dropout reduce overfitting in neural networks.",
+            "The quarterly budget meeting is on Tuesday.",
+            "短い日本語の文章です。",
+        ];
+
+        let batched = backend.embed_batch_passage(&texts).expect("batched");
+        assert_eq!(batched.len(), texts.len());
+        for (text, batch_vec) in texts.iter().zip(&batched) {
+            let single = backend.embed_passage(text).expect("single");
+            let cosine: f32 = single.iter().zip(batch_vec).map(|(a, b)| a * b).sum();
+            assert!(cosine > 0.999, "cosine {cosine} for {text:?}");
+        }
+        assert!(backend.embed_batch_passage(&[]).expect("empty").is_empty());
     }
 }
