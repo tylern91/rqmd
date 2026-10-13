@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use hex;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::types::{Collection, Document};
@@ -127,6 +127,17 @@ fn init_schema(conn: &Connection) -> Result<()> {
     // always means "re-read and hash" — never "unchanged".
     ensure_column(conn, "documents", "size", "size INTEGER")?;
     ensure_column(conn, "documents", "mtime_ns", "mtime_ns INTEGER")?;
+    // `chunk_hash` identifies one chunk's text, so a re-embed of an edited
+    // document can copy the vectors of chunks that did not change. Rows written
+    // before the column existed keep NULL and are filled in the next time their
+    // document is embedded; NULL never matches a lookup.
+    ensure_column(conn, "content_vectors", "chunk_hash", "chunk_hash TEXT")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_content_vectors_chunk_hash \
+         ON content_vectors(chunk_hash)",
+        [],
+    )
+    .context("create chunk_hash index")?;
     Ok(())
 }
 
@@ -783,6 +794,46 @@ pub fn upsert_vector_meta(
         params![hash, seq, pos, model, fingerprint, total_chunks, now, vid as i64],
     )?;
     Ok(())
+}
+
+/// Record the text hash of the chunk stored at `(hash, seq)`. Separate from
+/// [`upsert_vector_meta`] so existing callers keep their signature; a no-op
+/// when the row does not exist.
+pub fn set_vector_chunk_hash(
+    conn: &Connection,
+    hash: &str,
+    seq: i64,
+    chunk_hash: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE content_vectors SET chunk_hash = ?3 WHERE hash = ?1 AND seq = ?2",
+        params![hash, seq, chunk_hash],
+    )?;
+    Ok(())
+}
+
+/// For each of `chunk_hashes`, the vid of an existing vector embedded from
+/// identical chunk text under the same `model` and `fingerprint`. Rows with no
+/// recorded `chunk_hash` (written before the column existed) never match, and
+/// a hash with several matches yields the lowest vid, so the answer is stable.
+pub fn reusable_chunk_vids(
+    conn: &Connection,
+    chunk_hashes: &[String],
+    model: &str,
+    fingerprint: &str,
+) -> Result<HashMap<String, u64>> {
+    let mut found = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT MIN(vid) FROM content_vectors \
+         WHERE chunk_hash = ?1 AND model = ?2 AND embed_fingerprint = ?3 AND vid IS NOT NULL",
+    )?;
+    for ch in chunk_hashes {
+        let vid: Option<i64> = stmt.query_row(params![ch, model, fingerprint], |r| r.get(0))?;
+        if let Some(v) = vid {
+            found.insert(ch.clone(), v as u64);
+        }
+    }
+    Ok(found)
 }
 
 /// Look up (collection, path, title, hash) for a vector ID, without the
