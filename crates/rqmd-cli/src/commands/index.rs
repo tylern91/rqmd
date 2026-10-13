@@ -274,6 +274,8 @@ fn checkpoint(
             &m.now,
         )
         .context("upsert vector meta")?;
+        db::set_vector_chunk_hash(&tx, &m.hash, m.seq, &m.chunk_hash)
+            .context("record chunk hash")?;
     }
     // Persist the true historical high-water-mark next_vid, atomically with the metadata
     // above — unlike MAX(content_vectors.vid), this floor survives hard-deleted rows, so

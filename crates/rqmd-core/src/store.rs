@@ -163,6 +163,9 @@ pub struct PendingVectorMeta {
     pub total_chunks: i64,
     pub vid: u64,
     pub now: String,
+    /// Hash of the chunk's text, stored so a later edit of the document can
+    /// reuse this vector for chunks that did not change.
+    pub chunk_hash: String,
 }
 
 /// Add every embedding to `index`, or none: if an add fails partway, the vids
@@ -342,11 +345,9 @@ impl Store {
         let total = chunks.len();
         let embed_model = self.backend.embed_model_name().to_string();
         let fingerprint = embed_fingerprint(&embed_model, rel_path);
-        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
-        let embeddings = self
-            .backend
-            .embed_batch_passage(&texts)
-            .context("embed batch")?;
+        let chunk_hashes: Vec<String> = chunks.iter().map(|c| chunk_text_hash(&c.text)).collect();
+        let embeddings =
+            self.embed_passages_reusing(&chunks, &chunk_hashes, &embed_model, &fingerprint)?;
 
         for (seq, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
             let vid = self.hnsw.add(embedding).context("hnsw add")?;
@@ -363,6 +364,8 @@ impl Store {
                 &now,
             )
             .context("upsert vector meta")?;
+            db::set_vector_chunk_hash(&self.db, &hash, seq as i64, &chunk_hashes[seq])
+                .context("record chunk hash")?;
         }
 
         Ok(())
@@ -484,11 +487,9 @@ impl Store {
         let fingerprint = embed_fingerprint(&embed_model, rel_path);
         let chunks = chunk_document_for_path(rel_path, body);
         let total = chunks.len();
-        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
-        let embeddings = self
-            .backend
-            .embed_batch_passage(&texts)
-            .context("embed batch")?;
+        let chunk_hashes: Vec<String> = chunks.iter().map(|c| chunk_text_hash(&c.text)).collect();
+        let embeddings =
+            self.embed_passages_reusing(&chunks, &chunk_hashes, &embed_model, &fingerprint)?;
         let now = rfc3339_now();
 
         let vids = add_all_or_rollback(
@@ -514,8 +515,51 @@ impl Store {
                 total_chunks: total as i64,
                 vid,
                 now: now.clone(),
+                chunk_hash: chunk_hashes[seq].clone(),
             })
             .collect())
+    }
+
+    /// One embedding per chunk, in order. A chunk whose text already has a
+    /// stored vector under the same model and fingerprint gets a copy of it;
+    /// only the remaining chunks are encoded. A reusable vector the index can
+    /// no longer return is treated as missing rather than as an error.
+    fn embed_passages_reusing(
+        &mut self,
+        chunks: &[crate::types::Chunk],
+        chunk_hashes: &[String],
+        model: &str,
+        fingerprint: &str,
+    ) -> Result<Vec<Vec<f32>>> {
+        let reusable = db::reusable_chunk_vids(&self.db, chunk_hashes, model, fingerprint)
+            .context("look up reusable chunk vectors")?;
+        let mut slots: Vec<Option<Vec<f32>>> = chunk_hashes
+            .iter()
+            .map(|h| {
+                reusable
+                    .get(h)
+                    .and_then(|vid| self.hnsw.get_vector(*vid).ok())
+            })
+            .collect();
+        let missing: Vec<usize> = (0..slots.len()).filter(|i| slots[*i].is_none()).collect();
+        if !missing.is_empty() {
+            let texts: Vec<&str> = missing.iter().map(|i| chunks[*i].text.as_str()).collect();
+            let fresh = self
+                .backend
+                .embed_batch_passage(&texts)
+                .context("embed batch")?;
+            if fresh.len() != missing.len() {
+                bail!(
+                    "embed backend returned {} vectors for {} chunks",
+                    fresh.len(),
+                    missing.len()
+                );
+            }
+            for (i, embedding) in missing.into_iter().zip(fresh) {
+                slots[i] = Some(embedding);
+            }
+        }
+        Ok(slots.into_iter().flatten().collect())
     }
 
     /// Number of vectors currently in the HNSW index (mirrors the usearch file's entry count).
@@ -1718,6 +1762,11 @@ pub fn embed_fingerprint_applies_ast(rel_path: &str) -> bool {
             .is_some_and(|ext| crate::chunking::ast_chunking_extensions().contains(&ext))
 }
 
+/// Hash identifying one chunk's text, independent of the document it sits in.
+fn chunk_text_hash(text: &str) -> String {
+    hex::encode(&Sha256::digest(text.as_bytes())[..16])
+}
+
 /// Embedding fingerprint: 6-hex-char hash of model name + chunk constants, plus
 /// an AST-chunking marker when [`embed_fingerprint_applies_ast`] is true for
 /// `rel_path`. Used to detect stale embeddings after a model or chunking-config
@@ -1732,8 +1781,25 @@ pub fn embed_fingerprint_applies_ast(rel_path: &str) -> bool {
 /// rather than hardcoded literals, so a future change to those constants actually
 /// invalidates the fingerprint instead of going undetected.
 fn embed_fingerprint(model: &str, rel_path: &str) -> String {
+    embed_fingerprint_with_prefixes(
+        model,
+        rel_path,
+        rqmd_llm::EMBEDDINGGEMMA_QUERY_PREFIX,
+        rqmd_llm::EMBEDDINGGEMMA_PASSAGE_PREFIX,
+    )
+}
+
+/// [`embed_fingerprint`] with the prompt prefixes given explicitly: a vector
+/// encoded under one prefix is not comparable with a query encoded under
+/// another, so the prefixes are part of what makes an embedding current.
+fn embed_fingerprint_with_prefixes(
+    model: &str,
+    rel_path: &str,
+    query_prefix: &str,
+    passage_prefix: &str,
+) -> String {
     let mut sig = format!(
-        "model:{model}\nchunk_size_chars:{}\nchunk_overlap_chars:{}\nchunk_strategy_version:{}",
+        "model:{model}\nchunk_size_chars:{}\nchunk_overlap_chars:{}\nchunk_strategy_version:{}\nquery_prefix:{query_prefix}\npassage_prefix:{passage_prefix}",
         crate::chunking::CHUNK_SIZE_CHARS,
         crate::chunking::CHUNK_OVERLAP_CHARS,
         crate::chunking::CHUNK_STRATEGY_VERSION,
@@ -2417,10 +2483,12 @@ mod tests {
 
     fn base_signature(model: &str) -> String {
         format!(
-            "model:{model}\nchunk_size_chars:{}\nchunk_overlap_chars:{}\nchunk_strategy_version:{}",
+            "model:{model}\nchunk_size_chars:{}\nchunk_overlap_chars:{}\nchunk_strategy_version:{}\nquery_prefix:{}\npassage_prefix:{}",
             crate::chunking::CHUNK_SIZE_CHARS,
             crate::chunking::CHUNK_OVERLAP_CHARS,
             crate::chunking::CHUNK_STRATEGY_VERSION,
+            rqmd_llm::EMBEDDINGGEMMA_QUERY_PREFIX,
+            rqmd_llm::EMBEDDINGGEMMA_PASSAGE_PREFIX,
         )
     }
 
@@ -2564,5 +2632,274 @@ mod tests {
             1,
             "the deduped vec: line should still find the one indexed document"
         );
+    }
+
+    // ── Chunk-level embedding reuse ──────────────────────────────────────────
+
+    /// Embeds deterministically from the text and records every text it is
+    /// asked to encode, so a test can tell reused chunks from encoded ones.
+    struct RecordingBackend {
+        encoded: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl rqmd_llm::InferenceBackend for RecordingBackend {
+        fn capabilities(&self) -> rqmd_llm::BackendCapabilities {
+            rqmd_llm::BackendCapabilities {
+                embed: true,
+                rerank: false,
+                generate: false,
+            }
+        }
+        fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
+            self.encoded.lock().unwrap().push(text.to_string());
+            let digest = Sha256::digest(text.as_bytes());
+            Ok((0..rqmd_llm::EMBED_DIM)
+                .map(|i| f32::from(digest[i % digest.len()]) / 255.0 + 0.01)
+                .collect())
+        }
+        fn rerank(&mut self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>> {
+            panic!("rerank is not used here")
+        }
+        fn generate(&mut self, _prompt: &str) -> Result<String> {
+            panic!("generate is not used here")
+        }
+        fn embed_model_name(&self) -> &str {
+            "recording-embed"
+        }
+        fn rerank_model_name(&self) -> &str {
+            "recording-rerank"
+        }
+        fn generate_model_name(&self) -> &str {
+            "recording-generate"
+        }
+    }
+
+    type EncodedLog = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+    fn recording_store(dir: &std::path::Path) -> (Store, EncodedLog) {
+        let encoded = EncodedLog::default();
+        let store = open_stub_store_with(
+            dir,
+            Box::new(RecordingBackend {
+                encoded: encoded.clone(),
+            }),
+        );
+        (store, encoded)
+    }
+
+    fn open_stub_store_with(dir: &std::path::Path, backend: Box<dyn InferenceBackend>) -> Store {
+        let config = StoreConfig {
+            db_path: dir.join("test.sqlite"),
+            tantivy_dir: dir.join("tantivy"),
+            hnsw_path: dir.join("hnsw.usearch"),
+            read_only: false,
+        };
+        Store::open(config, backend).unwrap()
+    }
+
+    /// A note of `sections` sections, each long enough to fill its own chunk.
+    /// `edited` swaps one sentence of the last section for different text of
+    /// the same length, so every earlier chunk boundary stays where it was.
+    fn long_note(sections: usize, edited: bool) -> String {
+        (0..sections)
+            .map(|n| {
+                let tail = if edited && n + 1 == sections {
+                    "an entirely different closing remark"
+                } else {
+                    "the original closing remark written"
+                };
+                let filler: String = (0..40)
+                    .map(|k| format!("Section {n} sentence {k} describes topic {n}-{k}. "))
+                    .collect();
+                format!("# Section {n}\n\n{filler}{tail}.\n\n")
+            })
+            .collect()
+    }
+
+    /// Store a document's pending vector rows the way `rqmd embed`'s
+    /// checkpoint does, and make them visible to later reuse lookups.
+    fn persist(store: &mut Store, hash: &str, pending: &[PendingVectorMeta]) {
+        upsert_content(&store.db, hash, "body", "2026-01-01T00:00:00Z").unwrap();
+        for m in pending {
+            upsert_vector_meta(
+                &store.db,
+                &m.hash,
+                m.seq,
+                m.pos,
+                &m.model,
+                &m.fingerprint,
+                m.total_chunks,
+                m.vid,
+                &m.now,
+            )
+            .unwrap();
+            db::set_vector_chunk_hash(&store.db, &m.hash, m.seq, &m.chunk_hash).unwrap();
+        }
+    }
+
+    fn embed_and_persist(store: &mut Store, hash: &str, body: &str) -> Vec<PendingVectorMeta> {
+        let pending = store.embed_document_chunks(hash, "note.md", body).unwrap();
+        persist(store, hash, &pending);
+        pending
+    }
+
+    #[test]
+    fn chunk_ac_1_only_the_changed_chunks_are_encoded_after_an_edit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, encoded) = recording_store(dir.path());
+        let before = long_note(5, false);
+        let after = long_note(5, true);
+
+        let first = embed_and_persist(&mut store, "hash-before", &before);
+        assert!(first.len() >= 3, "fixture must span several chunks");
+        encoded.lock().unwrap().clear();
+
+        let second = embed_and_persist(&mut store, "hash-after", &after);
+
+        let old_texts: HashSet<String> = chunk_document_for_path("note.md", &before)
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        let changed: Vec<String> = chunk_document_for_path("note.md", &after)
+            .into_iter()
+            .map(|c| c.text)
+            .filter(|t| !old_texts.contains(t))
+            .collect();
+        assert!(!changed.is_empty() && changed.len() < second.len());
+        let mut got = encoded.lock().unwrap().clone();
+        let mut want = changed.clone();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "only the edited chunks may be encoded");
+        assert_eq!(second.len(), first.len());
+    }
+
+    #[test]
+    fn chunk_ac_2_reused_vectors_equal_a_full_re_embed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, _) = recording_store(dir.path());
+        embed_and_persist(&mut store, "hash-before", &long_note(5, false));
+        let reused = embed_and_persist(&mut store, "hash-after", &long_note(5, true));
+
+        let fresh_dir = tempfile::TempDir::new().unwrap();
+        let (mut fresh_store, _) = recording_store(fresh_dir.path());
+        let full = embed_and_persist(&mut fresh_store, "hash-after", &long_note(5, true));
+
+        assert_eq!(reused.len(), full.len());
+        for (r, f) in reused.iter().zip(&full) {
+            assert_eq!(r.chunk_hash, f.chunk_hash);
+            assert_eq!(
+                store.hnsw.get_vector(r.vid).unwrap(),
+                fresh_store.hnsw.get_vector(f.vid).unwrap(),
+                "chunk {} must hold the same vector either way",
+                r.seq
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_ac_3_a_vector_under_another_fingerprint_or_model_is_never_reused() {
+        for column in ["embed_fingerprint", "model"] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let (mut store, encoded) = recording_store(dir.path());
+            let body = long_note(4, false);
+            let first = embed_and_persist(&mut store, "hash-one", &body);
+            store
+                .db
+                .execute(
+                    &format!("UPDATE content_vectors SET {column} = 'someone-else'"),
+                    [],
+                )
+                .unwrap();
+            encoded.lock().unwrap().clear();
+
+            embed_and_persist(&mut store, "hash-two", &body);
+
+            assert_eq!(
+                encoded.lock().unwrap().len(),
+                first.len(),
+                "a differing {column} must force every chunk to be encoded"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_ac_4_a_prompt_prefix_change_changes_the_fingerprint() {
+        let base = embed_fingerprint_with_prefixes("m", "a.md", "query: ", "passage: ");
+        assert_ne!(
+            base,
+            embed_fingerprint_with_prefixes("m", "a.md", "search: ", "passage: ")
+        );
+        assert_ne!(
+            base,
+            embed_fingerprint_with_prefixes("m", "a.md", "query: ", "document: ")
+        );
+        assert_eq!(
+            embed_fingerprint("m", "a.md"),
+            embed_fingerprint_with_prefixes(
+                "m",
+                "a.md",
+                rqmd_llm::EMBEDDINGGEMMA_QUERY_PREFIX,
+                rqmd_llm::EMBEDDINGGEMMA_PASSAGE_PREFIX
+            ),
+            "the live fingerprint must be built from the prefixes the backend sends"
+        );
+    }
+
+    #[test]
+    fn chunk_ac_5_rows_without_a_chunk_hash_still_work_and_get_filled_in() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, encoded) = recording_store(dir.path());
+        let body = long_note(4, false);
+        let first = embed_and_persist(&mut store, "hash-one", &body);
+        store
+            .db
+            .execute("UPDATE content_vectors SET chunk_hash = NULL", [])
+            .unwrap();
+        encoded.lock().unwrap().clear();
+
+        let second = embed_and_persist(&mut store, "hash-two", &body);
+
+        assert_eq!(encoded.lock().unwrap().len(), first.len());
+        let filled: i64 = store
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM content_vectors \
+                 WHERE hash = 'hash-two' AND chunk_hash IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(filled as usize, second.len());
+
+        encoded.lock().unwrap().clear();
+        embed_and_persist(&mut store, "hash-three", &body);
+        assert!(
+            encoded.lock().unwrap().is_empty(),
+            "once filled in, the chunks are reusable"
+        );
+    }
+
+    #[test]
+    fn chunk_ac_5_a_database_created_before_the_column_is_upgraded_on_open() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("old.sqlite");
+        {
+            let conn = open_db(&path).unwrap();
+            conn.execute("DROP INDEX idx_content_vectors_chunk_hash", [])
+                .unwrap();
+            conn.execute("ALTER TABLE content_vectors DROP COLUMN chunk_hash", [])
+                .unwrap();
+        }
+        let conn = open_db(&path).unwrap();
+        let has_column: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('content_vectors') \
+                 WHERE name = 'chunk_hash'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 1);
     }
 }

@@ -92,10 +92,10 @@ const EMBED_CONTEXT_SIZE: usize = 2048;
 const EMBED_TOKEN_MARGIN: usize = 4;
 
 /// EmbeddingGemma's documented query-side prompt template.
-const EMBEDDINGGEMMA_QUERY_PREFIX: &str = "task: search result | query: ";
+pub const EMBEDDINGGEMMA_QUERY_PREFIX: &str = "task: search result | query: ";
 /// EmbeddingGemma's documented passage-side prompt template, using the documented
 /// "no title" fallback — threading real chunk titles through is not worth the plumbing.
-const EMBEDDINGGEMMA_PASSAGE_PREFIX: &str = "title: none | text: ";
+pub const EMBEDDINGGEMMA_PASSAGE_PREFIX: &str = "title: none | text: ";
 
 /// L2-normalize a vector in place, matching `InferenceBackend::embed`'s documented
 /// unit-normalized contract. Shared with the feature-gated `ort_backend` module —
