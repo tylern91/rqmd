@@ -24,7 +24,7 @@
 | `rqmd mcp [--http] [--port N] [--host HOST] [--allow-non-loopback] [--daemon]` | Start MCP server |
 | `rqmd mcp status` | Show MCP daemon status (pid, health, uptime) |
 | `rqmd mcp stop` | Stop the running MCP daemon |
-| `rqmd collection add <path> [--mask PATTERN] [--ignore PATTERN] [--hidden]` | Add a directory as a collection |
+| `rqmd collection add <path> [--mask PATTERN] [--ignore PATTERN] [--hidden] [--respect-gitignore] [--max-file-bytes BYTES]` | Add a directory as a collection |
 | `rqmd collection list` | List all collections |
 | `rqmd collection remove <name>` | Remove a collection |
 | `rqmd collection rename <old> <new>` | Rename a collection |

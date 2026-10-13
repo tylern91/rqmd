@@ -21,9 +21,11 @@ pub fn run(index_dir: &Path, cmd: CollectionCommand) -> Result<()> {
             name.as_deref(),
             mask.as_deref(),
             ignore,
-            hidden,
-            respect_gitignore,
-            max_file_bytes,
+            WalkFlags {
+                hidden,
+                respect_gitignore,
+                max_file_bytes,
+            },
         ),
         CollectionCommand::List => list(index_dir),
         CollectionCommand::Remove { name } => remove(index_dir, &name),
@@ -50,16 +52,26 @@ fn ensure_is_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The `collection add` flags that shape how the tree is walked.
+struct WalkFlags {
+    hidden: bool,
+    respect_gitignore: bool,
+    max_file_bytes: Option<u64>,
+}
+
 fn add(
     index_dir: &Path,
     dir: &str,
     name: Option<&str>,
     mask: Option<&str>,
     ignore: Vec<String>,
-    hidden: bool,
-    respect_gitignore: bool,
-    max_file_bytes: Option<u64>,
+    walk: WalkFlags,
 ) -> Result<()> {
+    let WalkFlags {
+        hidden,
+        respect_gitignore,
+        max_file_bytes,
+    } = walk;
     let abs_dir = PathBuf::from(dir)
         .canonicalize()
         .with_context(|| format!("cannot resolve path: {dir}"))?;
@@ -284,6 +296,12 @@ fn show(index_dir: &Path, name: &str) -> Result<()> {
     println!("  Docs:     {count}");
     println!("  Included: {}", col.include_by_default);
     println!("  Hidden:   {}", col.allow_hidden);
+    println!("  Gitignore: {}", col.respect_gitignore);
+    println!(
+        "  Max file: {} bytes",
+        col.max_file_bytes
+            .unwrap_or(document::DEFAULT_MAX_FILE_BYTES)
+    );
     if let Some(ref cmd) = col.update_command {
         println!("  Hook:     {cmd}");
     }
