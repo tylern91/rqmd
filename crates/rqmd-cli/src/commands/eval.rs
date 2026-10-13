@@ -1,7 +1,7 @@
 //! Search quality evaluation harness.
 //!
 //! Mirrors the TypeScript `eval.test.ts` fixtures: indexes 6 synthetic documents,
-//! runs 24 queries across four difficulty tiers, and scores Hit@K results against
+//! runs 25 queries across four difficulty tiers, and scores Hit@K results against
 //! the same thresholds used in the TS test suite.
 //!
 //! Modes:
@@ -51,7 +51,7 @@ const EVAL_DOCS: &[EvalDoc] = &[
 ];
 
 // ── Eval query set ────────────────────────────────────────────────────────────
-// Matches eval.test.ts exactly: 6 queries × 4 difficulty tiers = 24 total.
+// 6 queries × 4 difficulty tiers = 24, plus one frontmatter-targeted query = 25 total.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Difficulty {
@@ -98,6 +98,12 @@ const EVAL_QUERIES: &[EvalQuery] = &[
     EvalQuery {
         query: "Project Phoenix retrospective",
         expected_doc: "product-launch",
+        difficulty: Difficulty::Easy,
+    },
+    // The term appears only in the document's frontmatter `tags:`, never in its prose.
+    EvalQuery {
+        query: "telecommuting",
+        expected_doc: "remote-work",
         difficulty: Difficulty::Easy,
     },
     // Medium: semantic / conceptual queries
@@ -266,16 +272,22 @@ fn make_temp_store(backend: Box<dyn rqmd_llm::InferenceBackend>) -> Result<(Temp
     Ok((tmp, store))
 }
 
+/// The first line of the document body (after any frontmatter), without its
+/// leading `#` marks.
+fn doc_title(content: &str) -> String {
+    rqmd_core::frontmatter::split(content)
+        .1
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('#')
+        .trim()
+        .to_string()
+}
+
 fn index_all_fts_only(store: &mut Store) -> Result<()> {
     for doc in EVAL_DOCS {
-        let title = doc
-            .content
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim_start_matches('#')
-            .trim()
-            .to_string();
+        let title = doc_title(doc.content);
         store.index_document_fts_only("eval-docs", doc.filename, &title, doc.content)?;
     }
     store.flush()?;
@@ -284,14 +296,7 @@ fn index_all_fts_only(store: &mut Store) -> Result<()> {
 
 fn index_all_with_embed(store: &mut Store) -> Result<()> {
     for doc in EVAL_DOCS {
-        let title = doc
-            .content
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim_start_matches('#')
-            .trim()
-            .to_string();
+        let title = doc_title(doc.content);
         store.index_document("eval-docs", doc.filename, &title, doc.content)?;
     }
     store.flush()?;

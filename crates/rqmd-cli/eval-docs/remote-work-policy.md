@@ -1,3 +1,6 @@
+---
+tags: [telecommuting, hybrid-schedule]
+---
 # Remote Work Policy
 
 **Effective Date:** January 2024

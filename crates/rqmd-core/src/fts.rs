@@ -70,6 +70,9 @@ const KEYWORD_STOPWORDS: &[&str] = &[
     "when", "where", "which", "who", "why", "will", "with", "would",
 ];
 
+/// Query-time weight of the `frontmatter` field relative to `body` (1.0).
+const FRONTMATTER_BOOST: f32 = 2.0;
+
 /// Fewest whitespace-separated terms a query needs before filler words are
 /// dropped; shorter queries are usually deliberate keywords.
 const STOPWORD_MIN_TERMS: usize = 4;
@@ -121,11 +124,32 @@ pub struct FtsSchema {
     pub filepath: Field,
     pub title: Field,
     pub body: Field,
+    /// Curated frontmatter terms (tags and aliases), searched at a higher
+    /// weight than prose. `None` for an index built before the field existed:
+    /// that index keeps working, without the field, until it is rebuilt.
+    pub frontmatter: Option<Field>,
     /// Stored-only field holding the rusqlite document ID for fast join-back.
     pub doc_id: Field,
 }
 
 impl FtsSchema {
+    /// Read the fields back out of an existing index's schema.
+    fn from_schema(schema: Schema) -> Result<Self> {
+        let field = |name: &str| {
+            schema
+                .get_field(name)
+                .with_context(|| format!("tantivy index has no `{name}` field"))
+        };
+        Ok(Self {
+            filepath: field("filepath")?,
+            title: field("title")?,
+            body: field("body")?,
+            frontmatter: schema.get_field("frontmatter").ok(),
+            doc_id: field("doc_id")?,
+            schema,
+        })
+    }
+
     pub fn build() -> Self {
         let mut builder = SchemaBuilder::new();
         // filepath is stored + tokenized (enables path-based filtering)
@@ -133,6 +157,7 @@ impl FtsSchema {
         let title = builder.add_text_field("title", TEXT | STORED);
         // body is tokenized but not stored — body comes from rusqlite content table
         let body = builder.add_text_field("body", TEXT);
+        let frontmatter = builder.add_text_field("frontmatter", TEXT);
         // doc_id stored as an i64 fast field for retrieval
         let doc_id = builder.add_i64_field("doc_id", STORED | FAST);
         let schema = builder.build();
@@ -141,6 +166,7 @@ impl FtsSchema {
             filepath,
             title,
             body,
+            frontmatter: Some(frontmatter),
             doc_id,
         }
     }
@@ -163,14 +189,38 @@ impl FtsIndex {
     /// Open or create the Tantivy index at `dir`.
     pub fn open_or_create(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir).context("create tantivy dir")?;
-        let schema = FtsSchema::build();
+        let mmap = || tantivy::directory::MmapDirectory::open(dir).context("mmap directory");
 
-        let index = Index::open_or_create(
-            tantivy::directory::MmapDirectory::open(dir).context("mmap directory")?,
-            schema.schema.clone(),
-        )
-        .context("open_or_create tantivy index")?;
+        // An index that already exists keeps the schema it was built with, so a
+        // read-only opener never trips over an index from an older binary; the
+        // current schema is only used for a new index, or after `rebuild`.
+        let (index, schema) = if Index::exists(&mmap()?).context("probe tantivy index")? {
+            let index = Index::open(mmap()?).context("open tantivy index")?;
+            let schema = FtsSchema::from_schema(index.schema())?;
+            (index, schema)
+        } else {
+            let schema = FtsSchema::build();
+            let index = Index::create(
+                mmap()?,
+                schema.schema.clone(),
+                tantivy::IndexSettings::default(),
+            )
+            .context("create tantivy index")?;
+            (index, schema)
+        };
 
+        let (reader, query_parser) = Self::reader_and_parser(&index, &schema)?;
+        Ok(Self {
+            schema,
+            index,
+            reader,
+            writer: None,
+            query_parser,
+            dir: dir.to_path_buf(),
+        })
+    }
+
+    fn reader_and_parser(index: &Index, schema: &FtsSchema) -> Result<(IndexReader, QueryParser)> {
         index.tokenizers().register("default", analyzer());
 
         // Manual reload policy: we call reader.reload() explicitly in commit()
@@ -181,21 +231,23 @@ impl FtsIndex {
             .try_into()
             .context("index reader")?;
 
-        let mut query_parser =
-            QueryParser::for_index(&index, vec![schema.filepath, schema.title, schema.body]);
-        // BM25 field boosts matching qmd's `bm25(documents_fts, 1.5, 4.0, 1.0)`.
+        let mut fields = vec![schema.filepath, schema.title, schema.body];
+        fields.extend(schema.frontmatter);
+        let mut query_parser = QueryParser::for_index(index, fields);
+        // BM25 field boosts: filepath 1.5, title 4.0, frontmatter 2.0, body 1.0.
         query_parser.set_field_boost(schema.filepath, 1.5);
         query_parser.set_field_boost(schema.title, 4.0);
         query_parser.set_field_boost(schema.body, 1.0);
+        if let Some(frontmatter) = schema.frontmatter {
+            query_parser.set_field_boost(frontmatter, FRONTMATTER_BOOST);
+        }
+        Ok((reader, query_parser))
+    }
 
-        Ok(Self {
-            schema,
-            index,
-            reader,
-            writer: None,
-            query_parser,
-            dir: dir.to_path_buf(),
-        })
+    /// Whether this index was built without the `frontmatter` field, so
+    /// [`FtsIndex::rebuild`] has to recreate it with the current schema.
+    pub fn is_legacy_schema(&self) -> bool {
+        self.schema.frontmatter.is_none()
     }
 
     /// Acquire the writer on first call; subsequent calls reuse it.
@@ -245,21 +297,22 @@ impl FtsIndex {
         body: &str,
         doc_id: i64,
     ) -> Result<()> {
-        // Extract Copy fields before borrowing the writer.
-        let (f_filepath, f_title, f_body, f_doc_id) = (
-            self.schema.filepath,
-            self.schema.title,
-            self.schema.body,
-            self.schema.doc_id,
-        );
+        self.add_document_with_frontmatter(filepath, title, body, "", doc_id)
+    }
+
+    /// Like [`FtsIndex::add_document`], with the document's frontmatter terms
+    /// (tags and aliases, space-separated) indexed in their own weighted field.
+    /// An index built before that field existed ignores `frontmatter`.
+    pub fn add_document_with_frontmatter(
+        &mut self,
+        filepath: &str,
+        title: &str,
+        body: &str,
+        frontmatter: &str,
+        doc_id: i64,
+    ) -> Result<()> {
         self.delete_by_filepath(filepath)?;
-        self.insert_document(
-            filepath,
-            title,
-            body,
-            doc_id,
-            (f_filepath, f_title, f_body, f_doc_id),
-        )
+        self.insert_document(filepath, title, body, frontmatter, doc_id)
     }
 
     fn insert_document(
@@ -267,40 +320,44 @@ impl FtsIndex {
         filepath: &str,
         title: &str,
         body: &str,
+        frontmatter: &str,
         doc_id: i64,
-        (f_filepath, f_title, f_body, f_doc_id): (Field, Field, Field, Field),
     ) -> Result<()> {
         let title = normalize_nfc(title);
         let body = normalize_nfc(body);
-        let w = self.writer_mut()?;
-        w.add_document(doc!(
-            f_filepath => filepath,
-            f_title => title,
-            f_body => body,
-            f_doc_id => doc_id,
-        ))?;
+        let frontmatter_field = self.schema.frontmatter;
+        let mut document = doc!(
+            self.schema.filepath => filepath,
+            self.schema.title => title,
+            self.schema.body => body,
+            self.schema.doc_id => doc_id,
+        );
+        if let Some(field) = frontmatter_field.filter(|_| !frontmatter.is_empty()) {
+            document.add_text(field, normalize_nfc(frontmatter));
+        }
+        self.writer_mut()?.add_document(document)?;
         Ok(())
     }
 
-    /// Replace the whole index with `docs` — `(filepath, title, body, doc_id)` —
-    /// committing once at the end. If `docs` fails partway the staged deletion
-    /// and additions are rolled back, so the previous contents stay searchable.
+    /// Replace the whole index with `docs` — `(filepath, title, body,
+    /// frontmatter, doc_id)` — committing once at the end. An index built
+    /// before the `frontmatter` field existed is recreated with the current
+    /// schema first. If `docs` fails partway the staged deletion and additions
+    /// are rolled back, so the previous contents stay searchable (a recreated
+    /// index starts empty and is not rolled back).
     pub fn rebuild(
         &mut self,
-        docs: impl IntoIterator<Item = Result<(String, String, String, i64)>>,
+        docs: impl IntoIterator<Item = Result<(String, String, String, String, i64)>>,
     ) -> Result<()> {
-        let fields = (
-            self.schema.filepath,
-            self.schema.title,
-            self.schema.body,
-            self.schema.doc_id,
-        );
+        if self.is_legacy_schema() {
+            self.recreate_with_current_schema()?;
+        }
         self.writer_mut()?
             .delete_all_documents()
             .context("delete all tantivy docs")?;
         for doc in docs {
-            let staged = doc.and_then(|(filepath, title, body, doc_id)| {
-                self.insert_document(&filepath, &title, &body, doc_id, fields)
+            let staged = doc.and_then(|(filepath, title, body, frontmatter, doc_id)| {
+                self.insert_document(&filepath, &title, &body, &frontmatter, doc_id)
             });
             if let Err(e) = staged {
                 self.writer_mut()?
@@ -310,6 +367,42 @@ impl FtsIndex {
             }
         }
         self.commit()
+    }
+
+    /// Throw the on-disk index away and start an empty one with the current
+    /// schema. Needs the writer lock, which it waits for like any write.
+    fn recreate_with_current_schema(&mut self) -> Result<()> {
+        // Taking the lock first keeps another writer from racing the delete.
+        self.writer_mut()?;
+        self.writer = None;
+        for entry in std::fs::read_dir(&self.dir).context("read tantivy dir")? {
+            let path = entry.context("tantivy dir entry")?.path();
+            if path
+                .file_name()
+                .is_some_and(|n| n == ".tantivy-writer.lock")
+            {
+                continue;
+            }
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            }
+            .with_context(|| format!("remove {}", path.display()))?;
+        }
+        let schema = FtsSchema::build();
+        let index = Index::create(
+            tantivy::directory::MmapDirectory::open(&self.dir).context("mmap directory")?,
+            schema.schema.clone(),
+            tantivy::IndexSettings::default(),
+        )
+        .context("recreate tantivy index")?;
+        let (reader, query_parser) = Self::reader_and_parser(&index, &schema)?;
+        self.schema = schema;
+        self.index = index;
+        self.reader = reader;
+        self.query_parser = query_parser;
+        Ok(())
     }
 
     /// Delete every previously-indexed document under this exact `filepath`.
@@ -662,6 +755,7 @@ mod tests {
                     "new.md".to_string(),
                     "T".to_string(),
                     "newterm".to_string(),
+                    String::new(),
                     2,
                 )),
                 Err(anyhow::anyhow!("row unreadable")),
@@ -1019,6 +1113,99 @@ mod tests {
         assert_eq!(
             strip_keyword_stopwords("the isの a launch plan"),
             "isの launch plan"
+        );
+    }
+
+    #[test]
+    fn fm_ac_1_a_frontmatter_match_outranks_a_single_body_mention() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document(
+            "notes/prose.md",
+            "Prose",
+            "a long note about gardening that mentions zirconia once in passing",
+            1,
+        )
+        .unwrap();
+        idx.add_document_with_frontmatter(
+            "notes/tagged.md",
+            "Tagged",
+            "a long note about gardening with nothing else to say here today",
+            "zirconia",
+            2,
+        )
+        .unwrap();
+        idx.commit().unwrap();
+
+        let hits = idx.search_fts("zirconia", 10, None).unwrap();
+        assert_eq!(hits.len(), 2, "got {hits:?}");
+        assert_eq!(hits[0].0, "notes/tagged.md", "got {hits:?}");
+    }
+
+    #[test]
+    fn fm_ac_2_a_document_without_frontmatter_is_indexed_and_ranked_as_before() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("a.md", "A", "quartz quartz quartz crystal", 1)
+            .unwrap();
+        idx.add_document(
+            "b.md",
+            "B",
+            "quartz and a long unrelated sentence follows",
+            2,
+        )
+        .unwrap();
+        idx.commit().unwrap();
+
+        let hits = idx.search_fts("quartz", 10, None).unwrap();
+        let paths: Vec<_> = hits.iter().map(|h| h.0.as_str()).collect();
+        assert_eq!(paths, ["a.md", "b.md"]);
+    }
+
+    /// Build a Tantivy index with the field set this crate used before the
+    /// `frontmatter` field existed.
+    fn write_legacy_index(dir: &Path) {
+        let mut builder = SchemaBuilder::new();
+        let filepath = builder.add_text_field("filepath", TEXT | STORED);
+        let title = builder.add_text_field("title", TEXT | STORED);
+        let body = builder.add_text_field("body", TEXT);
+        let doc_id = builder.add_i64_field("doc_id", STORED | FAST);
+        let index = Index::create_in_dir(dir, builder.build()).unwrap();
+        index.tokenizers().register("default", analyzer());
+        let mut writer: IndexWriter = index.writer(15_000_000).unwrap();
+        writer
+            .add_document(
+                doc!(filepath => "old.md", title => "Old", body => "legacyterm", doc_id => 1i64),
+            )
+            .unwrap();
+        writer.commit().unwrap();
+    }
+
+    #[test]
+    fn fm_ac_3_a_legacy_index_still_opens_and_rebuilds_into_the_current_schema() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_legacy_index(dir.path());
+
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx.is_legacy_schema());
+        assert_eq!(idx.search_fts("legacyterm", 10, None).unwrap().len(), 1);
+
+        idx.rebuild(vec![Ok((
+            "old.md".to_string(),
+            "Old".to_string(),
+            "legacyterm".to_string(),
+            "taggedterm".to_string(),
+            1,
+        ))])
+        .unwrap();
+        assert!(!idx.is_legacy_schema());
+        assert_eq!(idx.search_fts("taggedterm", 10, None).unwrap().len(), 1);
+
+        let reopened = FtsIndex::open_or_create(dir.path()).unwrap();
+        assert!(!reopened.is_legacy_schema());
+        assert_eq!(
+            reopened.search_fts("taggedterm", 10, None).unwrap().len(),
+            1
         );
     }
 }

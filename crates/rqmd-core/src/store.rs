@@ -60,8 +60,18 @@ pub const FTS_TOKENIZER_CONFIG_KEY: &str = "fts_tokenizer_version";
 
 /// Bump whenever the FTS analyzer changes what a given text tokenizes to: the
 /// index then no longer matches what queries produce, and
-/// [`Store::rebuild_fts_if_needed`] re-indexes it. `2` = CJK bigrams.
-pub const FTS_TOKENIZER_VERSION: &str = "2";
+/// [`Store::rebuild_fts_if_needed`] re-indexes it. `2` = CJK bigrams,
+/// `3` = weighted `frontmatter` field.
+pub const FTS_TOKENIZER_VERSION: &str = "3";
+
+/// The tags and aliases in `raw`'s frontmatter, space-separated, for the
+/// weighted `frontmatter` full-text field. Empty when there is none.
+fn frontmatter_terms(raw: &str) -> String {
+    crate::frontmatter::split(raw)
+        .0
+        .map(|fm| fm.terms.join(" "))
+        .unwrap_or_default()
+}
 
 // ── Store ─────────────────────────────────────────────────────────────────────
 
@@ -441,7 +451,13 @@ impl Store {
         db::set_document_raw(&self.db, doc_id, raw).context("set document raw")?;
         let filepath = format!("{collection}/{rel_path}");
         self.fts
-            .add_document(&filepath, title, indexed_text, doc_id)
+            .add_document_with_frontmatter(
+                &filepath,
+                title,
+                indexed_text,
+                &frontmatter_terms(raw),
+                doc_id,
+            )
             .context("add to tantivy")?;
         Ok(outcome)
     }
@@ -626,11 +642,20 @@ impl Store {
             return Ok(false);
         }
         let mut stmt = self.db.prepare(
-            "SELECT d.collection || '/' || d.path, d.title, c.doc, d.id \
+            "SELECT d.collection || '/' || d.path, d.title, c.doc, d.id, d.raw \
              FROM documents d JOIN content c ON c.hash = d.hash \
              WHERE d.active = 1",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        let rows = stmt.query_map([], |r| {
+            let raw: String = r.get(4)?;
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                frontmatter_terms(&raw),
+                r.get(3)?,
+            ))
+        })?;
         self.fts
             .rebuild(rows.map(|row| row.map_err(anyhow::Error::from)))
             .context("rebuild full-text index")?;
@@ -2318,6 +2343,72 @@ mod tests {
         store.flush().unwrap();
         assert!(!store.rebuild_fts_if_needed().unwrap());
         assert!(store.search_fts("東京都", 10, None).unwrap().is_empty());
+    }
+
+    /// An index written before the weighted `frontmatter` field existed is
+    /// reported as needing a rebuild, keeps answering queries meanwhile, and
+    /// the rebuild moves it to the current schema with each document's tags
+    /// and aliases taken from its stored raw text.
+    #[test]
+    fn fm_ac_3_a_pre_frontmatter_index_is_pending_and_rebuilds_with_tags() {
+        use tantivy::schema::{FAST, STORED, SchemaBuilder, TEXT};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let stub = || StubBackend {
+            name: "stub".to_string(),
+            caps: rqmd_llm::BackendCapabilities {
+                embed: false,
+                rerank: false,
+                generate: false,
+            },
+        };
+        {
+            let mut store = open_stub_store(dir.path(), stub());
+            store
+                .index_document_fts_only_with_raw(
+                    "coll",
+                    "tagged.md",
+                    "Tagged",
+                    "body text\nzirconia",
+                    "---\ntags: [zirconia]\n---\nbody text",
+                )
+                .unwrap();
+            store.flush().unwrap();
+        }
+
+        // Swap the Tantivy index for one with the old field set holding a
+        // different document, and mark the stored version as the old one.
+        let tantivy_dir = dir.path().join("tantivy");
+        std::fs::remove_dir_all(&tantivy_dir).unwrap();
+        std::fs::create_dir_all(&tantivy_dir).unwrap();
+        let mut builder = SchemaBuilder::new();
+        let filepath = builder.add_text_field("filepath", TEXT | STORED);
+        let title = builder.add_text_field("title", TEXT | STORED);
+        let body = builder.add_text_field("body", TEXT);
+        let doc_id = builder.add_i64_field("doc_id", STORED | FAST);
+        let old = tantivy::Index::create_in_dir(&tantivy_dir, builder.build()).unwrap();
+        let mut writer: tantivy::IndexWriter = old.writer(15_000_000).unwrap();
+        writer
+            .add_document(tantivy::doc!(
+                filepath => "coll/stale.md", title => "Stale", body => "staleterm", doc_id => 99i64
+            ))
+            .unwrap();
+        writer.commit().unwrap();
+        drop(writer);
+        drop(old);
+
+        let mut store = open_stub_store(dir.path(), stub());
+        db::set_config(&store.db, FTS_TOKENIZER_CONFIG_KEY, "2").unwrap();
+        assert!(store.fts_rebuild_pending().unwrap());
+        assert!(store.fts.is_legacy_schema());
+        assert_eq!(store.search_fts("staleterm", 10, None).unwrap().len(), 0);
+
+        assert!(store.rebuild_fts_if_needed().unwrap());
+        assert!(!store.fts.is_legacy_schema());
+        assert!(!store.fts_rebuild_pending().unwrap());
+        let hits = store.search_fts("zirconia", 10, None).unwrap();
+        assert_eq!(hits.len(), 1, "got {hits:?}");
+        assert!(store.search_fts("staleterm", 10, None).unwrap().is_empty());
     }
 
     fn fingerprint_of(sig: &str) -> String {

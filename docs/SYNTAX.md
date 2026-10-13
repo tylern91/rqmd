@@ -73,6 +73,17 @@ lex: "machine learning" -"deep learning"
 lex: auth -oauth -saml
 ```
 
+### Where keywords match
+
+A keyword term is searched in four fields, weighted: the document's title (4.0), its path (1.5),
+the `tags:` and `aliases:` values from its frontmatter (2.0) and its body (1.0). A document whose
+frontmatter carries the term therefore ranks above one that mentions it once in prose.
+
+A keyword query of four or more plain terms, such as `what went wrong with the launch`, drops
+common English filler words (`what`, `with`, `the`) before it is parsed. Queries with quotes,
+operators, field syntax or fewer than four terms are used exactly as typed, and terms containing
+CJK text are never dropped.
+
 ## Vec Query Syntax
 
 Vec queries are natural language questions. No special syntax — just write what you're looking for.

@@ -39,10 +39,11 @@ automatically as a fallback.
 
 ## Japanese, Chinese or Korean search finds nothing
 
-If `rqmd search` warns that the full-text index predates CJK tokenization, the index was built
-before CJK text was split into searchable bigrams. Run a full `rqmd update` (not
+If `rqmd search` warns that the full-text index predates the current tokenizer and schema, the
+index was built before CJK text was split into searchable bigrams, or before tags and aliases got
+their own weighted field. Run a full `rqmd update` (not
 `--collection`-scoped) once: it rebuilds the Tantivy index from the stored document text and
-prints `Rebuilt the full-text index`. Latin-script search is unaffected in the meantime. A
+prints `Rebuilt the full-text index`. Latin-script search keeps working in the meantime, without the extra weight on tags and aliases. A
 single-character query only matches where that character stands alone; use two or more.
 
 ## `rqmd doctor` reports orphaned vectors
