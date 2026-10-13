@@ -995,6 +995,8 @@ mod tests {
                     include_by_default: true,
                     update_command: None,
                     allow_hidden: false,
+                    respect_gitignore: false,
+                    max_file_bytes: None,
                 },
             )
             .unwrap();

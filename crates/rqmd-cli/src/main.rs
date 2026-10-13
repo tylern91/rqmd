@@ -236,6 +236,12 @@ pub enum CollectionCommand {
         /// root itself is never excluded just for starting with a dot).
         #[arg(long)]
         hidden: bool,
+        /// Skip files matched by the `.gitignore` files inside the tree
+        #[arg(long)]
+        respect_gitignore: bool,
+        /// Skip files larger than this many bytes (default 10485760, i.e. 10 MiB)
+        #[arg(long, value_name = "BYTES")]
+        max_file_bytes: Option<u64>,
     },
     /// List all collections
     #[command(alias = "ls")]

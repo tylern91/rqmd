@@ -6,3 +6,4 @@ mod helpers;
 mod index_rebuild;
 mod security;
 mod update_skip;
+mod walk_filters;

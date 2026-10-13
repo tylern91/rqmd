@@ -59,6 +59,8 @@ pub struct SkipCounts {
     pub permission_denied: usize,
     pub not_found: usize,
     pub other_io: usize,
+    /// Files over the collection's `max_file_bytes`, left out by the walk.
+    pub too_large: usize,
 }
 
 impl SkipCounts {
@@ -72,7 +74,7 @@ impl SkipCounts {
     }
 
     pub fn total(&self) -> usize {
-        self.not_utf8 + self.permission_denied + self.not_found + self.other_io
+        self.not_utf8 + self.permission_denied + self.not_found + self.other_io + self.too_large
     }
 
     /// Render the non-zero buckets as `"3 unreadable, 2 not UTF-8"` for a summary line.
@@ -85,8 +87,50 @@ impl SkipCounts {
         if self.not_utf8 > 0 {
             parts.push(format!("{} not UTF-8", self.not_utf8));
         }
+        if self.too_large > 0 {
+            parts.push(format!("{} over the size limit", self.too_large));
+        }
         parts.join(", ")
     }
+}
+
+/// Largest file `update` will read when a collection sets no `max_file_bytes`.
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// How a collection's tree is walked.
+#[derive(Debug, Clone, Copy)]
+pub struct WalkOptions {
+    pub allow_hidden: bool,
+    pub respect_gitignore: bool,
+    pub max_file_bytes: u64,
+}
+
+impl Default for WalkOptions {
+    fn default() -> Self {
+        Self {
+            allow_hidden: false,
+            respect_gitignore: false,
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+        }
+    }
+}
+
+impl WalkOptions {
+    pub fn for_collection(col: &rqmd_core::Collection) -> Self {
+        Self {
+            allow_hidden: col.allow_hidden,
+            respect_gitignore: col.respect_gitignore,
+            max_file_bytes: col.max_file_bytes.unwrap_or(DEFAULT_MAX_FILE_BYTES),
+        }
+    }
+}
+
+/// Result of a walk: the files to index, and how many otherwise-matching
+/// files were left out for exceeding `max_file_bytes`.
+#[derive(Debug, Default)]
+pub struct Candidates {
+    pub files: Vec<PathBuf>,
+    pub too_large: usize,
 }
 
 /// Walk `root`, returning candidate file paths that pass exclusion and
@@ -105,22 +149,57 @@ pub fn collect_candidates(
     root: &Path,
     include: &GlobSet,
     ignore: &GlobSet,
-    allow_hidden: bool,
-) -> Vec<PathBuf> {
+    opts: WalkOptions,
+) -> Candidates {
     let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    WalkDir::new(root)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .map(|e| e.into_path())
-        .filter(|p| p.is_file())
-        .filter(|p| is_contained_in(p, &canonical_root))
-        .filter(|p| !exclusions::is_excluded(p, root, ignore, allow_hidden))
-        .filter(|p| {
-            let rel = p.strip_prefix(root).unwrap_or(p);
-            include.is_match(rel)
-        })
-        .collect()
+    let mut found = Candidates::default();
+    for p in walk_paths(root, opts.respect_gitignore) {
+        if !p.is_file()
+            || !is_contained_in(&p, &canonical_root)
+            || exclusions::is_excluded(&p, root, ignore, opts.allow_hidden)
+        {
+            continue;
+        }
+        let rel = p.strip_prefix(root).unwrap_or(&p);
+        if !include.is_match(rel) {
+            continue;
+        }
+        // Counted only for files that would otherwise have been indexed, so the
+        // summary reports what the size cap cost, not every large file on disk.
+        if std::fs::metadata(&p).is_ok_and(|m| m.len() > opts.max_file_bytes) {
+            found.too_large += 1;
+            continue;
+        }
+        found.files.push(p);
+    }
+    found
+}
+
+/// Every path under `root`, following symlinks. With `respect_gitignore`, paths
+/// matched by a `.gitignore` inside the tree are left out (and only those
+/// files are consulted: no global ignore, no `.ignore`, no hidden-file rule —
+/// hidden handling stays in [`exclusions::is_excluded`]).
+fn walk_paths(root: &Path, respect_gitignore: bool) -> Box<dyn Iterator<Item = PathBuf>> {
+    if respect_gitignore {
+        Box::new(
+            ignore::WalkBuilder::new(root)
+                .standard_filters(false)
+                .git_ignore(true)
+                .require_git(false)
+                .follow_links(true)
+                .build()
+                .filter_map(|e| e.ok())
+                .map(|e| e.into_path()),
+        )
+    } else {
+        Box::new(
+            WalkDir::new(root)
+                .follow_links(true)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .map(|e| e.into_path()),
+        )
+    }
 }
 
 /// True if `p`'s fully-resolved (symlink-followed) real path is under
@@ -580,7 +659,7 @@ mod tests {
 
         let include = exclusions::build_include_set("**/*.md").unwrap();
         let ignore = exclusions::build_ignore_set(&["docs/**".to_string()]);
-        let found = collect_candidates(dir.path(), &include, &ignore, false);
+        let found = collect_candidates(dir.path(), &include, &ignore, WalkOptions::default()).files;
         let names: Vec<String> = found
             .iter()
             .map(|p| {
@@ -612,7 +691,8 @@ mod tests {
 
         let include = exclusions::build_include_set("**/*.md").unwrap();
         let ignore = exclusions::build_ignore_set(&[]);
-        let found = collect_candidates(root.path(), &include, &ignore, false);
+        let found =
+            collect_candidates(root.path(), &include, &ignore, WalkOptions::default()).files;
         let names: Vec<String> = found
             .iter()
             .map(|p| {
@@ -642,7 +722,8 @@ mod tests {
 
         let include = exclusions::build_include_set("**/*.md").unwrap();
         let ignore = exclusions::build_ignore_set(&[]);
-        let found = collect_candidates(root.path(), &include, &ignore, false);
+        let found =
+            collect_candidates(root.path(), &include, &ignore, WalkOptions::default()).files;
         let names: Vec<String> = found
             .iter()
             .map(|p| {
