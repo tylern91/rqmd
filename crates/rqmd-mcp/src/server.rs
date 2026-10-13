@@ -48,6 +48,30 @@ fn clamp_limit(limit: Option<usize>, default: usize) -> usize {
     limit.unwrap_or(default).clamp(1, MAX_SEARCH_LIMIT)
 }
 
+/// Clamp a client-supplied `offset` to `0..=MAX_SEARCH_LIMIT`, so a huge
+/// value cannot size a retrieval pool past the same cap `limit` obeys.
+fn clamp_offset(offset: Option<usize>) -> usize {
+    offset.unwrap_or(0).min(MAX_SEARCH_LIMIT)
+}
+
+/// Number of ranked results to fetch so that the page `offset..offset+limit`
+/// can be cut out and one extra result proves whether a further page exists.
+fn fetch_len(offset: usize, limit: usize) -> usize {
+    (offset + limit + 1).min(MAX_SEARCH_LIMIT)
+}
+
+/// Cut one page out of a ranked list. Returns the page and whether more
+/// results follow it.
+fn page_of<T>(mut ranked: Vec<T>, offset: usize, limit: usize) -> (Vec<T>, bool) {
+    let has_more = ranked.len() > offset + limit;
+    let page = if offset >= ranked.len() {
+        Vec::new()
+    } else {
+        ranked.drain(offset..).take(limit).collect()
+    };
+    (page, has_more)
+}
+
 /// Default number of read-only FTS store handles when `RQMD_MCP_FTS_READERS`
 /// is unset: enough to overlap a few concurrent clients without opening a
 /// handle per core on large machines.
@@ -247,6 +271,8 @@ pub struct QueryInput {
     pub collections: Option<Vec<String>>,
     /// Maximum results to return (default: 10).
     pub limit: Option<usize>,
+    /// Number of ranked results to skip, to fetch the next page (default: 0).
+    pub offset: Option<usize>,
     /// Set to false to skip LLM reranking (faster, lower quality). Default: true.
     pub rerank: Option<bool>,
     /// Set to false to skip the LLM query-expansion / HyDE round-trip (faster;
@@ -262,6 +288,8 @@ pub struct SearchInput {
     pub collections: Option<Vec<String>>,
     /// Maximum results to return (default: 10).
     pub limit: Option<usize>,
+    /// Number of ranked results to skip, to fetch the next page (default: 0).
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -346,6 +374,7 @@ impl RqmdServer {
         let no_rerank = !p.rerank.unwrap_or(true);
         let no_expand = !p.expand.unwrap_or(true);
         let limit = clamp_limit(p.limit, 10);
+        let offset = clamp_offset(p.offset);
         let cols = p.collections.as_deref();
         let intent = p.intent.as_deref();
         let mut store = self
@@ -355,26 +384,29 @@ impl RqmdServer {
             .hybrid_query_multi_with_deadline(
                 &p.query,
                 intent,
-                limit,
+                fetch_len(offset, limit),
                 cols,
                 no_rerank,
                 no_expand,
                 Deadline::after(self.tool_timeout),
             )
             .map_err(|e| format!("Error running query: {e:#}"))?;
-        Ok(format_results(&results, &p.query))
+        let (page, has_more) = page_of(results, offset, limit);
+        Ok(format_results(&page, &p.query, offset, has_more))
     }
 
     fn search_blocking(&self, p: SearchInput) -> Result<String, String> {
         let limit = clamp_limit(p.limit, 10);
+        let offset = clamp_offset(p.offset);
         let cols = p.collections.as_deref();
         let store = self
             .fts()
             .map_err(|e| format!("Error opening store: {e:#}"))?;
         let results = store
-            .search_fts_multi(&p.query, limit, cols)
+            .search_fts_multi(&p.query, fetch_len(offset, limit), cols)
             .map_err(|e| format!("Error running search: {e:#}"))?;
-        Ok(format_results(&results, &p.query))
+        let (page, has_more) = page_of(results, offset, limit);
+        Ok(format_results(&page, &p.query, offset, has_more))
     }
 
     fn get_blocking(&self, p: GetInput) -> Result<String, String> {
@@ -427,15 +459,31 @@ impl ServerHandler for RqmdServer {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn format_results(results: &[rqmd_core::SearchResult], query: &str) -> String {
+fn format_results(
+    results: &[rqmd_core::SearchResult],
+    query: &str,
+    offset: usize,
+    has_more: bool,
+) -> String {
     if results.is_empty() {
-        return format!("No results found for: {query}");
+        return if offset == 0 {
+            format!("No results found for: {query}")
+        } else {
+            format!("No results found for: {query} (offset {offset} is past the last result)")
+        };
     }
-    let mut out = format!("Found {} result(s) for \"{query}\":\n\n", results.len());
+    let mut out = if offset == 0 {
+        format!("Found {} result(s) for \"{query}\":\n\n", results.len())
+    } else {
+        format!(
+            "Found {} result(s) for \"{query}\" (offset {offset}):\n\n",
+            results.len()
+        )
+    };
     for (i, r) in results.iter().enumerate() {
         out.push_str(&format!(
             "[{}] {} #{}\n  rqmd://{}/{} · score {:.3}\n",
-            i + 1,
+            offset + i + 1,
             r.title,
             r.docid,
             r.collection,
@@ -449,6 +497,12 @@ fn format_results(results: &[rqmd_core::SearchResult], query: &str) -> String {
             }
         }
         out.push('\n');
+    }
+    if has_more {
+        out.push_str(&format!(
+            "More results are available: pass offset={}.\n",
+            offset + results.len()
+        ));
     }
     out
 }
@@ -732,6 +786,45 @@ mod tests {
     }
 
     #[test]
+    fn ac_1_offset_pages_are_disjoint_slices_of_one_ranking() {
+        let ranked: Vec<u32> = (1..=25).collect();
+        let (first, more1) = page_of(ranked.clone(), 0, 10);
+        let (second, more2) = page_of(ranked.clone(), 10, 10);
+        let (third, more3) = page_of(ranked, 20, 10);
+        assert_eq!(first, (1..=10).collect::<Vec<_>>());
+        assert_eq!(second, (11..=20).collect::<Vec<_>>());
+        assert_eq!(third, (21..=25).collect::<Vec<_>>());
+        assert_eq!((more1, more2, more3), (true, true, false));
+    }
+
+    #[test]
+    fn ac_2_omitted_offset_is_zero_and_changes_no_results() {
+        assert_eq!(clamp_offset(None), 0);
+        let ranked: Vec<u32> = (1..=5).collect();
+        let (page, more) = page_of(ranked.clone(), clamp_offset(None), 10);
+        assert_eq!(page, ranked);
+        assert!(!more);
+        assert_eq!(fetch_len(0, 10), 11);
+    }
+
+    #[test]
+    fn ac_3_offset_past_the_end_is_an_empty_page_and_huge_values_are_clamped() {
+        let (page, more) = page_of(vec![1, 2, 3], 50, 10);
+        assert!(page.is_empty());
+        assert!(!more);
+        assert_eq!(clamp_offset(Some(usize::MAX)), MAX_SEARCH_LIMIT);
+        assert_eq!(fetch_len(MAX_SEARCH_LIMIT, 1000), MAX_SEARCH_LIMIT);
+        assert_eq!(
+            format_results(&[], "q", 50, false),
+            "No results found for: q (offset 50 is past the last result)"
+        );
+        assert_eq!(
+            format_results(&[], "q", 0, false),
+            "No results found for: q"
+        );
+    }
+
+    #[test]
     fn clamp_limit_defaults_when_omitted_and_floors_zero() {
         assert_eq!(clamp_limit(None, 10), 10);
         assert_eq!(clamp_limit(Some(0), 10), 1);
@@ -987,6 +1080,7 @@ mod tests {
             intent: None,
             collections: None,
             limit: None,
+            offset: None,
             rerank: None,
             expand: None,
         }
@@ -1086,6 +1180,7 @@ mod tests {
                     query: "hello".to_string(),
                     collections: None,
                     limit: None,
+                    offset: None,
                 }))
                 .await
         });

@@ -108,11 +108,13 @@ Exact input fields per tool, as accepted by the JSON-RPC tool call
 | | `intent` | `string`, optional | Background context steering expansion/reranking |
 | | `collections` | `string[]`, optional | Scope to these collections |
 | | `limit` | `number`, optional | Default 10 |
+| | `offset` | `number`, optional | Results to skip, for the next page. Default 0, capped at 1000 |
 | | `rerank` | `boolean`, optional | Default `true` |
 | | `expand` | `boolean`, optional | Default `true` |
 | `search` | `query` | `string` (required) | BM25-only search text |
 | | `collections` | `string[]`, optional | Scope to these collections |
 | | `limit` | `number`, optional | Default 10 |
+| | `offset` | `number`, optional | Results to skip, for the next page. Default 0, capped at 1000 |
 | `get` | `file` | `string` (required) | Path or `#docid` |
 | | `from_line` | `number`, optional | Start line for partial retrieval |
 | | `max_lines` | `number`, optional | Cap on lines returned (default 2000) |
@@ -120,6 +122,14 @@ Exact input fields per tool, as accepted by the JSON-RPC tool call
 | | `collections` | `string[]`, optional | Scope to these collections |
 | | `max_lines` | `number`, optional | Cap on lines returned per document (default 2000) |
 | `status` | *(none)* | | Takes no input. Reports document/vector counts and per-collection document counts; it does not disclose filesystem paths |
+
+`query` and `search` page with `offset`: a response that is followed by more
+results ends with `More results are available: pass offset=N.`, and an
+`offset` past the last result returns an empty page without an error. `search`
+pages are slices of one BM25 ranking. `query` sizes its rerank candidate pool
+from the number of results it must return (`offset + limit`), so a deeper page
+is ranked over a slightly larger pool and a result near a page boundary can
+shift by a position.
 
 `get` and `multi_get` also cap each document body at 256 KiB, and `multi_get`
 caps the whole response at 4 MiB. A response cut short by a cap ends with a

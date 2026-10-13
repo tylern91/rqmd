@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-10-13
+
+### Added
+- The MCP `query` and `search` tools take an optional `offset` to fetch the next page of
+  results. It is capped at 1000 like `limit`, an `offset` past the last result returns an empty
+  page, and a page that has more results after it ends with the `offset` to pass next. Omitting
+  `offset` returns the same results as before.
+
 ## [0.24.0] - 2026-10-13
 
 ### Added
