@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-13
+
+### Added
+- `rqmd collection add --respect-gitignore` skips files matched by the `.gitignore` files inside
+  the collection tree. It is off by default, so no existing collection loses documents, and it
+  is stored with the collection and applied by every later `update`.
+- `rqmd collection add --max-file-bytes N` skips files larger than `N` bytes (default 10 MiB,
+  also applied to existing collections). The `collection add` and `update` summaries count them
+  as `N over the size limit`, and a file that grows past the limit is removed from the index on
+  the next `update`.
+- `collection show` prints both settings.
+
+### Changed
+- Two nullable columns, `store_collections.respect_gitignore` and
+  `store_collections.max_file_bytes`, are added automatically.
+
 ## [0.25.2] - 2026-10-13
 
 ### Changed
