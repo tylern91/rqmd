@@ -163,7 +163,7 @@ scheme, and MCP tool surface are all derived from that project. See
 [BENCHMARK.md](BENCHMARK.md) for the de-risking spike results that validated the
 Rust technology choices, and
 [docs/research/2026-09-27-adoption-assessment.md](docs/research/2026-09-27-adoption-assessment.md)
-for the most recent adoption and security assessment.
+for the most recent upstream-parity and security assessment.
 
 **Coming from qmd?** The quickest path:
 
