@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-10-13
+
+### Changed
+- Editing part of a long note no longer re-embeds all of it. `rqmd embed` keeps a hash of each chunk's
+  text, and a chunk whose text is unchanged reuses the stored vector instead of being encoded again,
+  so only the edited chunks go through the model. The result is the same as a full re-embed.
+- The query and passage prompt prefixes are now part of the embedding fingerprint, so changing either
+  one marks existing embeddings as needing a refresh.
+- **One-time re-embed:** the fingerprint changed, so the first `rqmd embed` after upgrading re-embeds
+  every collection once. `rqmd doctor` reports the existing vectors as stale until then.
+- `content_vectors.chunk_hash` is added automatically. Vectors written before this release have no
+  chunk hash; they are never reused and are filled in as their documents are re-embedded.
+
 ## [0.27.0] - 2026-10-13
 
 ### Added
