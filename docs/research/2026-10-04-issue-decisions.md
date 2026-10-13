@@ -2,7 +2,7 @@
 
 [← Research notes](README.md)
 
-Four of the issues filed by the [2026-09-27 upstream adoption pass](2026-09-27-upstream-qmd-adoption.md)
+Four of the issues filed by the [2026-09-27 adoption pass](2026-09-27-adoption-assessment.md)
 were investigated and **not implemented**. Each was closed as `not_planned` with the evidence below,
 so the next comparison against upstream `tobi/qmd` doesn't re-open it without new facts.
 
