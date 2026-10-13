@@ -59,6 +59,55 @@ fn lock_wait_budget() -> Duration {
 /// length filter. Registered under `default` so every `TEXT` field — indexing,
 /// query parsing and `path_terms` alike — picks it up. Changing it changes
 /// what the index must contain: bump [`crate::store::FTS_TOKENIZER_VERSION`].
+/// Filler words dropped from a plain natural-language keyword query. Kept
+/// small and English-only on purpose: a word here is removed from the query
+/// whenever the query is long enough to qualify, so only words that never
+/// carry a topic belong in it.
+const KEYWORD_STOPWORDS: &[&str] = &[
+    "a", "about", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "did", "do",
+    "does", "for", "from", "had", "has", "have", "how", "i", "in", "into", "is", "it", "its", "of",
+    "on", "or", "that", "the", "their", "there", "these", "this", "to", "was", "were", "what",
+    "when", "where", "which", "who", "why", "will", "with", "would",
+];
+
+/// Fewest whitespace-separated terms a query needs before filler words are
+/// dropped; shorter queries are usually deliberate keywords.
+const STOPWORD_MIN_TERMS: usize = 4;
+
+/// Remove filler words from a plain natural-language keyword query.
+///
+/// A query is left exactly as typed when it has fewer than
+/// `STOPWORD_MIN_TERMS` terms, or uses any explicit syntax: quotes, a field
+/// specifier, grouping, `+`/`-`/`*`/`^`/`~` modifiers, or an uppercase
+/// `AND`/`OR`/`NOT`. Only terms made entirely of ASCII letters are ever
+/// removed, so a term containing CJK text is always kept. If every term would
+/// be removed the original query is returned.
+fn strip_keyword_stopwords(query: &str) -> std::borrow::Cow<'_, str> {
+    let terms: Vec<&str> = query.split_whitespace().collect();
+    let has_syntax = query.contains(|c: char| {
+        matches!(
+            c,
+            '"' | ':' | '(' | ')' | '[' | ']' | '{' | '}' | '+' | '-' | '*' | '^' | '~' | '!'
+        )
+    }) || terms.iter().any(|t| matches!(*t, "AND" | "OR" | "NOT"));
+    if terms.len() < STOPWORD_MIN_TERMS || has_syntax {
+        return std::borrow::Cow::Borrowed(query);
+    }
+    let kept: Vec<&str> = terms
+        .iter()
+        .copied()
+        .filter(|t| {
+            let filler = t.chars().all(|c| c.is_ascii_alphabetic())
+                && KEYWORD_STOPWORDS.contains(&t.to_ascii_lowercase().as_str());
+            !filler
+        })
+        .collect();
+    if kept.is_empty() {
+        return std::borrow::Cow::Borrowed(query);
+    }
+    std::borrow::Cow::Owned(kept.join(" "))
+}
+
 fn analyzer() -> TextAnalyzer {
     TextAnalyzer::builder(SimpleTokenizer::default())
         .filter(CjkBigramFilter)
@@ -370,6 +419,7 @@ impl FtsIndex {
         // query must go through tokenization in the same canonical form as
         // whatever's indexed, or the two can silently miss each other.
         let query_text = normalize_nfc(query_text);
+        let query_text = strip_keyword_stopwords(&query_text);
 
         // `parse_query` fails hard on a fragment tantivy reads as a field specifier
         // (e.g. "error: connection refused" — the colon looks like `field:value`).
@@ -891,5 +941,84 @@ mod tests {
                 "{label} {query:?} must match both the NFC- and NFD-indexed document"
             );
         }
+    }
+
+    #[test]
+    fn ac_1_question_shaped_query_ranks_the_content_words_first() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        // The content words are common across the corpus, so each one is a
+        // weak signal; the filler words are rare, so left in the query they
+        // would pull the filler-heavy document to the top.
+        idx.add_document(
+            "notes/filler.md",
+            "Chatter",
+            "what with the what with the what with the",
+            1,
+        )
+        .unwrap();
+        for i in 0..12 {
+            idx.add_document(
+                &format!("notes/launch-{i}.md"),
+                "Postmortem",
+                "the launch went wrong because the rollout skipped a step",
+                10 + i,
+            )
+            .unwrap();
+        }
+        idx.commit().unwrap();
+
+        let hits = idx
+            .search_fts_multi("what went wrong with the launch", 1, None)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].0.starts_with("notes/launch-"), "got {hits:?}");
+    }
+
+    #[test]
+    fn ac_2_short_or_syntax_queries_are_left_exactly_as_typed() {
+        for q in [
+            "the launch",
+            "what is the",
+            "\"what went wrong with the launch\"",
+            "what went wrong with the -launch",
+            "title:what went wrong with the launch",
+            "what went wrong AND the launch",
+            "what went wrong with (the launch)",
+            "what went wrong with the launch*",
+        ] {
+            assert_eq!(
+                strip_keyword_stopwords(q),
+                q,
+                "query {q:?} must be unchanged"
+            );
+        }
+        assert_eq!(
+            strip_keyword_stopwords("what went wrong with the launch"),
+            "went wrong launch"
+        );
+    }
+
+    #[test]
+    fn ac_3_a_query_of_only_stopwords_keeps_its_original_text() {
+        let q = "what is the with that";
+        assert_eq!(strip_keyword_stopwords(q), q);
+    }
+
+    #[test]
+    fn ac_4_terms_containing_cjk_text_are_never_removed() {
+        assert_eq!(
+            strip_keyword_stopwords("what is the 東京 launch"),
+            "東京 launch"
+        );
+        assert_eq!(
+            strip_keyword_stopwords("the 日本語 with 検索 is"),
+            "日本語 検索"
+        );
+        // A term that mixes letters and CJK text is not a plain stopword.
+        assert_eq!(
+            strip_keyword_stopwords("the isの a launch plan"),
+            "isの launch plan"
+        );
     }
 }
