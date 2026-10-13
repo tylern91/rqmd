@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.25.2] - 2026-10-13
+
+### Changed
+- A keyword query of four or more plain terms, such as `what went wrong with the launch`, now
+  drops common English filler words (`what`, `with`, `the` and similar) before it is parsed, so
+  the content words decide the ranking. Queries with quotes, operators, field syntax or fewer
+  than four terms are parsed exactly as typed, terms containing CJK text are never removed, and
+  a query made only of filler words keeps its original text.
+
 ## [0.25.1] - 2026-10-13
 
 ### Changed
