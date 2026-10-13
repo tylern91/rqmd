@@ -188,16 +188,17 @@ pub fn warn_if_raw_backfill_pending(s: &Store) {
     }
 }
 
-/// Warn if the full-text index was built by an older tokenizer than this
-/// binary's: CJK text is indexed in a form CJK queries no longer produce, so
-/// they can miss until a full `rqmd update` rebuilds it. Latin-script search
-/// is unaffected, so this stays a one-line advisory.
+/// Warn if the full-text index was built by an older analyzer or schema than
+/// this binary's: text may be indexed in a form queries no longer produce (CJK
+/// before bigrams) or without a field search now uses (frontmatter), so results
+/// can miss or rank differently until a full `rqmd update` rebuilds it.
 pub fn warn_if_fts_rebuild_pending(s: &Store) {
     if s.fts_rebuild_pending().unwrap_or(false) {
         eprintln!(
-            "\x1b[33mrqmd: warning: the full-text index predates CJK tokenization — Japanese, \
-             Chinese and Korean queries may miss until `rqmd update` (full, not \
-             --collection-scoped) rebuilds it\x1b[0m"
+            "\x1b[33mrqmd: warning: the full-text index predates the current tokenizer and \
+             schema — some Japanese, Chinese and Korean queries may miss and tags and aliases \
+             are not weighted until `rqmd update` (full, not --collection-scoped) rebuilds \
+             it\x1b[0m"
         );
     }
 }
