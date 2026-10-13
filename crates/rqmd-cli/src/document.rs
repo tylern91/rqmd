@@ -133,6 +133,44 @@ fn is_contained_in(p: &Path, canonical_root: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// A file's `(size, mtime_ns)`, the cheap change signal checked before a file
+/// is read and hashed. The content hash stays the source of truth: a stat
+/// match only ever lets `update` skip work, a mismatch always falls back to it.
+pub type FileStat = (i64, i64);
+
+/// A file modified within this window of "now" is not trusted as unchanged:
+/// filesystems with coarse mtime granularity can record a second write in the
+/// same tick with an identical size and timestamp.
+const MTIME_TRUST_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Stat `abs` (following symlinks, like the read that follows it). Take this
+/// *before* reading the file: a write landing between the stat and the read
+/// then leaves a stale stat next to newer content, which the next run
+/// re-indexes, whereas stat-after-read could pin old content to a new stat.
+pub fn stat_file(abs: &Path) -> Option<FileStat> {
+    let meta = std::fs::metadata(abs).ok()?;
+    let mtime = meta.modified().ok()?;
+    let nanos = mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    Some((i64::try_from(meta.len()).ok()?, i64::try_from(nanos).ok()?))
+}
+
+/// The stat to persist for a file just indexed: `None` while its mtime is too
+/// recent to trust (see [`MTIME_TRUST_WINDOW`]), so the next run re-hashes it.
+pub fn trusted_stat(stat: FileStat) -> Option<FileStat> {
+    let mtime =
+        std::time::UNIX_EPOCH + std::time::Duration::from_nanos(u64::try_from(stat.1).ok()?);
+    let age = std::time::SystemTime::now().duration_since(mtime).ok()?;
+    (age > MTIME_TRUST_WINDOW).then_some(stat)
+}
+
+/// Path of `abs` relative to the collection `root`, as stored in `documents.path`.
+pub fn rel_path_of(abs: &Path, root: &Path) -> String {
+    abs.strip_prefix(root)
+        .unwrap_or(abs)
+        .to_string_lossy()
+        .to_string()
+}
+
 /// Read `abs` and resolve its title + indexed/raw text pair.
 ///
 /// Title precedence: frontmatter `title:` scalar → first `#` heading in the
@@ -142,11 +180,7 @@ fn is_contained_in(p: &Path, canonical_root: &Path) -> bool {
 /// unconditionally preserved for storage/retrieval.
 pub fn prepare(abs: &Path, root: &Path) -> Result<PreparedDoc, SkipReason> {
     let raw = std::fs::read_to_string(abs).map_err(|e| SkipReason::from_io_error(&e))?;
-    let rel_path = abs
-        .strip_prefix(root)
-        .unwrap_or(abs)
-        .to_string_lossy()
-        .to_string();
+    let rel_path = rel_path_of(abs, root);
 
     let (frontmatter, body) = frontmatter::split(&raw);
     let title = frontmatter
@@ -334,6 +368,25 @@ mod frontmatter {
 
 #[cfg(test)]
 mod tests {
+    fn stat_with_mtime(mtime: std::time::SystemTime) -> FileStat {
+        let nanos = mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        (7, i64::try_from(nanos).unwrap())
+    }
+
+    #[test]
+    fn trusted_stat_rejects_recent_and_future_mtimes_but_keeps_old_ones() {
+        let now = std::time::SystemTime::now();
+        let hour = std::time::Duration::from_secs(3600);
+
+        let old = stat_with_mtime(now - hour);
+        assert_eq!(trusted_stat(old), Some(old));
+        assert_eq!(trusted_stat(stat_with_mtime(now)), None);
+        assert_eq!(trusted_stat(stat_with_mtime(now + hour)), None);
+    }
+
     use super::*;
     use tempfile::tempdir;
 

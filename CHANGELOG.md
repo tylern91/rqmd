@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-10-13
+
+### Added
+- `rqmd update --full` re-reads and re-hashes every file, ignoring the recorded size and mtime
+  described below.
+
+### Changed
+- `rqmd update` no longer reads or hashes a file whose size and mtime match what it was last
+  indexed from; it counts the file unchanged straight from `stat`. On 20,000 unchanged files
+  that took about 0.9 s instead of about 2.8 s. A mismatch falls back to the content hash, which
+  stays the source of truth, and a file modified within the last 2 seconds is never skipped.
+  The stat is taken before the file is read, so a write landing in between is caught on the next
+  run.
+- `collection add` records the same stat, so the first `update` after adding a collection
+  already skips unchanged files.
+- Two nullable columns, `documents.size` and `documents.mtime_ns`, are added automatically. An
+  existing index has none, so the first `update` after upgrading reads every file once and
+  records them; no document is re-embedded.
+- A same-size edit that also preserves the mtime (for example restored with `cp -p`) is not seen
+  by a plain `update` until `rqmd update --full`.
+
 ## [0.23.0] - 2026-10-04
 
 ### Fixed

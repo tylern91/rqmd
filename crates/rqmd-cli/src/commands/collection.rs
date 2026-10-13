@@ -112,6 +112,7 @@ fn add(
             eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
         }
 
+        let stat = document::stat_file(path);
         let doc = match document::prepare(path, &abs_dir) {
             Ok(doc) => doc,
             Err(reason) => {
@@ -127,7 +128,15 @@ fn add(
             &doc.indexed_text,
             &doc.raw,
         ) {
-            Ok(_) => count += 1,
+            Ok(_) => {
+                count += 1;
+                db::set_document_stat(
+                    &s.db,
+                    &collection_name,
+                    &doc.rel_path,
+                    stat.and_then(document::trusted_stat),
+                )?;
+            }
             Err(e) => {
                 eprintln!("\n  WARN: skipping {}: {e:#}", doc.rel_path);
                 errors += 1;

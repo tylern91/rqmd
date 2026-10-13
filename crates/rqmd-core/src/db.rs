@@ -107,6 +107,12 @@ fn init_schema(conn: &Connection) -> Result<()> {
     // was written first. See `store::upgrade_needed` for the one-time
     // reindex this column requires on existing indexes.
     ensure_column(conn, "documents", "raw", "raw TEXT NOT NULL DEFAULT ''")?;
+    // `size` / `mtime_ns` record the on-disk stat a document was last indexed
+    // from, so an unchanged file can be skipped without being read or hashed.
+    // Both stay NULL until the first indexing pass after the upgrade, and NULL
+    // always means "re-read and hash" — never "unchanged".
+    ensure_column(conn, "documents", "size", "size INTEGER")?;
+    ensure_column(conn, "documents", "mtime_ns", "mtime_ns INTEGER")?;
     Ok(())
 }
 
@@ -232,6 +238,50 @@ pub fn upsert_document(
         |row| row.get(0),
     )
     .context("upsert document")
+}
+
+/// The `(size, mtime_ns)` each active document in `collection` was last
+/// indexed from, keyed by `documents.path`. Documents with no recorded stat
+/// (never indexed since the columns were added, or indexed while their mtime
+/// was too recent to trust) are absent, so a lookup miss always means
+/// "re-read the file".
+pub fn load_doc_stat_cache(
+    conn: &Connection,
+    collection: &str,
+) -> Result<std::collections::HashMap<String, (i64, i64)>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, size, mtime_ns FROM documents \
+             WHERE collection=?1 AND active=1 AND size IS NOT NULL AND mtime_ns IS NOT NULL",
+        )
+        .context("prepare doc stat cache")?;
+    let rows = stmt
+        .query_map(params![collection], |row| {
+            Ok((row.get::<_, String>(0)?, (row.get(1)?, row.get(2)?)))
+        })
+        .context("query doc stat cache")?
+        .collect::<rusqlite::Result<_>>()
+        .context("read doc stat cache")?;
+    Ok(rows)
+}
+
+/// Record (or clear, with `None`) the stat a document was just indexed from.
+pub fn set_document_stat(
+    conn: &Connection,
+    collection: &str,
+    path: &str,
+    stat: Option<(i64, i64)>,
+) -> Result<()> {
+    let (size, mtime_ns) = match stat {
+        Some((size, mtime_ns)) => (Some(size), Some(mtime_ns)),
+        None => (None, None),
+    };
+    conn.execute(
+        "UPDATE documents SET size=?3, mtime_ns=?4 WHERE collection=?1 AND path=?2",
+        params![collection, path, size, mtime_ns],
+    )
+    .context("set document stat")?;
+    Ok(())
 }
 
 /// Set the verbatim retrieval payload for a document, independent of
@@ -1199,6 +1249,27 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn doc_stat_cache_returns_only_active_documents_with_a_recorded_stat() {
+        let conn = test_conn();
+        insert_doc(&conn, "h1", "recorded.md");
+        insert_doc(&conn, "h2", "unrecorded.md");
+        insert_doc(&conn, "h3", "cleared.md");
+        insert_doc(&conn, "h4", "gone.md");
+        set_document_stat(&conn, "col", "recorded.md", Some((10, 20))).unwrap();
+        set_document_stat(&conn, "col", "cleared.md", Some((1, 2))).unwrap();
+        set_document_stat(&conn, "col", "cleared.md", None).unwrap();
+        set_document_stat(&conn, "col", "gone.md", Some((3, 4))).unwrap();
+        conn.execute("UPDATE documents SET active=0 WHERE path='gone.md'", [])
+            .unwrap();
+
+        let cache = load_doc_stat_cache(&conn, "col").unwrap();
+
+        assert_eq!(cache.len(), 1, "unexpected entries: {cache:?}");
+        assert_eq!(cache.get("recorded.md"), Some(&(10, 20)));
+        assert!(load_doc_stat_cache(&conn, "other").unwrap().is_empty());
     }
 
     fn insert_doc(conn: &Connection, hash: &str, path: &str) {
