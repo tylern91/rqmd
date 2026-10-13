@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-10-13
+
+### Added
+- A document's frontmatter `tags` and `aliases` are now indexed in their own full-text field
+  that ranks above a plain body mention, so `rqmd search telecommuting` finds a note tagged
+  `telecommuting` ahead of notes that only mention the word once. The terms also stay in the
+  body text, so a document's content hash and its embeddings are unchanged.
+
+### Changed
+- The full-text index schema gained a field. After upgrading, run a full, unscoped `rqmd update`
+  once: it rebuilds the index with the new field, and `rqmd query`, `rqmd doctor` and scoped
+  updates warn until that has happened. An index built before this release keeps working in
+  the meantime, without the weighted field.
+
 ## [0.26.0] - 2026-10-13
 
 ### Added
