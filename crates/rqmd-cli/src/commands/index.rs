@@ -836,10 +836,14 @@ fn run_update_with(
     // `documents.raw` rows at their empty-string default.
     if collection.is_none() && all_collections_clean {
         store::mark_raw_split_backfilled(&s)?;
-        // The rebuild reads document text from `content`, which is only
-        // trustworthy once this same pass has healed it.
+    }
+    // The rebuild reads document text from `content`, which is trustworthy once
+    // a clean pass (this one or an earlier one) has certified the backfill. A
+    // later unclean pass — a collection directory gone, one unreadable file —
+    // cannot undo that, so it must not block the rebuild forever.
+    if collection.is_none() && store::raw_split_backfilled(&s) {
         if s.rebuild_fts_if_needed()? {
-            println!("Rebuilt the full-text index with CJK-aware tokenization.");
+            println!("Rebuilt the full-text index for the current tokenizer and schema.");
         }
     } else {
         store::warn_if_fts_rebuild_pending(&s);
@@ -1862,6 +1866,71 @@ mod tests {
         let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
         assert_eq!(s.search_fts("東京都", 10, None).unwrap().len(), 1);
         assert!(!s.fts_rebuild_pending().unwrap());
+    }
+
+    /// An index with a Japanese document in collection `c` and a second
+    /// collection `gone` whose directory no longer exists, so every unscoped
+    /// update is "unclean". Returns the index dir and the live source dir, which
+    /// the caller keeps alive for the test's duration.
+    fn index_with_a_missing_collection_dir() -> (tempfile::TempDir, tempfile::TempDir) {
+        let index_dir = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src.path().join("jp.md"),
+            "# 旅行記\n\n私は昨日東京都庁を訪れました",
+        )
+        .unwrap();
+        let missing = tempfile::tempdir().unwrap();
+        let missing_path = missing.path().to_path_buf();
+        drop(missing);
+        {
+            let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+            db::upsert_collection(&s.db, &test_collection("c", src.path())).unwrap();
+            db::upsert_collection(&s.db, &test_collection("gone", &missing_path)).unwrap();
+        }
+        (index_dir, src)
+    }
+
+    /// Make the index look built by the previous tokenizer: no version marker
+    /// and the Japanese document absent from Tantivy.
+    fn make_full_text_index_legacy(index_dir: &Path) {
+        let mut s = store::open_store_no_backend(index_dir, false).unwrap();
+        db::delete_config(&s.db, rqmd_core::store::FTS_TOKENIZER_CONFIG_KEY).unwrap();
+        s.remove_from_fts("c/jp.md").unwrap();
+        s.flush().unwrap();
+        assert!(s.fts_rebuild_pending().unwrap());
+    }
+
+    #[test]
+    fn run_update_rebuilds_the_full_text_index_despite_a_missing_collection_dir() {
+        let (index_dir, _src) = index_with_a_missing_collection_dir();
+        // The first update is unclean (missing dir), so it never certifies the
+        // raw-split backfill; simulate an index that an earlier clean pass did.
+        {
+            let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+            store::mark_raw_split_backfilled(&s).unwrap();
+        }
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+        make_full_text_index_legacy(index_dir.path());
+
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+
+        let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
+        assert_eq!(s.search_fts("東京都", 10, None).unwrap().len(), 1);
+        assert!(!s.fts_rebuild_pending().unwrap());
+    }
+
+    #[test]
+    fn a_legacy_index_with_an_unclean_pass_still_defers_the_rebuild() {
+        let (index_dir, _src) = index_with_a_missing_collection_dir();
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+        make_full_text_index_legacy(index_dir.path());
+
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+
+        let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
+        assert!(!store::raw_split_backfilled(&s));
+        assert!(s.fts_rebuild_pending().unwrap());
     }
 
     #[test]

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-10-19
+
+### Fixed
+- A full `rqmd update` now rebuilds an outdated full-text index even when a collection's directory
+  is missing or a file could not be read. Before, any such skip blocked the rebuild, so the "full-text
+  index predates the current tokenizer" warning came back after every update.
+
 ## [0.28.0] - 2026-10-13
 
 ### Changed
