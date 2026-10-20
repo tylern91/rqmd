@@ -161,6 +161,15 @@ pub fn mark_raw_split_backfilled(s: &Store) -> Result<()> {
     db::set_config(&s.db, RAW_SPLIT_SCHEMA_KEY, "1")
 }
 
+/// Whether a clean full `rqmd update` has already certified the
+/// `documents.raw` backfill, i.e. `content` rows are trustworthy.
+pub fn raw_split_backfilled(s: &Store) -> bool {
+    db::get_config(&s.db, RAW_SPLIT_SCHEMA_KEY)
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 /// Warn once if the index predates the `documents.raw` split and hasn't yet
 /// had a full `rqmd update` pass to repair it — until then, some documents
 /// may still be serving another document's retrieval text (a pre-split
@@ -168,11 +177,7 @@ pub fn mark_raw_split_backfilled(s: &Store) -> Result<()> {
 /// A fresh (post-split) index has no documents until the first `update`, so
 /// this only fires once something has actually been indexed.
 pub fn warn_if_raw_backfill_pending(s: &Store) {
-    if db::get_config(&s.db, RAW_SPLIT_SCHEMA_KEY)
-        .ok()
-        .flatten()
-        .is_some()
-    {
+    if raw_split_backfilled(s) {
         return;
     }
     let has_docs: i64 =
