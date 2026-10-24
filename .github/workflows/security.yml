@@ -14,16 +14,23 @@ permissions:
   security-events: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded runs on PRs only. Other events get their own group, so no
+  # push to main or scheduled run is cancelled or dropped while queued.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   cargo-audit:
     name: cargo audit (RUSTSEC)
     runs-on: ubuntu-26.04-arm
+    # Observed 129-157 s (the action compiles cargo-audit from source).
+    timeout-minutes: 15
     permissions:
       contents: read
       checks: write
+      # Scheduled runs open an issue when an advisory is found; without this
+      # the action fails with "Resource not accessible by integration".
+      issues: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -46,6 +53,8 @@ jobs:
   trivy:
     name: Trivy
     runs-on: ubuntu-26.04-arm
+    # Observed 23-43 s.
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -57,6 +66,8 @@ jobs:
       - name: Trivy scan → SARIF
         uses: aquasecurity/trivy-action@v0.36.0
         with:
+          # Pinned: the action's own default is v0.70.0.
+          version: v0.74.0
           scan-type: fs
           scan-ref: .
           format: sarif
@@ -78,6 +89,8 @@ jobs:
       - name: Trivy scan → block on CRITICAL
         uses: aquasecurity/trivy-action@v0.36.0
         with:
+          # Pinned: the action's own default is v0.70.0.
+          version: v0.74.0
           scan-type: fs
           scan-ref: .
           format: table
