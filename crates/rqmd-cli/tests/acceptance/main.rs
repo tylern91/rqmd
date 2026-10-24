@@ -3,6 +3,7 @@
 //! linked issue. Enforced by scripts/lint-acceptance-tests.sh, not at runtime.
 mod collection;
 mod helpers;
+mod hook_signals;
 mod index_rebuild;
 mod security;
 mod update_skip;
