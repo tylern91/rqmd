@@ -383,7 +383,9 @@ jobs:
   # (continue-on-error), so it never blocks.
   ci-complete:
     name: ci-complete
-    if: always()
+    # Skipped, not failed, when a newer push cancels the run; still runs when a
+    # job it needs failed or was skipped.
+    if: ${{ !cancelled() }}
     needs:
       - changes
       - version-sync
