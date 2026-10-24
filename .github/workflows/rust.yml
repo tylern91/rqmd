@@ -79,6 +79,8 @@ jobs:
         with:
           key: macos-arm64-${{ matrix.feature-set }}
           cache-on-failure: true
+          # PRs restore the cache but only main saves it (PR caches filled the repo's 10 GB cap).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check formatting
         if: matrix.feature-set == 'default'
@@ -148,6 +150,8 @@ jobs:
         with:
           key: linux-${{ matrix.arch }}-${{ matrix.toolchain }}
           cache-on-failure: true
+          # PRs restore the cache but only main saves it (PR caches filled the repo's 10 GB cap).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build (default, Linux CPU-only — no Metal)
         # llama-cpp-2 on Linux uses CPU path; metal feature is macOS-only
@@ -182,6 +186,8 @@ jobs:
         with:
           key: macos-arm64-dist
           cache-on-failure: true
+          # PRs restore the cache but only main saves it (PR caches filled the repo's 10 GB cap).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build dist binary
         run: cargo build --profile dist -p rqmd-cli --locked
@@ -219,6 +225,8 @@ jobs:
         with:
           key: ac-gate
           cache-on-failure: true
+          # PRs restore the cache but only main saves it (PR caches filled the repo's 10 GB cap).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Lint acceptance tests
         run: bash scripts/lint-acceptance-tests.sh
