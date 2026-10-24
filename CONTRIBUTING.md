@@ -88,12 +88,14 @@ cargo test --workspace --lib
 cargo run --bin rqmd -- eval --mode bm25
 ```
 
-**CI only triggers on code changes.** `rust.yml` is path-filtered to
-`crates/**`, `Cargo.toml`, `Cargo.lock`, `.cargo/**`, `CHANGELOG.md`,
-`scripts/check-version-sync.sh`, and its own file — a docs-only PR (like this
-one) runs no Rust CI at all. A weekly (and manually dispatched) run also
-executes the full suite on macOS, including the model-download test that the
-per-PR jobs skip. `security.yml` (Trivy) runs on every PR
+**Every PR reports `ci-complete`.** `rust.yml` has no `paths:` filter. Its
+`changes` job checks whether the PR touches `crates/**`, `Cargo.toml`,
+`Cargo.lock`, `.cargo/**`, `CHANGELOG.md`, the version-sync and acceptance
+scripts, `scripts/ci-rust-changed.sh` or `rust.yml` itself, and skips the heavy
+jobs when it does not, so a docs-only PR ends with a green `ci-complete` and no
+Rust build. Pushes to `main`, the weekly run and manual dispatches always run
+everything. A weekly (and manually dispatched) run also executes the full suite
+on macOS, including the model-download test that the per-PR jobs skip. `security.yml` (Trivy) runs on every PR
 regardless; only a **CRITICAL** vulnerability with a known fix blocks the
 merge, HIGH severity is recorded to the Security tab but doesn't block.
 
