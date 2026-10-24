@@ -107,7 +107,7 @@ jobs:
     name: Build default (Linux ${{ matrix.arch }}, ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
-    # The MSRV (1.88) leg is a drift check, not a release gate — its failure
+    # The MSRV (1.99) leg is a drift check, not a release gate — its failure
     # must not block dist-binary or show as a required-check failure.
     continue-on-error: ${{ matrix.toolchain != 'stable' }}
 
@@ -121,7 +121,7 @@ jobs:
           - toolchain: stable
             os: ubuntu-26.04-arm
             arch: arm64
-          - toolchain: "1.88"
+          - toolchain: "1.99"
             os: ubuntu-26.04
             arch: x64
 

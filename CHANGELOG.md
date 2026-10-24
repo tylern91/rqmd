@@ -21,6 +21,9 @@
   `rqmd-llm` now enables directly. The `ort-backend` build still compiles `ureq` for `ort-sys`.
 - Patch updates to `anyhow` (1.0.104), `serde` (1.0.229), `clap` (4.6.7) and `tokenizers`
   (0.23.2, which pulls in `daachorse` 3.0.3). Every new version is over 30 days old.
+- The minimum supported Rust version is now 1.99, the newest stable release. Older Rust releases no
+  longer receive upstream fixes. Homebrew installs are unaffected; `cargo install` and source builds
+  need Rust 1.99 or newer. The Nix dev shell takes its `rustc` from an updated `nixpkgs` input.
 
 ## [0.28.1] - 2026-10-19
 
