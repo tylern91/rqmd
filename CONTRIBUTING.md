@@ -256,8 +256,6 @@ to rely on:
 - **`scripts/crosscheck.sh`** — compares Rust rqmd against TypeScript qmd on
   a shared fixture corpus; its path constants predate the current `crates/`
   layout.
-- **`.github/workflows/nix.yml`** — triggers only on a `release` branch that
-  doesn't exist in this repo, so it never runs today.
 
 If you want to fix one of these, that's a welcome PR on its own — just don't
 assume it currently works.
