@@ -140,6 +140,7 @@ Full grammar (typed lines, lex phrase/negation operators, MCP `searches` array):
 | `1` | Error — the command did not complete |
 | `2` | Completed with failures: `rqmd update` ran every collection but one or more update hooks failed or timed out, or `rqmd embed` finished but skipped documents it could not embed. Everything else was still indexed or embedded. (Command-line usage errors also exit `2`; they print usage text instead of a summary.) |
 | `124` | Stopped by `--timeout` (the `timeout(1)` convention) |
+| `129`, `130`, `143` | `rqmd update` stopped by `SIGHUP`, `SIGINT` or `SIGTERM` (`128` plus the signal number) while an update hook was running; see [Update hooks and signals](#update-hooks-and-signals) |
 
 `rqmd embed` stops early, with exit `1`, after five documents in a row fail to embed — that
 pattern points at the model or GPU rather than at a document. Work embedded up to that point
@@ -149,6 +150,16 @@ On timeout a hook is sent `SIGKILL`. When stdin is not a terminal the hook runs 
 process group and the whole group is killed; when stdin is a terminal the hook stays in the
 foreground group (so Ctrl-C and credential prompts keep working) and only the hook's shell is
 killed, so a background child it started can outlive it.
+
+### Update hooks and signals
+
+If `rqmd update` receives `SIGINT`, `SIGTERM` or `SIGHUP` while a hook is running, it forwards the
+signal to the hook (to the whole process group when the hook has its own), waits up to 5 seconds
+for the hook to exit, kills it if it has not, and exits with `128` plus the signal number (`130`,
+`143`, `129`). The collections after the interrupted one are not updated. A terminal's Ctrl-C
+already reaches a hook that shares rqmd's foreground group, so `SIGINT` is not sent to it a
+second time. A signal that rqmd's parent had set to be ignored (for example `SIGHUP` under
+`nohup`) stays ignored. Signals received outside a hook behave as before.
 
 ## Timeouts
 
