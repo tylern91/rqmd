@@ -145,6 +145,29 @@ API; if a dependency bump pushes the floor higher, that's when it moves.
 - The edition is 2024, which needs Rust ≥1.85 — below the 1.88 floor, so it
   costs nothing in compatibility and isn't itself an MSRV constraint.
 
+## Dependency updates
+
+`.github/dependabot.yml` opens weekly update PRs for `github-actions` and
+`cargo`. Both ecosystems set `cooldown: default-days: 30`, so Dependabot
+skips a release until it has been public for 30 days. That matches the
+manual rule for any dependency bump: move only to a stable release that is at
+least 30 days old, and pin each crate with
+`cargo update -p <crate> --precise <version>` instead of a blanket
+`cargo update`.
+
+- Security updates ignore the cooldown. They still need a maintainer's review
+  of the lock diff, and the 30-day soak is waived only for a critical
+  (CVSS >= 9.0 or RCE-class) advisory that names the smallest patched version.
+- `llama-cpp-2`, `llama-cpp-sys-2`, `usearch`, `tantivy*`, `tokenizers`,
+  `ort`, `ort-sys`, `tree-sitter*`, `rusqlite` and `libsqlite3-sys` are on
+  Dependabot's `ignore` list because they can change stored data (index
+  layout, vector format, tokenization, schema). They only move by hand, in
+  their own reviewed change. `ignore` also holds back security updates, so an
+  advisory against one of them is handled manually.
+- Dependabot adds no labels (`labels: []`), so a dependency bump does not
+  start a release on its own. Apply `patch`, `minor` or `skip-release` by hand
+  as described under "Semver labels".
+
 ## Version + CHANGELOG convention
 
 This is the part that isn't written down anywhere else, so read it carefully:
