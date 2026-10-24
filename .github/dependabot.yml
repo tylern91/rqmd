@@ -1,0 +1,52 @@
+# Dependabot version updates for the Rust workspace and the workflow actions.
+#
+# Soak: `cooldown.default-days: 30` makes Dependabot skip a release until it
+# has been public for 30 days, which is the same window the manual rule in
+# CONTRIBUTING.md ("Dependency soak") and `scripts/check-lock-soak.sh` enforce.
+# The cooldown covers version updates only; security updates ignore it, so a
+# patched release for an advisory is proposed as soon as it is published and
+# then goes through the lock soak gate (waive with the `soak-waiver` label
+# only for a critical advisory).
+#
+# `ignore` entries apply to security updates too. The crates below can change
+# stored data (index layout, vector format, tokenization, embeddings, schema),
+# so they only move by hand in their own reviewed change. A security advisory
+# against one of them is handled manually as well, and no Dependabot PR is
+# opened for it.
+#
+# `labels: []` keeps Dependabot from adding labels. The repository's `patch`,
+# `minor` and `major` labels drive the release workflow, and an automatic bump
+# must not start a release by itself.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 30
+    labels: []
+    commit-message:
+      prefix: "ci(deps)"
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 30
+    labels: []
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "llama-cpp-2"
+      - dependency-name: "llama-cpp-sys-2"
+      - dependency-name: "usearch"
+      - dependency-name: "tantivy*"
+      - dependency-name: "tokenizers"
+      - dependency-name: "ort"
+      - dependency-name: "ort-sys"
+      - dependency-name: "tree-sitter*"
+      - dependency-name: "rusqlite"
+      - dependency-name: "libsqlite3-sys"
