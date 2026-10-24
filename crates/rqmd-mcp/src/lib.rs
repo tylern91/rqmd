@@ -196,6 +196,22 @@ async fn shutdown_signal() {
     }
 }
 
+/// rmcp's own Host and Origin checks for `/mcp`. The Origin list mirrors the
+/// Host allowlist with an explicit port — rmcp only applies its Origin
+/// (DNS-rebinding) defense when it is non-empty, and it was previously never
+/// set at all, silently disabling that check entirely.
+fn http_server_config(allowed_hosts: &[String], port: u16) -> StreamableHttpServerConfig {
+    let allowed_origins = allowed_hosts
+        .iter()
+        .flat_map(|h| [format!("http://{h}:{port}"), format!("https://{h}:{port}")])
+        .collect();
+
+    let mut config = StreamableHttpServerConfig::default();
+    config.allowed_hosts = allowed_hosts.to_vec();
+    config.allowed_origins = allowed_origins;
+    config
+}
+
 /// Run an MCP server over Streamable HTTP on the given host/port (blocks
 /// until the server is shut down).
 ///
@@ -217,17 +233,7 @@ pub async fn run_http(
         allowed_hosts.push(host_entry);
     }
 
-    // Mirror the Host allowlist into `allowed_origins` — rmcp only applies
-    // its Origin (DNS-rebinding) defense when this is non-empty, and it was
-    // previously never set at all, silently disabling that check entirely.
-    let allowed_origins: Vec<String> = allowed_hosts
-        .iter()
-        .flat_map(|h| [format!("http://{h}:{port}"), format!("https://{h}:{port}")])
-        .collect();
-
-    let mut config = StreamableHttpServerConfig::default();
-    config.allowed_hosts = allowed_hosts.clone();
-    config.allowed_origins = allowed_origins;
+    let config = http_server_config(&allowed_hosts, port);
 
     let pid = std::process::id();
     let index_dir = server.index_dir().to_string_lossy().to_string();
@@ -250,6 +256,9 @@ pub async fn run_http(
         .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod protocol_tests;
 
 #[cfg(test)]
 mod tests {

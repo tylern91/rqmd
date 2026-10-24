@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Security
+- Update `rmcp` to 3.6.0 ([GHSA-4432-vg92-fqh6](https://github.com/modelcontextprotocol/rust-sdk/security/advisories/GHSA-4432-vg92-fqh6),
+  high): the Streamable HTTP server transport, which `rqmd mcp --http` uses, let an unauthenticated
+  client grow a tool-schema cache without bound until the daemon ran out of memory. 3.6.0 was
+  published four days before this change, so it is an explicit exception to the 30-day soak. The
+  MCP tool names and input schemas are unchanged. A `POST /mcp` that has no session id and is not
+  `initialize` now gets `400` instead of `422`.
+- Update `rustls-webpki` to 0.103.16 and `webpki-root-certs` to 1.0.10 (RUSTSEC-2026-0382 and
+  RUSTSEC-2026-0383). Both crates stay in `Cargo.lock` through optional features and the
+  `ort-backend` build script, not in the default build, so `cargo audit` no longer reports a
+  vulnerability. The new versions are under 30 days old, an explicit exception to the soak.
+
+### Changed
+- Model downloads no longer build a second, unused HTTP client. `hf-hub` is now built without its
+  default `ureq` feature, so the default build no longer compiles `ureq`, `webpki-roots`, `rustls`
+  or `rustls-webpki`. Downloads still use the platform TLS stack through `reqwest`, which
+  `rqmd-llm` now enables directly. The `ort-backend` build still compiles `ureq` for `ort-sys`.
+- Patch updates to `anyhow` (1.0.104), `serde` (1.0.229), `clap` (4.6.7) and `tokenizers`
+  (0.23.2, which pulls in `daachorse` 3.0.3). Every new version is over 30 days old.
+
 ## [0.28.1] - 2026-10-19
 
 ### Fixed
