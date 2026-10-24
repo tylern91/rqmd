@@ -98,6 +98,10 @@ jobs:
         if: matrix.feature-set == 'ort-backend'
         run: cargo build --locked ${{ matrix.cargo-args }}
 
+      - name: Clippy (ort-backend)
+        if: matrix.feature-set == 'ort-backend'
+        run: cargo clippy ${{ matrix.cargo-args }} --locked -- -D warnings
+
       - name: Tests (workspace, incl. integration — no model downloads)
         if: matrix.feature-set == 'default'
         run: cargo test --workspace --locked
