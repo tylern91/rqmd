@@ -11,7 +11,6 @@
 
 use anyhow::{Context, Result};
 use ndarray::Ix3;
-use std::path::PathBuf;
 
 use crate::{InferenceBackend, l2_normalize};
 
@@ -61,7 +60,6 @@ pub struct OrtConfig {
     pub ep: OrtEp,
     /// Embedding dimension; must match the ONNX model's output.
     pub embed_dim: usize,
-    pub hf_cache_dir: Option<PathBuf>,
     pub max_seq_len: usize,
 }
 
@@ -73,7 +71,6 @@ impl Default for OrtConfig {
             tokenizer_file: DEFAULT_ORT_TOKENIZER_FILE.to_string(),
             ep: OrtEp::Auto,
             embed_dim: 768,
-            hf_cache_dir: None,
             max_seq_len: 512,
         }
     }
