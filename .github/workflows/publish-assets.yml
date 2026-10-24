@@ -109,6 +109,8 @@ jobs:
         with:
           key: ${{ matrix.os }}-dist
           cache-on-failure: true
+          # Only main saves the cache; other refs restore it (the repo cache is over its 10 GB cap).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build dist binary
         env:
