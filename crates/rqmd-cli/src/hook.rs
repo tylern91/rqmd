@@ -1,4 +1,5 @@
-//! Run a collection's `update_command` under a wall-clock timeout.
+//! Run a collection's `update_command` under a wall-clock timeout, forwarding
+//! SIGINT, SIGTERM and SIGHUP to it while it runs.
 
 use std::io::IsTerminal;
 use std::path::Path;
@@ -8,6 +9,8 @@ use std::time::{Duration, Instant};
 const TIMEOUT_ENV: &str = "RQMD_HOOK_TIMEOUT_SECS";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// How long a hook gets to exit after a forwarded signal before it is killed.
+const FORWARD_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy)]
 pub struct HookConfig {
@@ -40,6 +43,8 @@ pub enum HookOutcome {
     Succeeded,
     Failed(String),
     TimedOut(Duration),
+    /// rqmd received this signal while the hook ran and stopped the hook.
+    Interrupted(i32),
 }
 
 pub fn run_hook(cmd: &str, dir: &Path, config: HookConfig) -> HookOutcome {
@@ -50,6 +55,8 @@ pub fn run_hook(cmd: &str, dir: &Path, config: HookConfig) -> HookOutcome {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    // Installed before the spawn so a signal that lands right after it is kept.
+    let _signals = signals::Forwarding::install();
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => return HookOutcome::Failed(format!("failed to run: {e}")),
@@ -57,6 +64,11 @@ pub fn run_hook(cmd: &str, dir: &Path, config: HookConfig) -> HookOutcome {
 
     let deadline = Instant::now() + config.timeout;
     loop {
+        if let Some(signal) = signals::pending() {
+            signals::forward(&child, signal, config.own_process_group);
+            stop_after_grace(&mut child, config.own_process_group);
+            return HookOutcome::Interrupted(signal);
+        }
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return HookOutcome::Succeeded,
             Ok(Some(status)) => return HookOutcome::Failed(format!("exited with {status}")),
@@ -72,6 +84,19 @@ pub fn run_hook(cmd: &str, dir: &Path, config: HookConfig) -> HookOutcome {
     }
 }
 
+/// Wait up to [`FORWARD_GRACE`] for the hook to exit on the forwarded signal,
+/// then kill it.
+fn stop_after_grace(child: &mut Child, whole_group: bool) {
+    let deadline = Instant::now() + FORWARD_GRACE;
+    while Instant::now() < deadline {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    kill(child, whole_group);
+}
+
 fn kill(child: &mut Child, whole_group: bool) {
     #[cfg(unix)]
     if whole_group && let Ok(pgid) = i32::try_from(child.id()) {
@@ -85,6 +110,115 @@ fn kill(child: &mut Child, whole_group: bool) {
     let _ = whole_group;
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(unix)]
+mod signals {
+    use std::process::Child;
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::{Mutex, MutexGuard};
+
+    const FORWARDED: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+    /// The last forwarded signal received, or 0. Set by the handler.
+    static RECEIVED: AtomicI32 = AtomicI32::new(0);
+    /// One hook at a time owns the process-wide handlers.
+    static OWNER: Mutex<()> = Mutex::new(());
+
+    extern "C" fn on_signal(signal: libc::c_int) {
+        RECEIVED.store(signal, Ordering::SeqCst);
+    }
+
+    /// Catches [`FORWARDED`] until dropped, then restores the previous handlers.
+    pub struct Forwarding {
+        previous: Vec<(libc::c_int, libc::sigaction)>,
+        _owner: MutexGuard<'static, ()>,
+    }
+
+    impl Forwarding {
+        pub fn install() -> Self {
+            let owner = OWNER.lock().unwrap_or_else(|e| e.into_inner());
+            RECEIVED.store(0, Ordering::SeqCst);
+            let mut previous = Vec::new();
+            for signal in FORWARDED {
+                // SAFETY: `sigaction` is plain C data; all-zero is a valid empty value.
+                let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+                // SAFETY: a null new action only reads the current one into `old`.
+                if unsafe { libc::sigaction(signal, std::ptr::null(), &mut old) } != 0 {
+                    continue;
+                }
+                // A signal the parent ignored (`nohup`, a background job) stays ignored.
+                if old.sa_sigaction == libc::SIG_IGN {
+                    continue;
+                }
+                // SAFETY: as above.
+                let mut new: libc::sigaction = unsafe { std::mem::zeroed() };
+                new.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                // SAFETY: `new.sa_mask` is a valid sigset to initialise.
+                unsafe { libc::sigemptyset(&mut new.sa_mask) };
+                // SAFETY: the handler only stores into an atomic, which is async-signal-safe.
+                if unsafe { libc::sigaction(signal, &new, std::ptr::null_mut()) } == 0 {
+                    previous.push((signal, old));
+                }
+            }
+            Self {
+                previous,
+                _owner: owner,
+            }
+        }
+    }
+
+    impl Drop for Forwarding {
+        fn drop(&mut self) {
+            for (signal, old) in &self.previous {
+                // SAFETY: `old` is the action `sigaction` reported for this signal.
+                unsafe { libc::sigaction(*signal, old, std::ptr::null_mut()) };
+            }
+        }
+    }
+
+    pub fn pending() -> Option<i32> {
+        match RECEIVED.load(Ordering::SeqCst) {
+            0 => None,
+            signal => Some(signal),
+        }
+    }
+
+    /// Send `signal` to the hook: its whole group when it leads one, else just
+    /// the hook. A hook in rqmd's own foreground group already got a terminal's
+    /// Ctrl-C, so SIGINT is not sent twice.
+    pub fn forward(child: &Child, signal: i32, own_group: bool) {
+        let Ok(pid) = i32::try_from(child.id()) else {
+            return;
+        };
+        if own_group {
+            // SAFETY: the child leads its own group (`process_group(0)`), so
+            // `-pid` addresses exactly the hook's tree.
+            unsafe { libc::kill(-pid, signal) };
+        } else if signal != libc::SIGINT {
+            // SAFETY: plain syscall on the hook's pid, still unreaped.
+            unsafe { libc::kill(pid, signal) };
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod signals {
+    use std::process::Child;
+
+    pub struct Forwarding;
+
+    impl Forwarding {
+        pub fn install() -> Self {
+            Self
+        }
+    }
+
+    pub fn pending() -> Option<i32> {
+        None
+    }
+
+    pub fn forward(_child: &Child, _signal: i32, _own_group: bool) {}
 }
 
 #[cfg(all(test, unix))]
