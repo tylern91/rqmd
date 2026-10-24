@@ -61,6 +61,12 @@ given bare (`--host ::1`) or bracketed (`--host '[::1]'`); rqmd binds the
 address and accepts the bracketed `Host: [::1]:<port>` form in requests. Use
 `--host ::1` for IPv6 loopback — it is not served by `127.0.0.1`.
 
+The server also speaks cleartext HTTP/2 to clients that use it with prior knowledge
+(`curl --http2-prior-knowledge http://127.0.0.1:8181/health`). There is no TLS and no ALPN, so
+clients that negotiate HTTP/2 over `https://` cannot connect; plain `http://` clients stay on
+HTTP/1.1. The host check reads the `Host` header, or the `:authority` of an HTTP/2 request, and
+answers 403 when both are present and differ.
+
 Passing a non-loopback `--host` to `--http`/`--daemon` **refuses to start**
 with an error, not just a warning:
 

@@ -287,3 +287,29 @@ async fn http_requests_without_an_origin_header_are_served() {
     let (session, _) = daemon.request(None, initialize_request(1)).await;
     assert!(session.is_some());
 }
+
+#[tokio::test]
+async fn http2_prior_knowledge_requests_are_served() {
+    let daemon = HttpDaemon::start().await;
+    let h2 = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .build()
+        .unwrap();
+    let base = format!("http://127.0.0.1:{}", daemon.port);
+
+    let health = h2.get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(health.version(), reqwest::Version::HTTP_2);
+    assert_eq!(health.status(), 200);
+
+    let init = h2
+        .post(format!("{base}/mcp"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .body(initialize_request(1).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(init.version(), reqwest::Version::HTTP_2);
+    assert_eq!(init.status(), 200);
+    assert!(init.headers().contains_key("mcp-session-id"));
+}

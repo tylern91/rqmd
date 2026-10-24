@@ -123,20 +123,34 @@ fn host_only(header_value: &str) -> &str {
     }
 }
 
-/// Reject any request whose `Host` header isn't in the allowlist, before it
-/// reaches `/health` or `/mcp` — closes the gap where `/health` previously
-/// sat outside the Host validation `StreamableHttpServerConfig` applies to
-/// `/mcp`, leaking to anything that could reach the port regardless of Host.
+/// The host a request is addressed to, without its port: the `Host` header
+/// (HTTP/1.1) or the URI authority (HTTP/2 `:authority`). `None` when neither
+/// is present, the header is not text, or the two name different hosts.
+fn requested_host(req: &Request) -> Option<&str> {
+    let from_header = match req.headers().get(axum::http::header::HOST) {
+        Some(value) => Some(host_only(value.to_str().ok()?)),
+        None => None,
+    };
+    let from_authority = req.uri().authority().map(|a| a.host());
+    match (from_header, from_authority) {
+        (Some(header), Some(authority)) if header != authority => None,
+        (Some(header), _) => Some(header),
+        (None, authority) => authority,
+    }
+}
+
+/// Reject any request whose host (see [`requested_host`]) isn't in the
+/// allowlist, before it reaches `/health` or `/mcp` — closes the gap where
+/// `/health` previously sat outside the Host validation
+/// `StreamableHttpServerConfig` applies to `/mcp`, leaking to anything that
+/// could reach the port regardless of Host.
 async fn enforce_host_allowlist(
     State(allowed_hosts): State<Arc<Vec<String>>>,
     req: Request,
     next: Next,
 ) -> Response {
-    let allowed = req
-        .headers()
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(|h| allowed_hosts.iter().any(|a| a == host_only(h)))
+    let allowed = requested_host(&req)
+        .map(|host| allowed_hosts.iter().any(|a| a == host))
         .unwrap_or(false);
 
     if allowed {
@@ -328,6 +342,62 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// An HTTP/2 request names its host in `:authority`, which reaches the
+    /// router as the URI authority, usually with no `Host` header.
+    async fn health_status(uri: &str, host: Option<&str>) -> StatusCode {
+        let (router, _dir) = test_router();
+        let mut req = Request::builder()
+            .uri(uri)
+            .version(axum::http::Version::HTTP_2);
+        if let Some(host) = host {
+            req = req.header(HOST, host);
+        }
+        let resp = router
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        resp.status()
+    }
+
+    #[tokio::test]
+    async fn http2_authority_without_a_host_header_is_checked_against_the_allowlist() {
+        for (uri, expected) in [
+            ("http://127.0.0.1:8181/health", StatusCode::OK),
+            ("http://localhost:8181/health", StatusCode::OK),
+            ("http://[::1]:8181/health", StatusCode::FORBIDDEN),
+            ("http://evil.example.com/health", StatusCode::FORBIDDEN),
+        ] {
+            assert_eq!(health_status(uri, None).await, expected, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_host_header_that_disagrees_with_the_authority_is_rejected() {
+        for (uri, host, expected) in [
+            (
+                "http://evil.example.com/health",
+                "127.0.0.1",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "http://127.0.0.1/health",
+                "evil.example.com",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "http://127.0.0.1:8181/health",
+                "127.0.0.1:8181",
+                StatusCode::OK,
+            ),
+        ] {
+            assert_eq!(
+                health_status(uri, Some(host)).await,
+                expected,
+                "{uri} {host}"
+            );
+        }
     }
 
     #[tokio::test]
