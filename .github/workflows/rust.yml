@@ -1,26 +1,12 @@
 name: Rust CI
 
 on:
+  # No `paths:` filter: every PR reports `ci-complete`, and the `changes` job
+  # decides whether the heavy jobs run.
   push:
     branches: [main]
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".cargo/**"
-      - "CHANGELOG.md"
-      - "scripts/check-version-sync.sh"
-      - ".github/workflows/rust.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".cargo/**"
-      - "CHANGELOG.md"
-      - "scripts/check-version-sync.sh"
-      - ".github/workflows/rust.yml"
   # Weekly full run, including the model-download test the per-PR legs skip.
   schedule:
     - cron: "17 3 * * 1"
@@ -40,8 +26,39 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  changes:
+    name: Detect Rust-relevant changes
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # A PR is checked out as a merge commit; HEAD^1 is its base.
+          fetch-depth: 2
+
+      - name: Decide whether the Rust jobs run
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -Eeuo pipefail
+          # Everything except a pull request always runs in full, and so does a
+          # pull request whose base cannot be determined.
+          rust=true
+          if [[ "$EVENT_NAME" == "pull_request" ]] && base="$(git rev-parse --verify --quiet HEAD^1)"; then
+            rust="$(git diff --name-only "$base" HEAD | bash scripts/ci-rust-changed.sh)"
+          fi
+          printf 'rust=%s\n' "$rust" >> "$GITHUB_OUTPUT"
+          printf 'Rust jobs run: %s\n' "$rust"
+
   version-sync:
     name: Version sync
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 5
 
@@ -56,6 +73,8 @@ jobs:
 
   build-macos:
     name: Build ${{ matrix.feature-set }} (macOS arm64)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: macos-26
     timeout-minutes: 60
 
@@ -120,6 +139,8 @@ jobs:
 
   build-linux:
     name: Build and test, or MSRV check (Linux ${{ matrix.arch }}, ${{ matrix.toolchain }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     # The MSRV (1.88) leg is a drift check, not a release gate — its failure
@@ -218,7 +239,8 @@ jobs:
     timeout-minutes: 60
     # Early smoke check of the dist profile; it runs alongside the other jobs
     # and produces no artifact (release.yml rebuilds its own binaries).
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v7
@@ -248,6 +270,8 @@ jobs:
 
   ac-gate:
     name: Acceptance-criteria gate
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 15
 
@@ -352,3 +376,35 @@ jobs:
             exit 1
           fi
           printf 'PASS:ac-gate:revert-evidence\n'
+
+  # The one status to require on `main`. It always runs, passes when every job
+  # succeeded or was skipped (a docs-only PR skips the Rust jobs), and fails on
+  # any failed or cancelled job. The advisory MSRV leg cannot fail its job
+  # (continue-on-error), so it never blocks.
+  ci-complete:
+    name: ci-complete
+    if: always()
+    needs:
+      - changes
+      - version-sync
+      - build-macos
+      - build-linux
+      - full-suite-macos
+      - dist-binary
+      - ac-gate
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 5
+
+    steps:
+      - name: Require every job to have succeeded or been skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -Eeuo pipefail
+          printf '%s' "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          failed="$(printf '%s' "$NEEDS" \
+            | jq -r '[to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key] | join(", ")')"
+          if [[ -n "$failed" ]]; then
+            printf '::error::not successful: %s\n' "$failed" >&2
+            exit 1
+          fi
