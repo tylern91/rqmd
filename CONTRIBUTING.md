@@ -91,9 +91,11 @@ cargo run --bin rqmd -- eval --mode bm25
 **CI only triggers on code changes.** `rust.yml` is path-filtered to
 `crates/**`, `Cargo.toml`, `Cargo.lock`, `.cargo/**`, `CHANGELOG.md`,
 `scripts/check-version-sync.sh`, and its own file — a docs-only PR (like this
-one) runs no Rust CI at all. `security.yml` (Trivy) runs on every PR
-regardless; only a **CRITICAL** vulnerability with a known fix blocks the
-merge, HIGH severity is recorded to the Security tab but doesn't block.
+one) runs no Rust CI at all. `lock-soak.yml` runs only when a PR changes
+`Cargo.lock` or the soak script (see "Dependency updates"). `security.yml`
+(Trivy) runs on every PR regardless; only a **CRITICAL** vulnerability with a
+known fix blocks the merge, HIGH severity is recorded to the Security tab but
+doesn't block.
 
 ## Acceptance-test tier
 
@@ -144,6 +146,43 @@ API; if a dependency bump pushes the floor higher, that's when it moves.
   the PR checks).
 - The edition is 2024, which needs Rust ≥1.85 — below the 1.88 floor, so it
   costs nothing in compatibility and isn't itself an MSRV constraint.
+
+## Dependency updates
+
+`.github/dependabot.yml` opens weekly update PRs for `github-actions` and
+`cargo`. Both ecosystems set `cooldown: default-days: 30`, so Dependabot
+skips a release until it has been public for 30 days. That matches the
+manual rule for any dependency bump: move only to a stable release that is at
+least 30 days old, and pin each crate with
+`cargo update -p <crate> --precise <version>` instead of a blanket
+`cargo update`.
+
+- Security updates ignore the cooldown. They still need a maintainer's review
+  of the lock diff, and the 30-day soak is waived only for a critical
+  (CVSS >= 9.0 or RCE-class) advisory that names the smallest patched version.
+- `llama-cpp-2`, `llama-cpp-sys-2`, `usearch`, `tantivy*`, `tokenizers`,
+  `ort`, `ort-sys`, `tree-sitter*`, `rusqlite` and `libsqlite3-sys` are on
+  Dependabot's `ignore` list because they can change stored data (index
+  layout, vector format, tokenization, schema). They only move by hand, in
+  their own reviewed change. `ignore` also holds back security updates, so an
+  advisory against one of them is handled manually.
+- **Lock soak gate.** `.github/workflows/lock-soak.yml` runs on every PR that
+  changes `Cargo.lock` and calls `scripts/check-lock-soak.sh`. For each crate
+  version the PR adds or changes, direct or transitive, it asks the crates.io
+  API and fails unless the version was published at least 30 days ago and is
+  not yanked. A lookup that cannot be completed also fails. A young
+  transitive crate is the usual cause: pin it back with
+  `cargo update -p <crate> --precise <version>`. To see the verdicts without
+  failing, run
+  `bash scripts/check-lock-soak.sh --dry-run <old Cargo.lock> <new Cargo.lock>`
+  (for example `git show origin/main:Cargo.lock > /path/to/old.lock`). Only
+  crates.io crates are checked: a git or path dependency is skipped.
+- **Waiver.** A maintainer can add the `soak-waiver` label to a PR for a
+  critical advisory (see above). The job then still prints every verdict but
+  does not fail. Name the advisory in the PR body.
+- Dependabot adds no labels (`labels: []`), so a dependency bump does not
+  start a release on its own. Apply `patch`, `minor` or `skip-release` by hand
+  as described under "Semver labels".
 
 ## Version + CHANGELOG convention
 
