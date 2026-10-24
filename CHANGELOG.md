@@ -25,6 +25,12 @@
   longer receive upstream fixes. Homebrew installs are unaffected; `cargo install` and source builds
   need Rust 1.99 or newer. The Nix dev shell takes its `rustc` from an updated `nixpkgs` input.
 
+### Added
+- The MCP tools `get`, `multi_get`, `query`, `search` and `status` now declare `readOnlyHint: true`
+  in their tool annotations. Clients such as Claude Code use that hint to run read-only MCP tools
+  in plan mode without an approval prompt. Tool names, descriptions and input schemas are
+  unchanged. `openWorldHint` stays unset, because `query` may download models on first use.
+
 ## [0.28.1] - 2026-10-19
 
 ### Fixed

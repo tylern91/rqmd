@@ -322,7 +322,8 @@ impl RqmdServer {
     /// Hybrid semantic search: BM25 + vector retrieval fused with RRF and
     /// reranked by a cross-encoder. Best for most queries.
     #[tool(
-        description = "Hybrid search (BM25 + vector + rerank). Best for most queries. Provide a natural-language question or keyword phrase. Set expand:false to skip LLM query-expansion for lower latency."
+        description = "Hybrid search (BM25 + vector + rerank). Best for most queries. Provide a natural-language question or keyword phrase. Set expand:false to skip LLM query-expansion for lower latency.",
+        annotations(read_only_hint = true)
     )]
     async fn query(&self, Parameters(p): Parameters<QueryInput>) -> Result<String, String> {
         let this = self.clone();
@@ -331,7 +332,8 @@ impl RqmdServer {
 
     /// BM25 full-text keyword search. No LLM required — instant results.
     #[tool(
-        description = "BM25 keyword search. Fast, no model required. Supports \"quoted phrases\" and -negation. Use for known terms or exact phrases."
+        description = "BM25 keyword search. Fast, no model required. Supports \"quoted phrases\" and -negation. Use for known terms or exact phrases.",
+        annotations(read_only_hint = true)
     )]
     async fn search(&self, Parameters(p): Parameters<SearchInput>) -> Result<String, String> {
         let this = self.clone();
@@ -340,7 +342,8 @@ impl RqmdServer {
 
     /// Retrieve full document content by file path or docid.
     #[tool(
-        description = "Retrieve a document by file path or docid (#abc123) from search results. Supports line range: 'file.md:100:40' reads 40 lines from line 100."
+        description = "Retrieve a document by file path or docid (#abc123) from search results. Supports line range: 'file.md:100:40' reads 40 lines from line 100.",
+        annotations(read_only_hint = true)
     )]
     async fn get(&self, Parameters(p): Parameters<GetInput>) -> Result<String, String> {
         let this = self.clone();
@@ -349,7 +352,8 @@ impl RqmdServer {
 
     /// Retrieve multiple documents by glob pattern or comma-separated list.
     #[tool(
-        description = "Retrieve multiple documents matching a glob pattern (e.g. 'journals/2025-05*.md') or a comma-separated list of paths/docids."
+        description = "Retrieve multiple documents matching a glob pattern (e.g. 'journals/2025-05*.md') or a comma-separated list of paths/docids.",
+        annotations(read_only_hint = true)
     )]
     async fn multi_get(&self, Parameters(p): Parameters<MultiGetInput>) -> Result<String, String> {
         let this = self.clone();
@@ -358,7 +362,8 @@ impl RqmdServer {
 
     /// Show index status: collections, document counts, and storage sizes.
     #[tool(
-        description = "Show the RQMD index status: collections, document counts, and index health."
+        description = "Show the RQMD index status: collections, document counts, and index health.",
+        annotations(read_only_hint = true)
     )]
     async fn status(&self) -> Result<String, String> {
         let this = self.clone();
@@ -1165,6 +1170,108 @@ mod tests {
 
         let store = server.fts().expect("poisoned handle must still be served");
         assert_eq!(store.search_fts_multi("hello", 5, None).unwrap().len(), 1);
+    }
+
+    /// Every tool must declare `readOnlyHint: true`, or be listed here with the
+    /// reason it is not read-only. Claude Code honours a hook `allow` in plan
+    /// mode only for MCP tools that carry the hint.
+    const NOT_READ_ONLY: &[(&str, &str)] = &[];
+
+    /// (name, description, input property names, required property names)
+    type ToolShape = (
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+    );
+
+    const EXPECTED_TOOLS: &[ToolShape] = &[
+        (
+            "get",
+            "Retrieve a document by file path or docid (#abc123) from search results. Supports line range: 'file.md:100:40' reads 40 lines from line 100.",
+            &["file", "from_line", "max_lines"],
+            &["file"],
+        ),
+        (
+            "multi_get",
+            "Retrieve multiple documents matching a glob pattern (e.g. 'journals/2025-05*.md') or a comma-separated list of paths/docids.",
+            &["collections", "max_lines", "pattern"],
+            &["pattern"],
+        ),
+        (
+            "query",
+            "Hybrid search (BM25 + vector + rerank). Best for most queries. Provide a natural-language question or keyword phrase. Set expand:false to skip LLM query-expansion for lower latency.",
+            &[
+                "collections",
+                "expand",
+                "intent",
+                "limit",
+                "offset",
+                "query",
+                "rerank",
+            ],
+            &["query"],
+        ),
+        (
+            "search",
+            "BM25 keyword search. Fast, no model required. Supports \"quoted phrases\" and -negation. Use for known terms or exact phrases.",
+            &["collections", "limit", "offset", "query"],
+            &["query"],
+        ),
+        (
+            "status",
+            "Show the RQMD index status: collections, document counts, and index health.",
+            &[],
+            &[],
+        ),
+    ];
+
+    #[test]
+    fn every_tool_declares_read_only_hint_and_nothing_else_changes() {
+        let tools = RqmdServer::tool_router().list_all();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        let expected_names: Vec<&str> = EXPECTED_TOOLS.iter().map(|t| t.0).collect();
+        assert_eq!(
+            names, expected_names,
+            "tool set changed: update EXPECTED_TOOLS"
+        );
+
+        for (tool, (name, description, props, required)) in tools.iter().zip(EXPECTED_TOOLS) {
+            assert_eq!(tool.description.as_deref(), Some(*description), "{name}");
+
+            let schema = serde_json::Value::Object((*tool.input_schema).clone());
+            let mut got_props: Vec<&str> = schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .map(|p| p.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            got_props.sort_unstable();
+            assert_eq!(&got_props, props, "{name}: input properties");
+            let mut got_required: Vec<&str> = schema
+                .get("required")
+                .and_then(|r| r.as_array())
+                .map(|r| r.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            got_required.sort_unstable();
+            assert_eq!(&got_required, required, "{name}: required properties");
+
+            let read_only = tool.annotations.as_ref().and_then(|a| a.read_only_hint);
+            if NOT_READ_ONLY.iter().any(|(n, _)| n == name) {
+                assert_ne!(read_only, Some(true), "{name} is listed as not read-only");
+            } else {
+                assert_eq!(
+                    read_only,
+                    Some(true),
+                    "{name} must declare readOnlyHint: true"
+                );
+            }
+            // `query` may download models on first use, so it must not claim a closed world.
+            assert_eq!(
+                tool.annotations.as_ref().and_then(|a| a.open_world_hint),
+                None,
+                "{name}: openWorldHint must stay unset"
+            );
+        }
     }
 
     // The test holds the pool's only handle across awaits on purpose: that is
