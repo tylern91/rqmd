@@ -14,8 +14,9 @@ permissions:
   security-events: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # Cancel superseded runs on PRs only; every push to main gets a full run.
+  # Cancel superseded runs on PRs only. Other events get their own group, so no
+  # push to main or scheduled run is cancelled or dropped while queued.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
