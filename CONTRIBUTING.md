@@ -134,22 +134,31 @@ real `rqmd` binary via `assert_cmd`, one file per cluster (e.g.
 
 ## MSRV policy
 
-`rust-version = "1.88"` in the root `Cargo.toml` (`[workspace.package]`,
-inherited by every crate) is the **actual** floor of the resolved dependency
-graph — the max `rust-version` any transitive dependency declares (`time`
-0.3.51, `darling` 0.23, `cookie_store` 0.22 as of this writing) — not an
-arbitrary or aspirational number. Don't raise it casually to pick up a new
-API; if a dependency bump pushes the floor higher, that's when it moves.
+`rust-version = "1.99"` in the root `Cargo.toml` (`[workspace.package]`,
+inherited by every crate) is the **newest stable Rust minor**. The Rust
+project patches only its newest stable release and has no long-term-support
+line, so every older release is end of life and rqmd does not support it. The
+MSRV therefore follows each stable release, raised within days of it.
 
+- The max `rust-version` any dependency declares (`cargo metadata --locked
+  --offline`) is only a lower bound: the MSRV may never be below it, but it
+  is not what sets the MSRV.
 - Raising the MSRV is a **minor** version bump — it can break users on older
-  toolchains, same as the `RQMD_` env var rename in v0.11.0.
-- `rust.yml`'s `build-linux` job runs a `["stable", "1.88"]` toolchain matrix;
-  the pinned `1.88` leg is what enforces the floor: it runs
-  `cargo check --workspace --all-targets` (no tests) and is advisory
-  (`continue-on-error`), so a real regression shows as a failed step in the
-  PR checks without blocking the merge.
-- The edition is 2024, which needs Rust ≥1.85 — below the 1.88 floor, so it
-  costs nothing in compatibility and isn't itself an MSRV constraint.
+  toolchains, same as the `RQMD_` env var rename in v0.11.0. Homebrew users
+  are not affected (the formula installs a prebuilt bottle); `cargo install`,
+  source builds and the Nix dev shell are.
+- A raise touches the same places every time: `Cargo.toml`, the MSRV leg in
+  `rust.yml`, `docs/INSTALL.md` (two lines), the `flake.nix` comment, and
+  `flake.lock` (`nix flake update nixpkgs`, so the dev shell's `rustc` meets
+  the new floor). Use `rust-version = "1.N"`, not `"1.N.P"`, so a nixpkgs
+  that ships `1.N.0` still meets it.
+- There is no `rust-toolchain.toml`. CI builds on stable, and `rust.yml`'s
+  `build-linux` job also runs a `["stable", "1.99"]` toolchain matrix; the
+  pinned leg only runs `cargo check --workspace --all-targets` (no tests) and is
+  advisory (`continue-on-error`), so a real regression shows as a failed step in
+  the PR checks without blocking the merge.
+- The edition is 2024, which needs Rust ≥1.85 — far below the floor, so it
+  isn't itself an MSRV constraint.
 
 ## Dependency updates
 
