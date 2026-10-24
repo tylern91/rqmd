@@ -91,7 +91,9 @@ cargo run --bin rqmd -- eval --mode bm25
 **CI only triggers on code changes.** `rust.yml` is path-filtered to
 `crates/**`, `Cargo.toml`, `Cargo.lock`, `.cargo/**`, `CHANGELOG.md`,
 `scripts/check-version-sync.sh`, and its own file — a docs-only PR (like this
-one) runs no Rust CI at all. `security.yml` (Trivy) runs on every PR
+one) runs no Rust CI at all. A weekly (and manually dispatched) run also
+executes the full suite on macOS, including the model-download test that the
+per-PR jobs skip. `security.yml` (Trivy) runs on every PR
 regardless; only a **CRITICAL** vulnerability with a known fix blocks the
 merge, HIGH severity is recorded to the Security tab but doesn't block.
 
@@ -139,9 +141,10 @@ API; if a dependency bump pushes the floor higher, that's when it moves.
 - Raising the MSRV is a **minor** version bump — it can break users on older
   toolchains, same as the `RQMD_` env var rename in v0.11.0.
 - `rust.yml`'s `build-linux` job runs a `["stable", "1.88"]` toolchain matrix;
-  the pinned `1.88` leg is what actually enforces the floor (`continue-on-error`
-  so it can't block `dist-binary`, but a real regression still shows red in
-  the PR checks).
+  the pinned `1.88` leg is what enforces the floor: it runs
+  `cargo check --workspace --all-targets` (no tests) and is advisory
+  (`continue-on-error`), so a real regression shows as a failed step in the
+  PR checks without blocking the merge.
 - The edition is 2024, which needs Rust ≥1.85 — below the 1.88 floor, so it
   costs nothing in compatibility and isn't itself an MSRV constraint.
 

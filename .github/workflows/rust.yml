@@ -30,8 +30,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # Only superseded PR runs are cancelled; every push to main runs to completion.
+  # Only superseded PR runs are cancelled. Other events get their own group, so
+  # no push to main (or weekly run) is cancelled or dropped while queued.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -118,7 +119,7 @@ jobs:
         run: cargo run --locked --bin rqmd -- eval --mode bm25
 
   build-linux:
-    name: Build default (Linux ${{ matrix.arch }}, ${{ matrix.toolchain }})
+    name: Build and test, or MSRV check (Linux ${{ matrix.arch }}, ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     # The MSRV (1.88) leg is a drift check, not a release gate — its failure
@@ -212,7 +213,7 @@ jobs:
         run: cargo test --workspace --locked
 
   dist-binary:
-    name: Release binary (macOS arm64)
+    name: Dist-profile smoke build (macOS arm64)
     runs-on: macos-26
     timeout-minutes: 60
     # Early smoke check of the dist profile; it runs alongside the other jobs
