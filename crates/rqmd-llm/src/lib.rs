@@ -316,7 +316,6 @@ pub struct LlamaCppConfig {
     pub generate_n_gpu_layers: u32,
     /// KV context size for generation. Limits prompt + output token count.
     pub generate_n_ctx: u32,
-    pub hf_cache_dir: Option<PathBuf>,
 }
 
 impl Default for LlamaCppConfig {
@@ -339,7 +338,6 @@ impl Default for LlamaCppConfig {
             rerank_n_ctx: 2048,
             generate_n_gpu_layers: 99,
             generate_n_ctx: 2048,
-            hf_cache_dir: None,
         }
     }
 }

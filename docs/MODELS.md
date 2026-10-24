@@ -66,6 +66,8 @@ rqmd --backend ort --ort-ep coreml embed
 
 Models download automatically from HuggingFace on first use (~900 MB for embed + rerank; ~2.6 GB with query expansion) and are cached at `~/.cache/huggingface/hub/`. All three model repos are public — no token is required for a normal download.
 
+**Cache location.** Models live under `$HF_HOME/hub/` when `HF_HOME` is set, otherwise `~/.cache/huggingface/hub/` (hf-hub's `Cache::from_env`; `HF_HUB_CACHE` is not read). `rqmd doctor` prints the resolved cache root and whether each model is cached. To move the cache, set `HF_HOME` for every rqmd process, including the MCP daemon and any launchd or systemd unit. To pre-seed a machine or share one cache between users, copy or mount the `models--<org>--<repo>` directories into that `hub/` directory; models already present are used without a download. To free the space, delete those directories; the next run downloads them again.
+
 Set `HF_ENDPOINT` to use a mirror, or `HF_HUB_OFFLINE=1` to disable downloads entirely and require every model to already be cached — rqmd fails with an actionable error naming the missing file instead of attempting a request. If `~/.cache/huggingface/token` holds an expired or invalid token, rqmd retries anonymously rather than failing outright; set `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` to use a specific token instead (checked in that order, ahead of the cached token file).
 
 ---
