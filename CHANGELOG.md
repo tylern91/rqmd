@@ -22,6 +22,12 @@
 - Patch updates to `anyhow` (1.0.104), `serde` (1.0.229), `clap` (4.6.7) and `tokenizers`
   (0.23.2, which pulls in `daachorse` 3.0.3). Every new version is over 30 days old.
 
+### Fixed
+- `rqmd mcp --http` no longer answers `403 host not allowed` to HTTP/2 requests. An HTTP/2 client
+  names its host in the `:authority` pseudo-header instead of a `Host` header, which the host
+  check ignored. The check now reads either, and refuses a request whose `Host` header and
+  authority differ. HTTP/1.1 behaviour is unchanged.
+
 ## [0.28.1] - 2026-10-19
 
 ### Fixed
