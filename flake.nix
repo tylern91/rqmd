@@ -16,7 +16,7 @@
         # compiler toolchain on macOS outside the Nix sandbox. A full sandboxed
         # rustPlatform.buildRustPackage derivation is a follow-up: llama-cpp-2 bundles
         # CMake + C++ code that has complex sandbox requirements. Track in CHANGELOG.
-        # rustc/cargo come from nixpkgs-unstable (unpinned) — MSRV is 1.88
+        # rustc/cargo come from nixpkgs-unstable (unpinned) — MSRV is 1.99
         # (Cargo.toml [workspace.package].rust-version); if this toolchain
         # drifts below that floor, `nix develop` no longer matches CI.
         nativeBuildDeps = [
