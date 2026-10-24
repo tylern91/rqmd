@@ -1,0 +1,77 @@
+name: Lock soak
+
+# Enforces the 30-day dependency soak on Cargo.lock changes: every crate
+# version a PR adds or changes must have been published on crates.io at least
+# 30 days ago and must not be yanked. See CONTRIBUTING.md, "Dependency
+# updates", and scripts/check-lock-soak.sh.
+#
+# A maintainer can waive the check for a critical advisory by adding the
+# `soak-waiver` label. The job then still prints every verdict but does not
+# fail. Adding or removing the label re-runs the check.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - "Cargo.lock"
+      - "scripts/check-lock-soak.sh"
+      - "scripts/tests/check-lock-soak.test.sh"
+      - "scripts/tests/fixtures/lock-soak/**"
+      - ".github/workflows/lock-soak.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lock-soak:
+    name: Lock soak (30 days)
+    runs-on: ubuntu-26.04-arm
+    # crates.io allows one request per second and the script waits between
+    # requests, so a lock change touching hundreds of crates takes minutes.
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # The merge commit and its first parent (the base branch tip).
+          fetch-depth: 2
+
+      - name: Self-test the gate script
+        run: bash scripts/tests/check-lock-soak.test.sh
+
+      - name: Check added and changed crates
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # Labels come from the event payload, so no API permission is needed.
+          WAIVED: ${{ contains(github.event.pull_request.labels.*.name, 'soak-waiver') }}
+        run: |
+          set -Eeuo pipefail
+
+          # The pull_request checkout is a merge commit: HEAD^1 is the base
+          # branch as it will be merged. Fall back to the event's base sha.
+          if git rev-parse --verify --quiet 'HEAD^2' > /dev/null; then
+            base="$(git rev-parse 'HEAD^1')"
+          else
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            base="$BASE_SHA"
+          fi
+
+          old="${RUNNER_TEMP}/base.Cargo.lock"
+          if git cat-file -e "${base}:Cargo.lock" 2> /dev/null; then
+            git show "${base}:Cargo.lock" > "$old"
+          else
+            : > "$old"
+          fi
+
+          if [[ "$WAIVED" == "true" ]]; then
+            echo "::notice::soak-waiver label present: reporting only, not failing"
+            bash scripts/check-lock-soak.sh --dry-run "$old" Cargo.lock
+          else
+            bash scripts/check-lock-soak.sh "$old" Cargo.lock
+          fi
