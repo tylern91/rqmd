@@ -9,6 +9,10 @@
   published four days before this change, so it is an explicit exception to the 30-day soak. The
   MCP tool names and input schemas are unchanged. A `POST /mcp` that has no session id and is not
   `initialize` now gets `400` instead of `422`.
+- Update `rustls-webpki` to 0.103.16 and `webpki-root-certs` to 1.0.10 (RUSTSEC-2026-0382 and
+  RUSTSEC-2026-0383). Both crates stay in `Cargo.lock` through optional features and the
+  `ort-backend` build script, not in the default build, so `cargo audit` no longer reports a
+  vulnerability. The new versions are under 30 days old, an explicit exception to the soak.
 
 ### Changed
 - Model downloads no longer build a second, unused HTTP client. `hf-hub` is now built without its
