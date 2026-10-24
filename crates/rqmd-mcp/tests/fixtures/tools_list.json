@@ -32,7 +32,10 @@
       ],
       "type": "object"
     },
-    "name": "get"
+    "name": "get",
+    "annotations": {
+      "readOnlyHint": true
+    }
   },
   {
     "description": "Retrieve multiple documents matching a glob pattern (e.g. 'journals/2025-05*.md') or a comma-separated list of paths/docids.",
@@ -68,7 +71,10 @@
       ],
       "type": "object"
     },
-    "name": "multi_get"
+    "name": "multi_get",
+    "annotations": {
+      "readOnlyHint": true
+    }
   },
   {
     "description": "Hybrid search (BM25 + vector + rerank). Best for most queries. Provide a natural-language question or keyword phrase. Set expand:false to skip LLM query-expansion for lower latency.",
@@ -134,7 +140,10 @@
       ],
       "type": "object"
     },
-    "name": "query"
+    "name": "query",
+    "annotations": {
+      "readOnlyHint": true
+    }
   },
   {
     "description": "BM25 keyword search. Fast, no model required. Supports \"quoted phrases\" and -negation. Use for known terms or exact phrases.",
@@ -179,7 +188,10 @@
       ],
       "type": "object"
     },
-    "name": "search"
+    "name": "search",
+    "annotations": {
+      "readOnlyHint": true
+    }
   },
   {
     "description": "Show the RQMD index status: collections, document counts, and index health.",
@@ -187,6 +199,9 @@
       "properties": {},
       "type": "object"
     },
-    "name": "status"
+    "name": "status",
+    "annotations": {
+      "readOnlyHint": true
+    }
   }
 ]

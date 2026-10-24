@@ -12,6 +12,12 @@ rqmd includes a built-in MCP server exposing its search index as tools for Claud
 | `multi_get` | Retrieve multiple documents by glob pattern |
 | `status` | Index health and collection summary |
 
+All five tools are lookups and declare `readOnlyHint: true` in their tool annotations, so a client
+can treat them as read-only (for example, run them in plan mode without a prompt). `openWorldHint`
+is left unset on every tool: `query` may download its models on first use, so a closed-world claim
+would be false for it. `destructiveHint` and `idempotentHint` are not set, because both are
+meaningful only for tools that are not read-only.
+
 ```sh
 rqmd mcp                        # stdio (Claude Desktop, Cursor, etc.)
 rqmd mcp --http                 # Streamable HTTP on port 8181

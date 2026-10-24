@@ -22,6 +22,12 @@
 - Patch updates to `anyhow` (1.0.104), `serde` (1.0.229), `clap` (4.6.7) and `tokenizers`
   (0.23.2, which pulls in `daachorse` 3.0.3). Every new version is over 30 days old.
 
+### Added
+- The MCP tools `get`, `multi_get`, `query`, `search` and `status` now declare `readOnlyHint: true`
+  in their tool annotations. Clients such as Claude Code use that hint to run read-only MCP tools
+  in plan mode without an approval prompt. Tool names, descriptions and input schemas are
+  unchanged. `openWorldHint` stays unset, because `query` may download models on first use.
+
 ## [0.28.1] - 2026-10-19
 
 ### Fixed
