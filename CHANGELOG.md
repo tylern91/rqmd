@@ -36,6 +36,10 @@
   rqmd (a service manager, a closing terminal, `kill`) left a hook that runs in its own process group
   going after rqmd had exited. The hook gets 5 seconds to exit before it is killed, and rqmd exits
   with `130`, `143` or `129`.
+- `rqmd mcp --http` no longer answers `403 host not allowed` to HTTP/2 requests. An HTTP/2 client
+  names its host in the `:authority` pseudo-header instead of a `Host` header, which the host
+  check ignored. The check now reads either, and refuses a request whose `Host` header and
+  authority differ. HTTP/1.1 behaviour is unchanged.
 
 ## [0.28.1] - 2026-10-19
 
