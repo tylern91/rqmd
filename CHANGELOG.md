@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Security
+- Update `rmcp` to 3.6.0 ([GHSA-4432-vg92-fqh6](https://github.com/modelcontextprotocol/rust-sdk/security/advisories/GHSA-4432-vg92-fqh6),
+  high): the Streamable HTTP server transport, which `rqmd mcp --http` uses, let an unauthenticated
+  client grow a tool-schema cache without bound until the daemon ran out of memory. 3.6.0 was
+  published four days before this change, so it is an explicit exception to the 30-day soak. The
+  MCP tool names and input schemas are unchanged. A `POST /mcp` that has no session id and is not
+  `initialize` now gets `400` instead of `422`.
+
 ### Changed
 - Model downloads no longer build a second, unused HTTP client. `hf-hub` is now built without its
   default `ureq` feature, so the default build no longer compiles `ureq`, `webpki-roots`, `rustls`

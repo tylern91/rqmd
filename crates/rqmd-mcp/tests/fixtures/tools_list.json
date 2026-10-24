@@ -1,0 +1,192 @@
+[
+  {
+    "description": "Retrieve a document by file path or docid (#abc123) from search results. Supports line range: 'file.md:100:40' reads 40 lines from line 100.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "file": {
+          "description": "File path (e.g. \"collection/path/to/file.md\") or docid (e.g. \"#abc123\").\nSupports a line-range suffix: \"file.md:100\" (start at line 100) or\n\"file.md:100:40\" (40 lines from line 100).",
+          "type": "string"
+        },
+        "from_line": {
+          "description": "Start from this line number (1-indexed). Overrides suffix.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_lines": {
+          "description": "Maximum lines to return.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "type": "object"
+    },
+    "name": "get"
+  },
+  {
+    "description": "Retrieve multiple documents matching a glob pattern (e.g. 'journals/2025-05*.md') or a comma-separated list of paths/docids.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "collections": {
+          "description": "Filter to one or more collections by name.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "max_lines": {
+          "description": "Maximum lines per document.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pattern": {
+          "description": "Glob pattern (e.g. \"collection/2025-05*.md\") or comma-separated list of\npaths/docids to retrieve.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "name": "multi_get"
+  },
+  {
+    "description": "Hybrid search (BM25 + vector + rerank). Best for most queries. Provide a natural-language question or keyword phrase. Set expand:false to skip LLM query-expansion for lower latency.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "collections": {
+          "description": "Filter to one or more collections by name. Omit to search all collections.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "expand": {
+          "description": "Set to false to skip the LLM query-expansion / HyDE round-trip (faster;\npure hybrid retrieval). Default: true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "intent": {
+          "description": "Optional context or intent to steer query expansion, reranking, and\nsnippet selection. Equivalent to an `intent:` line inside the query.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Maximum results to return (default: 10).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Number of ranked results to skip, to fetch the next page (default: 0).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "query": {
+          "description": "Search query. Supports plain text (auto-expanded via generation model),\n`expand: text`, or a multi-line typed document with `lex:`, `vec:`,\n`hyde:`, and optional `intent:` lines per the rqmd query syntax.",
+          "type": "string"
+        },
+        "rerank": {
+          "description": "Set to false to skip LLM reranking (faster, lower quality). Default: true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "query"
+  },
+  {
+    "description": "BM25 keyword search. Fast, no model required. Supports \"quoted phrases\" and -negation. Use for known terms or exact phrases.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "collections": {
+          "description": "Filter to one or more collections by name. Omit to search all collections.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Maximum results to return (default: 10).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Number of ranked results to skip, to fetch the next page (default: 0).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "query": {
+          "description": "BM25 keyword query. Supports \"quoted phrases\" and -negation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "search"
+  },
+  {
+    "description": "Show the RQMD index status: collections, document counts, and index health.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "status"
+  }
+]
