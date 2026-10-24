@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+- Model downloads no longer build a second, unused HTTP client. `hf-hub` is now built without its
+  default `ureq` feature, so the default build no longer compiles `ureq`, `webpki-roots`, `rustls`
+  or `rustls-webpki`. Downloads still use the platform TLS stack through `reqwest`, which
+  `rqmd-llm` now enables directly. The `ort-backend` build still compiles `ureq` for `ort-sys`.
+- Patch updates to `anyhow` (1.0.104), `serde` (1.0.229), `clap` (4.6.7) and `tokenizers`
+  (0.23.2, which pulls in `daachorse` 3.0.3). Every new version is over 30 days old.
+
 ## [0.28.1] - 2026-10-19
 
 ### Fixed
