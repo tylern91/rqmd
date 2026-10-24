@@ -22,6 +22,12 @@
 - Patch updates to `anyhow` (1.0.104), `serde` (1.0.229), `clap` (4.6.7) and `tokenizers`
   (0.23.2, which pulls in `daachorse` 3.0.3). Every new version is over 30 days old.
 
+### Fixed
+- `rqmd update` now forwards `SIGINT`, `SIGTERM` and `SIGHUP` to a running update hook. Before, stopping
+  rqmd (a service manager, a closing terminal, `kill`) left a hook that runs in its own process group
+  going after rqmd had exited. The hook gets 5 seconds to exit before it is killed, and rqmd exits
+  with `130`, `143` or `129`.
+
 ## [0.28.1] - 2026-10-19
 
 ### Fixed

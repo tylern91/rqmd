@@ -10,7 +10,7 @@ use rqmd_core::{
     snap_char_boundary_backward,
 };
 
-use crate::exit::PartialFailure;
+use crate::exit::{Interrupted, PartialFailure};
 use crate::hook::{self, HookConfig, HookOutcome};
 use crate::{document, exclusions, format as fmt, store};
 
@@ -936,6 +936,7 @@ fn update_one_collection(
                     "timed out after {}s and was killed",
                     limit.as_secs()
                 )),
+                HookOutcome::Interrupted(signal) => return Err(Interrupted(signal).into()),
             };
             if let Some(reason) = &hook_failure {
                 eprintln!("  WARN: update hook {reason}");
