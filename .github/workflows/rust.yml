@@ -21,6 +21,10 @@ on:
       - "CHANGELOG.md"
       - "scripts/check-version-sync.sh"
       - ".github/workflows/rust.yml"
+  # Weekly full run, including the model-download test the per-PR legs skip.
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -102,9 +106,12 @@ jobs:
         if: matrix.feature-set == 'ort-backend'
         run: cargo clippy ${{ matrix.cargo-args }} --locked -- -D warnings
 
-      - name: Tests (workspace, incl. integration — no model downloads)
+      # index_rebuild::ac_1 downloads and runs the real models (168 s on Linux,
+      # 2,568 s on macOS). The ac-gate job still runs it on every PR, and
+      # full-suite-macos runs it weekly, so the per-PR legs skip it.
+      - name: Tests (workspace, incl. integration; skips the model-download test)
         if: matrix.feature-set == 'default'
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --skip 'index_rebuild::'
 
       - name: Search quality eval (BM25, no model required)
         if: matrix.feature-set == 'default'
@@ -165,17 +172,44 @@ jobs:
           LLAMA_METAL: "0"
         run: cargo build --workspace --locked
 
-      - name: Tests (workspace, incl. integration)
+      - name: Tests (workspace, incl. integration; skips the model-download test)
         if: matrix.toolchain == 'stable'
         env:
           LLAMA_METAL: "0"
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --skip 'index_rebuild::'
 
       - name: Check (MSRV drift, compile only)
         if: matrix.toolchain != 'stable'
         env:
           LLAMA_METAL: "0"
         run: cargo check --workspace --all-targets --locked
+
+  full-suite-macos:
+    name: Full test suite incl. model downloads (macOS arm64)
+    runs-on: macos-26
+    # The model-download test alone took 2,568 s on macOS, so allow headroom.
+    timeout-minutes: 90
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-arm64-full
+          cache-on-failure: true
+          # Only main saves the cache; other refs restore it (the repo cache is over its 10 GB cap).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Tests (workspace, incl. integration and model downloads)
+        run: cargo test --workspace --locked
 
   dist-binary:
     name: Release binary (macOS arm64)
