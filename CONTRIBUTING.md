@@ -91,9 +91,11 @@ cargo run --bin rqmd -- eval --mode bm25
 **CI only triggers on code changes.** `rust.yml` is path-filtered to
 `crates/**`, `Cargo.toml`, `Cargo.lock`, `.cargo/**`, `CHANGELOG.md`,
 `scripts/check-version-sync.sh`, and its own file — a docs-only PR (like this
-one) runs no Rust CI at all. `security.yml` (Trivy) runs on every PR
-regardless; only a **CRITICAL** vulnerability with a known fix blocks the
-merge, HIGH severity is recorded to the Security tab but doesn't block.
+one) runs no Rust CI at all. `lock-soak.yml` runs only when a PR changes
+`Cargo.lock` or the soak script (see "Dependency updates"). `security.yml`
+(Trivy) runs on every PR regardless; only a **CRITICAL** vulnerability with a
+known fix blocks the merge, HIGH severity is recorded to the Security tab but
+doesn't block.
 
 ## Acceptance-test tier
 
@@ -164,6 +166,20 @@ least 30 days old, and pin each crate with
   layout, vector format, tokenization, schema). They only move by hand, in
   their own reviewed change. `ignore` also holds back security updates, so an
   advisory against one of them is handled manually.
+- **Lock soak gate.** `.github/workflows/lock-soak.yml` runs on every PR that
+  changes `Cargo.lock` and calls `scripts/check-lock-soak.sh`. For each crate
+  version the PR adds or changes, direct or transitive, it asks the crates.io
+  API and fails unless the version was published at least 30 days ago and is
+  not yanked. A lookup that cannot be completed also fails. A young
+  transitive crate is the usual cause: pin it back with
+  `cargo update -p <crate> --precise <version>`. To see the verdicts without
+  failing, run
+  `bash scripts/check-lock-soak.sh --dry-run <old Cargo.lock> <new Cargo.lock>`
+  (for example `git show origin/main:Cargo.lock > /path/to/old.lock`). Only
+  crates.io crates are checked: a git or path dependency is skipped.
+- **Waiver.** A maintainer can add the `soak-waiver` label to a PR for a
+  critical advisory (see above). The job then still prints every verdict but
+  does not fail. Name the advisory in the PR body.
 - Dependabot adds no labels (`labels: []`), so a dependency bump does not
   start a release on its own. Apply `patch`, `minor` or `skip-release` by hand
   as described under "Semver labels".
