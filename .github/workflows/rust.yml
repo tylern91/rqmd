@@ -154,6 +154,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build (default, Linux CPU-only — no Metal)
+        if: matrix.toolchain == 'stable'
         # llama-cpp-2 on Linux uses CPU path; metal feature is macOS-only
         env:
           # Force CPU-only llama.cpp build on Linux (no CUDA in free runners)
@@ -161,9 +162,16 @@ jobs:
         run: cargo build --workspace --locked
 
       - name: Tests (workspace, incl. integration)
+        if: matrix.toolchain == 'stable'
         env:
           LLAMA_METAL: "0"
         run: cargo test --workspace --locked
+
+      - name: Check (MSRV drift, compile only)
+        if: matrix.toolchain != 'stable'
+        env:
+          LLAMA_METAL: "0"
+        run: cargo check --workspace --all-targets --locked
 
   dist-binary:
     name: Release binary (macOS arm64)
