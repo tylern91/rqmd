@@ -59,6 +59,13 @@
   order, and a tie at the result cutoff or at an MCP page boundary could pick a different document.
   A document stored under two collections with identical content now resolves to the same
   collection every time. Scores are unchanged.
+- `rqmd query` and the MCP `query` tool no longer hide a reranking step that did not happen. When
+  the rerank model fails, returns a different number of scores than there are candidates, returns
+  no usable score, or the active backend cannot rerank, results stay in fusion order as before,
+  the exit code stays 0, and `rqmd query` prints one `rqmd: warning: results were not reranked`
+  line on stderr while the MCP result ends with one `Note:` line. Neither line carries a path or
+  the error text; `RUST_LOG=warn` shows the error. Stdout, JSON output and the MCP tool schema are
+  unchanged.
 
 ## [0.29.0] - 2026-10-25
 

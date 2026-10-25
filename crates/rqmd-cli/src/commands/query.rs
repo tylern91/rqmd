@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rqmd_core::{Deadline, SearchResult, Store};
+use rqmd_core::{Deadline, RerankStatus, SearchResult, Store};
 use std::path::Path;
 use std::time::Duration;
 
@@ -47,11 +47,24 @@ pub struct QueryOptions<'a> {
     pub timeout: Option<Duration>,
 }
 
+/// Stderr line for a query whose results were not reranked although reranking
+/// was expected. Plain text, so it reads the same under `NO_COLOR` and
+/// `TERM=dumb`, and stdout stays machine-parseable.
+fn rerank_warning(status: RerankStatus) -> Option<String> {
+    let notice = status.notice()?;
+    let hint = if status == RerankStatus::Failed {
+        " (set RUST_LOG=warn for details)"
+    } else {
+        ""
+    };
+    Some(format!("rqmd: warning: {notice}{hint}"))
+}
+
 pub fn run_query(index_dir: &Path, query: &str, opts: QueryOptions) -> Result<()> {
     run_search_command(index_dir, query, opts.fmt, opts.full, true, |s| {
         // Starts once the store is open, so index and model load are not charged.
         let deadline = opts.timeout.map_or(Deadline::none(), Deadline::after);
-        s.hybrid_query_multi_with_deadline(
+        let outcome = s.hybrid_query_outcome(
             query,
             opts.intent,
             opts.num,
@@ -59,7 +72,11 @@ pub fn run_query(index_dir: &Path, query: &str, opts: QueryOptions) -> Result<()
             opts.no_rerank,
             opts.no_expand,
             deadline,
-        )
+        )?;
+        if let Some(line) = rerank_warning(outcome.rerank) {
+            eprintln!("{line}");
+        }
+        Ok(outcome.results)
     })
 }
 
@@ -87,4 +104,20 @@ pub fn run_vsearch(
     run_search_command(index_dir, query, fmt, full, true, |s| {
         s.search_vec_multi(query, num, collections)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rerank_warning_is_one_plain_line_only_for_degraded_runs() {
+        assert_eq!(rerank_warning(RerankStatus::Reranked), None);
+        assert_eq!(rerank_warning(RerankStatus::NotRun), None);
+        for status in [RerankStatus::Unsupported, RerankStatus::Failed] {
+            let line = rerank_warning(status).expect("warning");
+            assert!(line.starts_with("rqmd: warning: results were not reranked"));
+            assert!(!line.contains('\n') && !line.contains('\x1b'), "{line:?}");
+        }
+    }
 }

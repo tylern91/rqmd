@@ -95,7 +95,9 @@ template `"Query: {query}\nDocument: {doc}"`. As noted in
 [Score interpretation](ARCHITECTURE.md#score-interpretation), these scores are not
 normalized across pairs — they're only meaningful as a relative ordering
 within one rerank call, which is why they're blended with, rather than
-replacing, the RRF score.
+replacing, the RRF score. When the rerank model fails or returns an unusable
+score list, the blend is skipped and results keep their fusion order; see
+[Rerank fallback](CLI.md#rerank-fallback).
 
 **Query expansion**: the generation model is prompted with a ChatML-formatted
 instruction asking it to produce short `lex:`/`vec:`/`hyde:` lines — a

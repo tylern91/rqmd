@@ -76,6 +76,45 @@ pub struct RankedListMeta {
     pub query_type: QueryType,
 }
 
+/// How the rerank stage of a hybrid query ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RerankStatus {
+    /// Candidates were reordered by the rerank model.
+    Reranked,
+    /// Reranking did not run: it was switched off, or there was nothing to rank.
+    NotRun,
+    /// The active backend cannot rerank; results are in fusion order.
+    Unsupported,
+    /// The rerank model failed or returned unusable scores; results are in fusion order.
+    Failed,
+}
+
+impl RerankStatus {
+    /// One plain-text line for a caller to show when reranking was expected
+    /// but did not happen, `None` otherwise. It never carries paths or error
+    /// detail: the error chain goes to the log.
+    pub fn notice(self) -> Option<&'static str> {
+        match self {
+            Self::Unsupported => Some(
+                "results were not reranked: the active inference backend does not support \
+                 reranking, so they are in keyword and vector fusion order",
+            ),
+            Self::Failed => Some(
+                "results were not reranked: the rerank model failed, so they are in keyword \
+                 and vector fusion order",
+            ),
+            Self::Reranked | Self::NotRun => None,
+        }
+    }
+}
+
+/// Results of a hybrid query plus how its rerank stage ended.
+#[derive(Debug, Clone)]
+pub struct QueryOutcome {
+    pub results: Vec<SearchResult>,
+    pub rerank: RerankStatus,
+}
+
 /// Final search result returned to callers.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {

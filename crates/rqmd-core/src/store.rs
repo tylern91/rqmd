@@ -23,7 +23,7 @@ use crate::{
     hnsw::VectorIndex,
     query::parse_query,
     rrf::{reciprocal_rank_fusion, rrf_weights},
-    types::{QueryType, RankedListMeta, RankedResult, SearchResult},
+    types::{QueryOutcome, QueryType, RankedListMeta, RankedResult, RerankStatus, SearchResult},
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -983,9 +983,39 @@ impl Store {
         no_expand: bool,
         deadline: Deadline,
     ) -> Result<Vec<SearchResult>> {
+        self.hybrid_query_outcome(
+            query,
+            intent,
+            limit,
+            collections,
+            skip_rerank,
+            no_expand,
+            deadline,
+        )
+        .map(|outcome| outcome.results)
+    }
+
+    /// [`Self::hybrid_query_multi_with_deadline`] that also reports how the
+    /// rerank stage ended, so a caller can tell the user when results are in
+    /// fusion order because reranking failed or was unavailable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hybrid_query_outcome(
+        &mut self,
+        query: &str,
+        intent: Option<&str>,
+        limit: usize,
+        collections: Option<&[String]>,
+        skip_rerank: bool,
+        no_expand: bool,
+        deadline: Deadline,
+    ) -> Result<QueryOutcome> {
+        let not_run = |results| QueryOutcome {
+            results,
+            rerank: RerankStatus::NotRun,
+        };
         let effective = self.effective_collections(collections)?;
         if matches!(effective, Some(ref cols) if cols.is_empty()) {
-            return Ok(vec![]);
+            return Ok(not_run(vec![]));
         }
         let collections = effective.as_deref();
 
@@ -1033,13 +1063,13 @@ impl Store {
         let candidate_docs =
             self.fuse_and_resolve_candidates(&ranked_lists, &list_meta, fetch_size)?;
         if candidate_docs.is_empty() {
-            return Ok(vec![]);
+            return Ok(not_run(vec![]));
         }
 
         deadline.check("rerank")?;
 
         // Step 6: chunk selection + rerank.
-        let (best_chunks, rerank_scores) = self.select_chunks_and_rerank(
+        let (best_chunks, rerank_scores, rerank) = self.select_chunks_and_rerank(
             query,
             &rerank_query,
             effective_intent.as_deref(),
@@ -1047,7 +1077,8 @@ impl Store {
             skip_rerank,
         );
 
-        Ok(self.assemble_results(candidate_docs, &best_chunks, rerank_scores, limit))
+        let results = self.assemble_results(candidate_docs, &best_chunks, rerank_scores, limit);
+        Ok(QueryOutcome { results, rerank })
     }
 
     /// Steps 1-3 of `hybrid_query_multi`: retrieve one ranked list per query
@@ -1234,9 +1265,12 @@ impl Store {
     /// Step 6 of `hybrid_query_multi`: chunk each candidate once (reused for
     /// both the rerank input list and the final `best_chunk`/`best_chunk_pos`),
     /// then rerank with the cross-encoder unless reranking was skipped or the
-    /// active backend doesn't support it. Returns `(best_chunks, rerank_scores)`
-    /// — `rerank_scores` is `None` when reranking didn't run, in which case
-    /// `assemble_results` falls back to pure RRF scoring.
+    /// active backend doesn't support it. Returns `(best_chunks, rerank_scores,
+    /// status)` — `rerank_scores` is `None` unless the status is `Reranked`, in
+    /// which case `assemble_results` falls back to pure RRF scoring. A reranker
+    /// error, a score count that differs from the candidate count, or scores
+    /// that are all non-finite count as `Failed`, so fusion scores and rerank
+    /// scores are never mixed.
     fn select_chunks_and_rerank(
         &mut self,
         query: &str,
@@ -1244,7 +1278,7 @@ impl Store {
         effective_intent: Option<&str>,
         candidate_docs: &[(RankedResult, String, String)],
         skip_rerank: bool,
-    ) -> (Vec<(String, usize)>, Option<Vec<f32>>) {
+    ) -> (Vec<(String, usize)>, Option<Vec<f32>>, RerankStatus) {
         // Fold intent terms into query terms for better snippet selection.
         let term_source = match effective_intent {
             Some(i) => format!("{i} {query}"),
@@ -1265,20 +1299,39 @@ impl Store {
 
         let chunk_refs: Vec<&str> = best_chunks.iter().map(|(t, _)| t.as_str()).collect();
 
-        let rerank_scores: Option<Vec<f32>> = if skip_rerank {
-            None
+        let (rerank_scores, status) = if skip_rerank {
+            (None, RerankStatus::NotRun)
         } else if !self.backend.capabilities().rerank {
             tracing::warn!(
                 "rerank skipped: active inference backend does not support reranking — \
                  results are BM25+vector fusion only"
             );
-            None
+            (None, RerankStatus::Unsupported)
         } else {
             // Use the intent-prepended rerank query for better cross-encoder scoring.
-            self.backend.rerank(rerank_query, &chunk_refs).ok()
+            match self.backend.rerank(rerank_query, &chunk_refs) {
+                Ok(scores)
+                    if scores.len() == chunk_refs.len() && scores.iter().any(|s| s.is_finite()) =>
+                {
+                    (Some(scores), RerankStatus::Reranked)
+                }
+                Ok(scores) => {
+                    tracing::warn!(
+                        "rerank returned unusable scores ({} for {} candidate(s)); \
+                         results are BM25+vector fusion only",
+                        scores.len(),
+                        chunk_refs.len()
+                    );
+                    (None, RerankStatus::Failed)
+                }
+                Err(e) => {
+                    tracing::warn!("rerank failed: {e:#}; results are BM25+vector fusion only");
+                    (None, RerankStatus::Failed)
+                }
+            }
         };
 
-        (best_chunks, rerank_scores)
+        (best_chunks, rerank_scores, status)
     }
 
     /// Step 7 of `hybrid_query_multi`: blend each candidate's rerank score
@@ -3018,6 +3071,170 @@ mod tests {
                 .map(|r| r.path)
                 .collect();
             assert_eq!(got, ["a.md", "c.md", "m.md", "x.md"], "order {order:?}");
+        }
+    }
+
+    /// What a [`RerankStub`] hands back from `rerank`.
+    enum RerankMode {
+        Fail,
+        Scores(Vec<f32>),
+        AllNegInfinity,
+    }
+
+    /// Embeds like [`StubBackend`], but its reranker is scripted.
+    struct RerankStub {
+        mode: RerankMode,
+        can_rerank: bool,
+    }
+
+    impl rqmd_llm::InferenceBackend for RerankStub {
+        fn capabilities(&self) -> rqmd_llm::BackendCapabilities {
+            rqmd_llm::BackendCapabilities {
+                embed: true,
+                rerank: self.can_rerank,
+                generate: false,
+            }
+        }
+        fn embed(&mut self, _text: &str) -> Result<Vec<f32>> {
+            Ok(vec![0.1; rqmd_llm::EMBED_DIM])
+        }
+        fn rerank(&mut self, _query: &str, docs: &[&str]) -> Result<Vec<f32>> {
+            match &self.mode {
+                RerankMode::Fail => bail!("rerank model blew up at /secret/models/rerank.gguf"),
+                RerankMode::Scores(s) => Ok(s.clone()),
+                RerankMode::AllNegInfinity => Ok(vec![f32::NEG_INFINITY; docs.len()]),
+            }
+        }
+        fn generate(&mut self, _prompt: &str) -> Result<String> {
+            panic!("generate must not be called")
+        }
+        fn embed_model_name(&self) -> &str {
+            "rerank-stub"
+        }
+        fn rerank_model_name(&self) -> &str {
+            "rerank-stub"
+        }
+        fn generate_model_name(&self) -> &str {
+            "rerank-stub"
+        }
+    }
+
+    fn rerank_store(dir: &std::path::Path, mode: RerankMode, can_rerank: bool) -> Store {
+        let config = StoreConfig {
+            db_path: dir.join("test.sqlite"),
+            tantivy_dir: dir.join("tantivy"),
+            hnsw_path: dir.join("hnsw.usearch"),
+            read_only: false,
+        };
+        let mut store = Store::open(config, Box::new(RerankStub { mode, can_rerank })).unwrap();
+        for (path, body) in [
+            ("a.md", "uniquerankterm alpha"),
+            ("b.md", "uniquerankterm beta beta"),
+            ("c.md", "uniquerankterm gamma gamma gamma"),
+        ] {
+            store.index_document("coll", path, "T", body).unwrap();
+        }
+        store.flush().unwrap();
+        store
+    }
+
+    fn run_outcome(store: &mut Store, skip_rerank: bool) -> QueryOutcome {
+        store
+            .hybrid_query_outcome(
+                "uniquerankterm",
+                None,
+                10,
+                None,
+                skip_rerank,
+                true,
+                Deadline::none(),
+            )
+            .unwrap()
+    }
+
+    fn files_and_scores(outcome: &QueryOutcome) -> Vec<(String, f32)> {
+        outcome
+            .results
+            .iter()
+            .map(|r| (r.file.clone(), r.score))
+            .collect()
+    }
+
+    /// A reranker that cannot rank leaves the fusion order and fusion scores
+    /// exactly as a `--no-rerank` run produces them, and the outcome says so.
+    fn assert_falls_back_to_fusion(mode: RerankMode) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = rerank_store(dir.path(), mode, true);
+        let fusion = run_outcome(&mut store, true);
+        assert_eq!(fusion.rerank, RerankStatus::NotRun);
+        assert_eq!(fusion.results.len(), 3);
+
+        let got = run_outcome(&mut store, false);
+
+        assert_eq!(got.rerank, RerankStatus::Failed);
+        assert_eq!(files_and_scores(&got), files_and_scores(&fusion));
+    }
+
+    #[test]
+    fn rerank_error_keeps_fusion_order_and_reports_failed() {
+        assert_falls_back_to_fusion(RerankMode::Fail);
+    }
+
+    #[test]
+    fn rerank_with_too_few_scores_is_reported_failed_instead_of_mixing_scales() {
+        assert_falls_back_to_fusion(RerankMode::Scores(vec![0.9]));
+    }
+
+    #[test]
+    fn rerank_with_too_many_scores_is_reported_failed() {
+        assert_falls_back_to_fusion(RerankMode::Scores(vec![0.9; 4]));
+    }
+
+    #[test]
+    fn rerank_with_no_finite_score_is_reported_failed() {
+        assert_falls_back_to_fusion(RerankMode::AllNegInfinity);
+    }
+
+    #[test]
+    fn rerank_with_usable_scores_is_reported_reranked_and_reorders() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = rerank_store(dir.path(), RerankMode::Scores(vec![0.0, 0.5, 1.0]), true);
+        let fusion = run_outcome(&mut store, true);
+
+        let got = run_outcome(&mut store, false);
+
+        assert_eq!(got.rerank, RerankStatus::Reranked);
+        let mut reversed: Vec<String> = fusion.results.iter().map(|r| r.file.clone()).collect();
+        reversed.reverse();
+        let got_files: Vec<String> = got.results.iter().map(|r| r.file.clone()).collect();
+        assert_eq!(got_files, reversed);
+    }
+
+    #[test]
+    fn skipping_rerank_is_reported_not_run_and_never_calls_the_reranker() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = rerank_store(dir.path(), RerankMode::Fail, true);
+        assert_eq!(run_outcome(&mut store, true).rerank, RerankStatus::NotRun);
+    }
+
+    #[test]
+    fn a_backend_without_rerank_is_reported_unsupported() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = rerank_store(dir.path(), RerankMode::Fail, false);
+        let got = run_outcome(&mut store, false);
+        assert_eq!(got.rerank, RerankStatus::Unsupported);
+        assert_eq!(got.results.len(), 3);
+    }
+
+    #[test]
+    fn the_rerank_notice_is_one_line_without_paths_and_only_for_degraded_runs() {
+        assert_eq!(RerankStatus::Reranked.notice(), None);
+        assert_eq!(RerankStatus::NotRun.notice(), None);
+        for status in [RerankStatus::Unsupported, RerankStatus::Failed] {
+            let notice = status.notice().expect("degraded run has a notice");
+            assert!(!notice.contains('\n'), "{notice}");
+            assert!(!notice.contains('/'), "{notice}");
+            assert!(!notice.contains("rqmd://"), "{notice}");
         }
     }
 }
