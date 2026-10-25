@@ -11,6 +11,21 @@ use crate::types::{QueryType, RankedListMeta, RankedResult};
 
 const RRF_K: f32 = 60.0;
 
+/// Order by score descending, then by `collection/path` ascending, so equal
+/// scores come back in the same order regardless of hash-map iteration or
+/// insertion order.
+pub(crate) fn score_desc_then_path(
+    a_score: f32,
+    a_path: &str,
+    b_score: f32,
+    b_path: &str,
+) -> std::cmp::Ordering {
+    b_score
+        .partial_cmp(&a_score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a_path.cmp(b_path))
+}
+
 /// Collapse a ranked list down to one entry per document (`filepath`), keeping
 /// the first occurrence — i.e. the best-scoring one, since callers hand us
 /// lists already sorted descending by backend score.
@@ -106,7 +121,7 @@ pub fn reciprocal_rank_fusion(
         })
         .collect();
 
-    results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| score_desc_then_path(a.0, &a.1.filepath, b.0, &b.1.filepath));
     results.into_iter().map(|(_, r)| r).collect()
 }
 
@@ -165,5 +180,31 @@ mod tests {
         let exp = vec![result("a", 1.0)];
         let fused = reciprocal_rank_fusion(&[orig, exp], &[2.0, 1.0]);
         assert_eq!(fused[0].filepath, "b");
+    }
+
+    #[test]
+    fn rrf_ties_order_by_filepath_in_any_input_order() {
+        // One doc per list, same weight and rank: identical fused scores.
+        let ids = ["m", "c", "x", "a", "q"];
+        for round in 0..40 {
+            let mut order = ids.to_vec();
+            order.rotate_left(round % ids.len());
+            if round % 2 == 1 {
+                order.reverse();
+            }
+            let lists: Vec<_> = order.iter().map(|id| vec![result(id, 1.0)]).collect();
+            let weights = vec![1.0; lists.len()];
+            let fused = reciprocal_rank_fusion(&lists, &weights);
+            let got: Vec<&str> = fused.iter().map(|r| r.filepath.as_str()).collect();
+            assert_eq!(got, ["a", "c", "m", "q", "x"], "round {round}");
+        }
+    }
+
+    #[test]
+    fn score_beats_path_in_tie_break() {
+        use std::cmp::Ordering::{Greater, Less};
+        assert_eq!(score_desc_then_path(0.9, "z", 0.5, "a"), Less);
+        assert_eq!(score_desc_then_path(0.5, "a", 0.9, "z"), Greater);
+        assert_eq!(score_desc_then_path(0.5, "a", 0.5, "z"), Less);
     }
 }

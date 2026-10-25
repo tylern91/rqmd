@@ -147,6 +147,8 @@ pages are slices of one BM25 ranking. `query` sizes its rerank candidate pool
 from the number of results it must return (`offset + limit`), so a deeper page
 is ranked over a slightly larger pool and a result near a page boundary can
 shift by a position.
+Results with exactly the same score are ordered by ascending `collection/path`,
+so a tie at a page boundary falls the same way on every request.
 
 `get` and `multi_get` also cap each document body at 256 KiB, and `multi_get`
 caps the whole response at 4 MiB. A response cut short by a cap ends with a

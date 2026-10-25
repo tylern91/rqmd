@@ -107,6 +107,10 @@ candidates) triggers a logged warning that the candidate pool has been capped
 at 100, rather than silently truncating — since rerank cost scales linearly
 with pool depth, this cap keeps `-n` from causing runaway latency.
 
+**Equal scores:** results with exactly the same score are listed in ascending
+`collection/path` order, so repeating a query returns the same order. This
+applies to `query`, `vsearch` and `similar`.
+
 **Examples:**
 
 ```sh

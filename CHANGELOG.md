@@ -53,6 +53,12 @@
 - `rqmd mcp --http` now closes open event streams when it receives SIGTERM or Ctrl-C. A client
   holding a `GET /mcp` stream open used to keep the process alive, so `rqmd mcp stop` could give
   up after its 5 s wait and leave the pidfile behind.
+- `rqmd query`, `rqmd vsearch`, `rqmd similar` and the MCP `query` tool now list results that have
+  exactly the same score in ascending `collection/path` order. Before, the order among tied results
+  depended on hash-map iteration and indexing order, so a repeated query could return a different
+  order, and a tie at the result cutoff or at an MCP page boundary could pick a different document.
+  A document stored under two collections with identical content now resolves to the same
+  collection every time. Scores are unchanged.
 
 ## [0.29.0] - 2026-10-25
 
