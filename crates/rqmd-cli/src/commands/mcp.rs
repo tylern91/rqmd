@@ -14,6 +14,7 @@ pub fn run_mcp(
     port: u16,
     is_daemon: bool,
     allow_non_loopback: bool,
+    refresh_allowed: bool,
 ) -> Result<()> {
     if http && !daemon::is_loopback(host) && !allow_non_loopback {
         bail!(
@@ -34,14 +35,12 @@ pub fn run_mcp(
     };
 
     if is_daemon {
-        return spawn_daemon(index_dir, host, port, allow_non_loopback);
+        return spawn_daemon(index_dir, host, port, allow_non_loopback, refresh_allowed);
     }
 
     if !http {
         eprintln!("Initialising RQMD MCP server...");
-        let server = RqmdServer::new(index_dir.to_path_buf())
-            .context("failed to create RQMD server")?
-            .with_refresher(refresh::refresher());
+        let server = build_server(index_dir, refresh_allowed)?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -51,9 +50,7 @@ pub fn run_mcp(
     daemon::check_port_free(host, port).context("cannot start MCP server")?;
 
     eprintln!("Initialising RQMD MCP server...");
-    let server = RqmdServer::new(index_dir.to_path_buf())
-        .context("failed to create RQMD server")?
-        .with_refresher(refresh::refresher());
+    let server = build_server(index_dir, refresh_allowed)?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -68,6 +65,20 @@ pub fn run_mcp(
     result
 }
 
+/// The server, with a refresher only when `refresh_allowed`; without one a
+/// `refresh: true` call is answered with a note and the index is not touched.
+fn build_server(index_dir: &Path, refresh_allowed: bool) -> Result<RqmdServer> {
+    let server =
+        RqmdServer::new(index_dir.to_path_buf()).context("failed to create RQMD server")?;
+    if refresh_allowed {
+        return Ok(server.with_refresher(refresh::refresher()));
+    }
+    eprintln!(
+        "refresh is off for this index; pass --allow-refresh to enable it for a project-local index"
+    );
+    Ok(server)
+}
+
 pub fn run_mcp_status(index_dir: &Path) -> Result<()> {
     daemon::status_daemon(index_dir)
 }
@@ -76,7 +87,13 @@ pub fn run_mcp_stop(index_dir: &Path) -> Result<()> {
     daemon::stop_daemon(index_dir)
 }
 
-fn spawn_daemon(index_dir: &Path, host: &str, port: u16, allow_non_loopback: bool) -> Result<()> {
+fn spawn_daemon(
+    index_dir: &Path,
+    host: &str,
+    port: u16,
+    allow_non_loopback: bool,
+    refresh_allowed: bool,
+) -> Result<()> {
     std::fs::create_dir_all(index_dir)
         .with_context(|| format!("failed to create index dir at {}", index_dir.display()))?;
 
@@ -118,6 +135,11 @@ fn spawn_daemon(index_dir: &Path, host: &str, port: u16, allow_non_loopback: boo
     ]);
     if allow_non_loopback {
         cmd.arg("--allow-non-loopback");
+    }
+    // The child gets an explicit `--index-dir`, which would count as trusted,
+    // so the parent's decision is passed on rather than recomputed.
+    if !refresh_allowed {
+        cmd.arg("--no-refresh");
     }
     cmd.stdin(std::process::Stdio::null())
         .stdout(log_out)

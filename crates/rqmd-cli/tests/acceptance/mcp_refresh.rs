@@ -71,12 +71,22 @@ struct Reply {
 
 impl Mcp {
     fn start(index_dir: &Path) -> Self {
+        Self::launch(Some(index_dir), index_dir, &[])
+    }
+
+    /// `rqmd mcp` run from `cwd`, with `--index-dir` when `index_dir` is given
+    /// (otherwise the index is resolved from `cwd`), plus `extra` arguments.
+    fn launch(index_dir: Option<&Path>, cwd: &Path, extra: &[&str]) -> Self {
         let program = assert_cmd::Command::cargo_bin("rqmd").expect("rqmd binary");
-        let stderr_path = index_dir.join("mcp.stderr");
-        let mut child = Command::new(program.get_program())
-            .arg("--index-dir")
-            .arg(index_dir)
+        let stderr_path = cwd.join("mcp.stderr");
+        let mut command = Command::new(program.get_program());
+        command.current_dir(cwd);
+        if let Some(dir) = index_dir {
+            command.arg("--index-dir").arg(dir);
+        }
+        let mut child = command
             .arg("mcp")
+            .args(extra)
             .env_remove("RQMD_MCP_HOST")
             .env_remove("RQMD_MCP_PORT")
             .stdin(Stdio::piped())
@@ -412,4 +422,82 @@ fn ac_8_a_refresh_leaves_vectors_to_embed() {
         status_count(&after, "Pending embed:"),
         status_count(&before, "Pending embed:") + 1
     );
+}
+
+/// A project-local `.rqmd/` index beside `cwd`, settled like `setup`, so the
+/// server resolves it implicitly when started from `cwd` without `--index-dir`.
+fn setup_project_local(body: &str) -> (TempDir, Fixture) {
+    let cwd = TempDir::new().expect("tempdir");
+    let local = cwd.path().join(".rqmd");
+    let fx = fixture_collection("c", body);
+    age(&fx.path.join("doc.md"));
+    rqmd(&local)
+        .args(["collection", "add"])
+        .arg(&fx.path)
+        .args(["--name", "c"])
+        .assert()
+        .success();
+    for _ in 0..2 {
+        rqmd(&local).arg("update").assert().success();
+    }
+    (cwd, fx)
+}
+
+/// A project-local index picked up implicitly can belong to a repo someone else
+/// authored, so a refresh does not walk its collections: the call returns what
+/// the index holds with one note, and the index is not written.
+#[test]
+fn ac_9_an_implicit_project_local_index_is_not_refreshed() {
+    let (cwd, fx) = setup_project_local("alpha body\n");
+    let mut mcp = Mcp::launch(None, cwd.path(), &[]);
+    std::fs::write(fx.path.join("fresh.md"), "quaggaword arrives\n").expect("write");
+
+    let reply = mcp.search("quaggaword", Some(true));
+    let known = mcp.search("alpha", Some(true));
+
+    assert!(!reply.is_error && !known.is_error);
+    assert!(reply.text.contains("No results found"), "{}", reply.text);
+    assert!(
+        reply.text.contains("Note: refresh is not enabled"),
+        "{}",
+        reply.text
+    );
+    assert!(known.text.contains("c/doc.md"), "{}", known.text);
+    let stderr = std::fs::read_to_string(cwd.path().join("mcp.stderr")).unwrap_or_default();
+    assert!(stderr.contains("--allow-refresh"), "stderr: {stderr}");
+}
+
+/// `--allow-refresh` is the opt-in for a project-local index, and `--no-refresh`
+/// turns the option off for an index that would otherwise be refreshed.
+#[test]
+fn ac_10_the_flags_override_the_default() {
+    let (cwd, fx) = setup_project_local("alpha body\n");
+    std::fs::write(fx.path.join("fresh.md"), "quaggaword arrives\n").expect("write");
+    {
+        let mut mcp = Mcp::launch(None, cwd.path(), &["--allow-refresh"]);
+        let reply = mcp.search("quaggaword", Some(true));
+        assert!(reply.text.contains("c/fresh.md"), "{}", reply.text);
+        assert!(!reply.text.contains("Note:"), "{}", reply.text);
+    }
+
+    let (index_dir, fx) = setup("alpha body\n");
+    std::fs::write(fx.path.join("fresh.md"), "quaggaword arrives\n").expect("write");
+    let mut off = Mcp::launch(Some(index_dir.path()), index_dir.path(), &["--no-refresh"]);
+    let reply = off.search("quaggaword", Some(true));
+    assert!(reply.text.contains("No results found"), "{}", reply.text);
+    assert!(
+        reply.text.contains("Note: refresh is not enabled"),
+        "{}",
+        reply.text
+    );
+}
+
+/// The two flags are alternatives: giving both is a usage error.
+#[test]
+fn ac_11_the_refresh_flags_conflict() {
+    let index_dir = TempDir::new().expect("tempdir");
+    rqmd(index_dir.path())
+        .args(["mcp", "--allow-refresh", "--no-refresh"])
+        .assert()
+        .failure();
 }

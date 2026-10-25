@@ -236,9 +236,16 @@ added, edited files replaced and deleted files removed. It differs in what it le
   index still needs its one-time rebuild (which only `rqmd update` performs, so a refresh does not
   take the lock then), the pass does not run and the search does not fail: it returns the results
   the index holds, ending with one `Note:` line that says the refresh was skipped and why. A pass
-  that stopped at the timeout, failed, or runs in a server with no refresher ends with a note too.
+  that stopped at the timeout or failed, or a refresh that is not enabled (see below), ends with a note too.
   The note names no path and does not repeat an error; the server's log has it.
 - **Nothing is written to stdout** except protocol messages, so it is safe over stdio.
+
+- **Not for an implicit project-local index.** A `.rqmd/` index picked up from the working directory can
+  belong to a repo someone else authored, and a refresh walks every path its collections name. When
+  the server resolved its index that way, `refresh: true` is answered with the index's results and one
+  `Note:` line, and nothing is indexed. Start the server with `--allow-refresh` to opt in. An explicit
+  `--index-dir` or the global index is refreshed by default, and `--no-refresh` turns the option off for
+  any index. A daemon keeps the decision of the command that started it.
 
 A refresh rewrites the index, never the collection files. Because `rqmd mcp` has no authentication
 (see [Binding beyond localhost](#binding-beyond-localhost)), a client that can reach a non-loopback

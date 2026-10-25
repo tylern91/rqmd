@@ -49,7 +49,7 @@ pub(crate) const FAILED_NOTICE: &str = "refresh failed; results may not include 
 
 /// Note for a server that has no refresher.
 pub(crate) const UNAVAILABLE_NOTICE: &str =
-    "refresh is not available in this server; results may not include recent edits.";
+    "refresh is not enabled for this index; results may not include recent edits.";
 
 /// Runs one refresh pass over `index_dir` for the named collections (all when
 /// `None`; names that match no collection are skipped), stopping when the

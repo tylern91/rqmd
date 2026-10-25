@@ -1826,7 +1826,7 @@ mod tests {
         let text = server.search_blocking(hello_search(Some(true))).unwrap();
 
         assert!(text.contains("Doc 1"), "{text}");
-        assert!(text.contains("Note: refresh is not available"), "{text}");
+        assert!(text.contains("Note: refresh is not enabled"), "{text}");
     }
 
     #[test]
