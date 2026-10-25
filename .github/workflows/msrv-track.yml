@@ -21,8 +21,8 @@ name: MSRV tracker
 # its own branch. A branch that holds a commit the tracker did not make (for
 # example a lint fix) is never overwritten.
 #
-# The pull_request trigger only runs the self-test when the tracker itself
-# changes. The track job runs from main only, so a dispatch from another branch
+# The pull_request trigger only runs the self-test, and only when the tracker
+# or one of the files it edits changes. The track job runs from main only, so a dispatch from another branch
 # can never reach the App token.
 
 on:
@@ -37,6 +37,14 @@ on:
       - "scripts/tests/msrv-track.test.sh"
       - "scripts/tests/fixtures/msrv-track/**"
       - ".github/workflows/msrv-track.yml"
+      # The files the tracker edits: the self-test applies a raise to the
+      # repository's own copies, so a PR that moves an MSRV mention without
+      # updating the script's edit list fails here instead of on Monday.
+      - "Cargo.toml"
+      - ".github/workflows/rust.yml"
+      - "CONTRIBUTING.md"
+      - "docs/INSTALL.md"
+      - "flake.nix"
 
 permissions:
   contents: read

@@ -98,7 +98,7 @@ everything. A weekly (and manually dispatched) run also executes the full suite
 on macOS, including the model-download test that the per-PR jobs skip.
 `lock-soak.yml` runs only when a PR changes `Cargo.lock` or the soak script (see
 "Dependency updates"). `msrv-track.yml` runs on a weekly schedule, and on a PR only to self-test
-its own script (see "MSRV policy"). `security.yml` (Trivy) runs on every PR regardless; only a **CRITICAL** vulnerability with a known fix blocks the
+its script, when the PR changes the script or a file it edits (see "MSRV policy"). `security.yml` (Trivy) runs on every PR regardless; only a **CRITICAL** vulnerability with a known fix blocks the
 merge, HIGH severity is recorded to the Security tab but doesn't block.
 
 ## Acceptance-test tier
@@ -171,7 +171,8 @@ MSRV therefore follows each stable release, raised within days of it.
   The logic is in `scripts/msrv-track.sh`; run its offline tests with
   `bash scripts/tests/msrv-track.test.sh`. The script fails, rather than
   guessing, when one of the places listed above no longer matches, so change
-  the script's edit list in the same PR that moves any of them.
+  the script's edit list in the same PR that moves any of them (that PR's
+  tracker self-test fails until you do).
 - There is no `rust-toolchain.toml`. CI builds on stable, and `rust.yml`'s
   `build-linux` job also runs a `["stable", "1.99"]` toolchain matrix; the
   pinned leg only runs `cargo check --workspace --all-targets` (no tests) and is
