@@ -133,6 +133,13 @@
             "boolean",
             "null"
           ]
+        },
+        "strict_timeout": {
+          "description": "Set to true to fail with a timeout error when the tool timeout passes before\nreranking finishes, instead of returning the results in fusion order with a\nnote. Default: false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "required": [

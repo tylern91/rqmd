@@ -6,7 +6,7 @@
 
 | Command | Description |
 |---------|-------------|
-| `rqmd query <text> [--no-expand] [--timeout SECS]` | Hybrid search: BM25 + vector + rerank + LLM query expansion. `--timeout` gives up after that many seconds (exit 124); see [Timeouts](#timeouts) |
+| `rqmd query <text> [--no-expand] [--timeout SECS [--timeout-strict]]` | Hybrid search: BM25 + vector + rerank + LLM query expansion. `--timeout` gives up after that many seconds (exit 124), or returns the results unreranked if only reranking is left; `--timeout-strict` always exits 124; see [Timeouts](#timeouts) |
 | `rqmd search <text>` | BM25 keyword search only |
 | `rqmd vsearch <text>` | Vector similarity only |
 | `rqmd similar <path\|#docid>` | Find documents most similar to an already-indexed one |
@@ -156,7 +156,7 @@ stderr, is plain text. `NO_COLOR` (set to any value) turns styling off on a term
 | `0` | Success |
 | `1` | Error — the command did not complete |
 | `2` | Completed with failures: `rqmd update` ran every collection but one or more update hooks failed or timed out, or `rqmd embed` finished but skipped documents it could not embed. Everything else was still indexed or embedded. (Command-line usage errors also exit `2`; they print usage text instead of a summary.) |
-| `124` | Stopped by `--timeout` (the `timeout(1)` convention) |
+| `124` | Stopped by `--timeout` (the `timeout(1)` convention). `rqmd query` exits `124` only when the deadline passes before it has results, or with `--timeout-strict`; see [Timeouts](#timeouts) |
 | `129`, `130`, `143` | `rqmd update` or `rqmd embed` stopped by `SIGHUP`, `SIGINT` or `SIGTERM` (`128` plus the signal number); see [Interrupting update and embed](#interrupting-update-and-embed) and [Update hooks and signals](#update-hooks-and-signals) |
 
 `rqmd embed` stops early, with exit `1`, after five documents in a row fail to embed — that
@@ -209,7 +209,7 @@ rqmd: warning: results were not reranked: the rerank model failed, so they are i
 ```
 
 `RUST_LOG=warn` also logs the underlying error. `--no-rerank` is a request, not a failure, and
-prints no warning.
+prints no warning. Running out of `--timeout` is a third cause, described under [Timeouts](#timeouts).
 
 ## Timeouts
 
@@ -219,6 +219,22 @@ models are not charged, and it is checked between stages: before embedding the q
 query expansion and each expanded sub-query, and before reranking for `query`; before each
 document for `embed`. A model call that is already running (one llama.cpp inference) cannot be
 interrupted, so a run can overrun by the length of its longest single call.
+
+Once `query` has its fused results, running out of time is not an error. If the deadline has
+passed before reranking starts, or passes while it runs (it is checked between candidates, so
+the candidate being scored finishes first), `query` skips the rest of the reranking, prints the
+results in BM25 + vector fusion order, exits `0`, and writes one plain line to stderr (stdout and
+`--format json` are unchanged):
+
+```
+rqmd: warning: results were not reranked: the time limit was reached, so they are in keyword and vector fusion order (--timeout of 5s; add --timeout-strict to exit 124 instead)
+```
+
+Add `--timeout-strict` (it requires `--timeout`) to keep exit `124` for a deadline that passes
+before reranking starts; a rerank that is already running is not interrupted, as before. A
+deadline that passes in an earlier stage (embedding the query, expansion) exits `124` either
+way, because no results exist yet. `--no-rerank` has nothing left to skip, so it never prints this
+line.
 
 A timed-out `query` only reads, so the index is untouched. A timed-out `embed` checkpoints what it
 has embedded first; rerun `rqmd embed` to resume. `rqmd search` and `rqmd vsearch` take no

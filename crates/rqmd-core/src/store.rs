@@ -991,13 +991,20 @@ impl Store {
             skip_rerank,
             no_expand,
             deadline,
+            true,
         )
         .map(|outcome| outcome.results)
     }
 
     /// [`Self::hybrid_query_multi_with_deadline`] that also reports how the
     /// rerank stage ended, so a caller can tell the user when results are in
-    /// fusion order because reranking failed or was unavailable.
+    /// fusion order because reranking failed, was unavailable or ran out of time.
+    ///
+    /// With `strict_timeout` unset, a `deadline` that passes before or during
+    /// reranking returns the fusion results with [`RerankStatus::DeadlineExpired`];
+    /// set, it fails with [`crate::TimedOut`] naming `rerank`, and a rerank already
+    /// running is not interrupted. Earlier stages fail either way, as no results
+    /// exist yet.
     #[allow(clippy::too_many_arguments)]
     pub fn hybrid_query_outcome(
         &mut self,
@@ -1008,6 +1015,7 @@ impl Store {
         skip_rerank: bool,
         no_expand: bool,
         deadline: Deadline,
+        strict_timeout: bool,
     ) -> Result<QueryOutcome> {
         let not_run = |results| QueryOutcome {
             results,
@@ -1066,7 +1074,9 @@ impl Store {
             return Ok(not_run(vec![]));
         }
 
-        deadline.check("rerank")?;
+        if strict_timeout {
+            deadline.check("rerank")?;
+        }
 
         // Step 6: chunk selection + rerank.
         let (best_chunks, rerank_scores, rerank) = self.select_chunks_and_rerank(
@@ -1075,6 +1085,7 @@ impl Store {
             effective_intent.as_deref(),
             &candidate_docs,
             skip_rerank,
+            (!strict_timeout).then_some(deadline),
         );
 
         let results = self.assemble_results(candidate_docs, &best_chunks, rerank_scores, limit);
@@ -1270,7 +1281,8 @@ impl Store {
     /// which case `assemble_results` falls back to pure RRF scoring. A reranker
     /// error, a score count that differs from the candidate count, or scores
     /// that are all non-finite count as `Failed`, so fusion scores and rerank
-    /// scores are never mixed.
+    /// scores are never mixed. With a `soft_deadline`, a rerank that has not
+    /// finished when it passes counts as `DeadlineExpired`.
     fn select_chunks_and_rerank(
         &mut self,
         query: &str,
@@ -1278,6 +1290,7 @@ impl Store {
         effective_intent: Option<&str>,
         candidate_docs: &[(RankedResult, String, String)],
         skip_rerank: bool,
+        soft_deadline: Option<Deadline>,
     ) -> (Vec<(String, usize)>, Option<Vec<f32>>, RerankStatus) {
         // Fold intent terms into query terms for better snippet selection.
         let term_source = match effective_intent {
@@ -1309,13 +1322,20 @@ impl Store {
             (None, RerankStatus::Unsupported)
         } else {
             // Use the intent-prepended rerank query for better cross-encoder scoring.
-            match self.backend.rerank(rerank_query, &chunk_refs) {
-                Ok(scores)
+            let ranked = match soft_deadline {
+                Some(deadline) => self
+                    .backend
+                    .rerank_until(rerank_query, &chunk_refs, &|| deadline.is_expired()),
+                None => self.backend.rerank(rerank_query, &chunk_refs).map(Some),
+            };
+            match ranked {
+                Ok(Some(scores))
                     if scores.len() == chunk_refs.len() && scores.iter().any(|s| s.is_finite()) =>
                 {
                     (Some(scores), RerankStatus::Reranked)
                 }
-                Ok(scores) => {
+                Ok(None) => (None, RerankStatus::DeadlineExpired),
+                Ok(Some(scores)) => {
                     tracing::warn!(
                         "rerank returned unusable scores ({} for {} candidate(s)); \
                          results are BM25+vector fusion only",
@@ -3148,6 +3168,7 @@ mod tests {
                 skip_rerank,
                 true,
                 Deadline::none(),
+                false,
             )
             .unwrap()
     }
@@ -3230,11 +3251,215 @@ mod tests {
     fn the_rerank_notice_is_one_line_without_paths_and_only_for_degraded_runs() {
         assert_eq!(RerankStatus::Reranked.notice(), None);
         assert_eq!(RerankStatus::NotRun.notice(), None);
-        for status in [RerankStatus::Unsupported, RerankStatus::Failed] {
+        for status in [
+            RerankStatus::Unsupported,
+            RerankStatus::Failed,
+            RerankStatus::DeadlineExpired,
+        ] {
             let notice = status.notice().expect("degraded run has a notice");
             assert!(!notice.contains('\n'), "{notice}");
             assert!(!notice.contains('/'), "{notice}");
             assert!(!notice.contains("rqmd://"), "{notice}");
         }
+    }
+
+    /// Embeds slowly, so a short deadline passes before the rerank stage.
+    /// Counts plain `rerank` calls; with `interrupt` set, `rerank_until`
+    /// reports that the deadline cut the rerank short.
+    struct DeadlineStub {
+        embed_delay: Duration,
+        rerank_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        interrupt: bool,
+    }
+
+    impl rqmd_llm::InferenceBackend for DeadlineStub {
+        fn embed(&mut self, _text: &str) -> Result<Vec<f32>> {
+            std::thread::sleep(self.embed_delay);
+            Ok(vec![0.1; rqmd_llm::EMBED_DIM])
+        }
+        fn rerank(&mut self, _query: &str, docs: &[&str]) -> Result<Vec<f32>> {
+            self.rerank_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok((0..docs.len()).map(|i| i as f32).collect())
+        }
+        fn rerank_until(
+            &mut self,
+            query: &str,
+            docs: &[&str],
+            expired: &dyn Fn() -> bool,
+        ) -> Result<Option<Vec<f32>>> {
+            if self.interrupt || expired() {
+                return Ok(None);
+            }
+            self.rerank(query, docs).map(Some)
+        }
+        fn generate(&mut self, _prompt: &str) -> Result<String> {
+            panic!("generate must not be called")
+        }
+        fn embed_model_name(&self) -> &str {
+            "deadline-stub"
+        }
+        fn rerank_model_name(&self) -> &str {
+            "deadline-stub"
+        }
+        fn generate_model_name(&self) -> &str {
+            "deadline-stub"
+        }
+    }
+
+    fn deadline_store(
+        dir: &std::path::Path,
+        interrupt: bool,
+    ) -> (Store, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let rerank_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let config = StoreConfig {
+            db_path: dir.join("test.sqlite"),
+            tantivy_dir: dir.join("tantivy"),
+            hnsw_path: dir.join("hnsw.usearch"),
+            read_only: false,
+        };
+        let backend = DeadlineStub {
+            embed_delay: Duration::from_millis(150),
+            rerank_calls: rerank_calls.clone(),
+            interrupt,
+        };
+        let mut store = Store::open(config, Box::new(backend)).unwrap();
+        for (path, body) in [
+            ("a.md", "uniquerankterm alpha"),
+            ("b.md", "uniquerankterm beta beta"),
+            ("c.md", "uniquerankterm gamma gamma gamma"),
+        ] {
+            store.index_document("coll", path, "T", body).unwrap();
+        }
+        store.flush().unwrap();
+        (store, rerank_calls)
+    }
+
+    fn run_with_deadline(
+        store: &mut Store,
+        skip_rerank: bool,
+        deadline: Deadline,
+        strict_timeout: bool,
+    ) -> Result<QueryOutcome> {
+        store.hybrid_query_outcome(
+            "uniquerankterm",
+            None,
+            10,
+            None,
+            skip_rerank,
+            true,
+            deadline,
+            strict_timeout,
+        )
+    }
+
+    fn calls(n: &std::sync::atomic::AtomicUsize) -> usize {
+        n.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn soft_deadline_before_rerank_returns_fusion_results_and_skips_the_reranker() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, rerank_calls) = deadline_store(dir.path(), false);
+        let fusion = run_with_deadline(&mut store, true, Deadline::none(), false).unwrap();
+
+        let got = run_with_deadline(
+            &mut store,
+            false,
+            Deadline::after(Duration::from_millis(20)),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(got.rerank, RerankStatus::DeadlineExpired);
+        assert_eq!(files_and_scores(&got), files_and_scores(&fusion));
+        assert_eq!(got.results.len(), 3);
+        assert_eq!(calls(&rerank_calls), 0);
+    }
+
+    #[test]
+    fn strict_deadline_before_rerank_fails_naming_the_rerank_stage() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, rerank_calls) = deadline_store(dir.path(), false);
+
+        let err = run_with_deadline(
+            &mut store,
+            false,
+            Deadline::after(Duration::from_millis(20)),
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(timed_out(&err).stage, "rerank");
+        assert_eq!(calls(&rerank_calls), 0);
+    }
+
+    #[test]
+    fn soft_deadline_reached_during_rerank_returns_fusion_results() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, _) = deadline_store(dir.path(), true);
+        let fusion = run_with_deadline(&mut store, true, Deadline::none(), false).unwrap();
+
+        let got = run_with_deadline(
+            &mut store,
+            false,
+            Deadline::after(Duration::from_secs(60)),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(got.rerank, RerankStatus::DeadlineExpired);
+        assert_eq!(files_and_scores(&got), files_and_scores(&fusion));
+    }
+
+    #[test]
+    fn soft_deadline_with_time_left_still_reranks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, rerank_calls) = deadline_store(dir.path(), false);
+
+        let got = run_with_deadline(
+            &mut store,
+            false,
+            Deadline::after(Duration::from_secs(60)),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(got.rerank, RerankStatus::Reranked);
+        assert_eq!(calls(&rerank_calls), 1);
+    }
+
+    #[test]
+    fn strict_deadline_with_time_left_still_reranks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, rerank_calls) = deadline_store(dir.path(), true);
+
+        let got = run_with_deadline(
+            &mut store,
+            false,
+            Deadline::after(Duration::from_secs(60)),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(got.rerank, RerankStatus::Reranked);
+        assert_eq!(calls(&rerank_calls), 1);
+    }
+
+    #[test]
+    fn soft_deadline_with_rerank_switched_off_reports_not_run() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, rerank_calls) = deadline_store(dir.path(), false);
+
+        let got = run_with_deadline(
+            &mut store,
+            true,
+            Deadline::after(Duration::from_millis(20)),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(got.rerank, RerankStatus::NotRun);
+        assert_eq!(calls(&rerank_calls), 0);
     }
 }

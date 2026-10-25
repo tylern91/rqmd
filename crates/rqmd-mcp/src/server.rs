@@ -281,6 +281,10 @@ pub struct QueryInput {
     /// Set to false to skip the LLM query-expansion / HyDE round-trip (faster;
     /// pure hybrid retrieval). Default: true.
     pub expand: Option<bool>,
+    /// Set to true to fail with a timeout error when the tool timeout passes before
+    /// reranking finishes, instead of returning the results in fusion order with a
+    /// note. Default: false.
+    pub strict_timeout: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -397,6 +401,7 @@ impl RqmdServer {
                 no_rerank,
                 no_expand,
                 Deadline::after(self.tool_timeout),
+                p.strict_timeout.unwrap_or(false),
             )
             .map_err(|e| format!("Error running query: {e:#}"))?;
         let (page, has_more) = page_of(outcome.results, offset, limit);
@@ -1179,6 +1184,7 @@ mod tests {
             offset: None,
             rerank: None,
             expand: None,
+            strict_timeout: None,
         }
     }
 
@@ -1189,6 +1195,81 @@ mod tests {
         let err = server.query_blocking(unmatched_query()).unwrap_err();
 
         assert!(err.contains("timed out"), "{err}");
+    }
+
+    /// Backend whose query embedding outlasts a short tool timeout and whose
+    /// reranker must never run once the deadline has passed.
+    struct SlowEmbedBackend;
+
+    impl rqmd_llm::InferenceBackend for SlowEmbedBackend {
+        fn embed(&mut self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(vec![0.1; rqmd_llm::EMBED_DIM])
+        }
+        fn rerank(&mut self, _query: &str, _docs: &[&str]) -> anyhow::Result<Vec<f32>> {
+            panic!("rerank must not run after the deadline")
+        }
+        fn generate(&mut self, _prompt: &str) -> anyhow::Result<String> {
+            panic!("generate must not run with expand off")
+        }
+        fn embed_model_name(&self) -> &str {
+            "slow-embed"
+        }
+        fn rerank_model_name(&self) -> &str {
+            "slow-rerank"
+        }
+        fn generate_model_name(&self) -> &str {
+            "slow-generate"
+        }
+    }
+
+    fn matching_query(strict_timeout: Option<bool>) -> QueryInput {
+        QueryInput {
+            query: "hello".to_string(),
+            expand: Some(false),
+            strict_timeout,
+            ..unmatched_query()
+        }
+    }
+
+    fn server_with_slow_embed_store(timeout: Duration) -> (tempfile::TempDir, RqmdServer) {
+        let (dir, server) = pool_server(1);
+        let store = Store::open(
+            make_config(&dir.path().join("index")),
+            Box::new(SlowEmbedBackend),
+        )
+        .expect("ml store");
+        assert!(
+            server
+                .ml_store
+                .set(Arc::new(std::sync::Mutex::new(store)))
+                .is_ok()
+        );
+        (dir, server.with_tool_timeout(timeout))
+    }
+
+    #[test]
+    fn query_past_the_tool_timeout_before_rerank_returns_results_with_a_note() {
+        let (_dir, server) = server_with_slow_embed_store(Duration::from_millis(50));
+
+        let out = server.query_blocking(matching_query(None)).unwrap();
+
+        assert!(out.contains("doc1.md"), "{out}");
+        let note: Vec<&str> = out.lines().filter(|l| l.starts_with("Note: ")).collect();
+        assert_eq!(note.len(), 1, "{out}");
+        assert!(note[0].contains("not reranked"), "{out}");
+    }
+
+    #[test]
+    fn query_with_strict_timeout_past_the_tool_timeout_before_rerank_errors() {
+        let (_dir, server) = server_with_slow_embed_store(Duration::from_millis(50));
+
+        let err = server
+            .query_blocking(matching_query(Some(true)))
+            .unwrap_err();
+
+        assert!(err.contains("timed out"), "{err}");
+        assert!(err.contains("rerank"), "{err}");
     }
 
     #[test]
@@ -1298,6 +1379,7 @@ mod tests {
                 "offset",
                 "query",
                 "rerank",
+                "strict_timeout",
             ],
             &["query"],
         ),
