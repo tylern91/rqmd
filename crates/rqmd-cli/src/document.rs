@@ -5,8 +5,10 @@
 //! glob matching, silently-dropped unreadable files) — this is now the single
 //! place both call through, so a fix here fixes both commands at once.
 
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use globset::GlobSet;
 use walkdir::WalkDir;
@@ -125,13 +127,52 @@ impl WalkOptions {
     }
 }
 
-/// Result of a walk: the files to index, and how many otherwise-matching
-/// files were left out for exceeding `max_file_bytes`.
+/// Result of a walk: the files to index, how many otherwise-matching files
+/// were left out for exceeding `max_file_bytes`, and the folders the built-in
+/// rule left out.
 #[derive(Debug, Default)]
 pub struct Candidates {
     pub files: Vec<PathBuf>,
     pub too_large: usize,
+    /// Built-in excluded folders the walk did not descend into, relative to the
+    /// root and sorted. A folder inside one of them is not listed separately.
+    pub excluded_dirs: Vec<String>,
 }
+
+/// Longest list of left-out folders a summary line names.
+const REPORTED_DIRS: usize = 5;
+
+/// `"left out 2 folder(s) by the built-in rule (build/, node_modules/)"`, or
+/// `None` when nothing was left out. Names past [`REPORTED_DIRS`] are counted,
+/// and control characters in a directory name are shown as `?` so a name cannot
+/// write escape sequences into the terminal.
+pub fn excluded_dirs_clause(dirs: &[String]) -> Option<String> {
+    if dirs.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = dirs
+        .iter()
+        .take(REPORTED_DIRS)
+        .map(|d| {
+            let clean: String = d
+                .chars()
+                .map(|c| if c.is_control() { '?' } else { c })
+                .collect();
+            format!("{clean}/")
+        })
+        .collect();
+    let mut list = names.join(", ");
+    if dirs.len() > REPORTED_DIRS {
+        list.push_str(&format!(" +{} more", dirs.len() - REPORTED_DIRS));
+    }
+    Some(format!(
+        "left out {} folder(s) by the built-in rule ({list})",
+        dirs.len()
+    ))
+}
+
+/// Built-in excluded folders the walk skipped, shared with the walker's filter.
+type PrunedDirs = Arc<Mutex<Vec<String>>>;
 
 /// Walk `root`, returning candidate file paths that pass exclusion and
 /// include-glob filtering. Does not read file contents — a walk-time failure
@@ -153,7 +194,8 @@ pub fn collect_candidates(
 ) -> Candidates {
     let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut found = Candidates::default();
-    for p in walk_paths(root, opts.respect_gitignore) {
+    let pruned = PrunedDirs::default();
+    for p in walk_paths(root, opts, &pruned) {
         if !p.is_file()
             || !is_contained_in(&p, &canonical_root)
             || exclusions::is_excluded(&p, root, ignore, opts.allow_hidden)
@@ -172,6 +214,9 @@ pub fn collect_candidates(
         }
         found.files.push(p);
     }
+    found.excluded_dirs = pruned.lock().map(|d| d.clone()).unwrap_or_default();
+    found.excluded_dirs.sort();
+    found.excluded_dirs.dedup();
     found
 }
 
@@ -179,14 +224,32 @@ pub fn collect_candidates(
 /// matched by a `.gitignore` inside the tree are left out (and only those
 /// files are consulted: no global ignore, no `.ignore`, no hidden-file rule —
 /// hidden handling stays in [`exclusions::is_excluded`]).
-fn walk_paths(root: &Path, respect_gitignore: bool) -> Box<dyn Iterator<Item = PathBuf>> {
-    if respect_gitignore {
+///
+/// A directory that [`exclusions::prunes_dir`] rejects is not descended into
+/// (the root itself never is rejected): every path beneath it would fail
+/// `is_excluded` anyway, so the candidates are the same and only the walk is
+/// shorter. Built-in excluded ones are recorded in `pruned`.
+fn walk_paths(
+    root: &Path,
+    opts: WalkOptions,
+    pruned: &PrunedDirs,
+) -> Box<dyn Iterator<Item = PathBuf>> {
+    let pruner = Arc::new(Pruner {
+        root: root.to_path_buf(),
+        allow_hidden: opts.allow_hidden,
+        found: Arc::clone(pruned),
+    });
+    if opts.respect_gitignore {
         Box::new(
             ignore::WalkBuilder::new(root)
                 .standard_filters(false)
                 .git_ignore(true)
                 .require_git(false)
                 .follow_links(true)
+                .filter_entry(move |e| {
+                    let is_dir = e.file_type().is_some_and(|t| t.is_dir());
+                    pruner.keep(e.depth(), is_dir, e.file_name(), e.path())
+                })
                 .build()
                 .filter_map(|e| e.ok())
                 .map(|e| e.into_path()),
@@ -196,9 +259,36 @@ fn walk_paths(root: &Path, respect_gitignore: bool) -> Box<dyn Iterator<Item = P
             WalkDir::new(root)
                 .follow_links(true)
                 .into_iter()
+                .filter_entry(move |e| {
+                    pruner.keep(e.depth(), e.file_type().is_dir(), e.file_name(), e.path())
+                })
                 .filter_map(|e| e.ok())
                 .map(|e| e.into_path()),
         )
+    }
+}
+
+/// The walker's directory filter.
+struct Pruner {
+    root: PathBuf,
+    allow_hidden: bool,
+    found: PrunedDirs,
+}
+
+impl Pruner {
+    /// False for a directory the walk should not descend into.
+    fn keep(&self, depth: usize, is_dir: bool, name: &OsStr, path: &Path) -> bool {
+        if depth == 0 || !is_dir || !exclusions::prunes_dir(name, self.allow_hidden) {
+            return true;
+        }
+        if name
+            .to_str()
+            .is_some_and(exclusions::is_builtin_excluded_dir)
+            && let Ok(mut found) = self.found.lock()
+        {
+            found.push(rel_path_of(path, &self.root));
+        }
+        false
     }
 }
 
@@ -324,6 +414,7 @@ mod tests {
     }
 
     use super::*;
+    use std::collections::BTreeSet;
     use tempfile::tempdir;
 
     fn write(dir: &Path, name: &str, content: &str) -> PathBuf {
@@ -594,5 +685,217 @@ mod tests {
             names.contains(&"linked.md".to_string()),
             "in-tree symlink must still be indexed: {names:?}"
         );
+    }
+
+    // ── Directory pruning ────────────────────────────────────────────────────
+
+    fn rel_names(paths: impl IntoIterator<Item = PathBuf>, root: &Path) -> BTreeSet<String> {
+        paths.into_iter().map(|p| rel_path_of(&p, root)).collect()
+    }
+
+    /// A tree that exercises every way a folder can be left out: built-in
+    /// names at depth 1 and deeper, nested inside each other, a hidden folder,
+    /// a symlinked folder carrying a built-in name, a symlink to a folder that
+    /// itself holds one, a file that only looks like a built-in name, a
+    /// `.gitignore`d folder and an ignore-glob folder.
+    fn mixed_tree() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        let r = dir.path();
+        for d in [
+            "notes",
+            "node_modules/pkg/build",
+            "docs/build/deep/target",
+            "a/b/vendor",
+            ".obsidian/plugins",
+            ".cache/x",
+            "real/dist",
+            "generated",
+            "private",
+        ] {
+            std::fs::create_dir_all(r.join(d)).unwrap();
+        }
+        for f in [
+            "root.md",
+            "notes/n.md",
+            "node_modules/pkg/readme.md",
+            "node_modules/pkg/build/b.md",
+            "docs/d.md",
+            "docs/build/deep/target/t.md",
+            "docs/build/y.md",
+            "a/b/vendor/v.md",
+            "a/b/ok.md",
+            ".obsidian/plugins/p.md",
+            ".obsidian/o.md",
+            ".cache/x/c.md",
+            ".hidden.md",
+            "real/dist/z.md",
+            "real/r.md",
+            "build.md",
+            "generated/g.md",
+            "private/p.md",
+        ] {
+            write(r, f, "body");
+        }
+        std::fs::write(r.join(".gitignore"), "generated/\n").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(r.join("real"), r.join("linked")).unwrap();
+            std::os::unix::fs::symlink(r.join("notes"), r.join("build")).unwrap();
+            std::os::unix::fs::symlink(r.join("notes"), r.join("target")).unwrap();
+        }
+        dir
+    }
+
+    /// The walk as it was before directories were pruned: every path under the
+    /// root, filtered file by file.
+    fn candidates_without_pruning(
+        root: &Path,
+        include: &GlobSet,
+        ignore: &GlobSet,
+        opts: WalkOptions,
+    ) -> BTreeSet<String> {
+        let canonical_root = std::fs::canonicalize(root).unwrap();
+        let all: Vec<PathBuf> = if opts.respect_gitignore {
+            ignore::WalkBuilder::new(root)
+                .standard_filters(false)
+                .git_ignore(true)
+                .require_git(false)
+                .follow_links(true)
+                .build()
+                .filter_map(|e| e.ok())
+                .map(|e| e.into_path())
+                .collect()
+        } else {
+            WalkDir::new(root)
+                .follow_links(true)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .map(|e| e.into_path())
+                .collect()
+        };
+        let kept = all.into_iter().filter(|p| {
+            p.is_file()
+                && is_contained_in(p, &canonical_root)
+                && !exclusions::is_excluded(p, root, ignore, opts.allow_hidden)
+                && include.is_match(p.strip_prefix(root).unwrap_or(p))
+        });
+        rel_names(kept, root)
+    }
+
+    #[test]
+    fn pruning_leaves_the_candidate_set_unchanged() {
+        let dir = mixed_tree();
+        let include = exclusions::build_include_set("**/*.md").unwrap();
+        for ignore_patterns in [vec![], vec!["private/**".to_string()]] {
+            let ignore = exclusions::build_ignore_set(&ignore_patterns);
+            for allow_hidden in [false, true] {
+                for respect_gitignore in [false, true] {
+                    let opts = WalkOptions {
+                        allow_hidden,
+                        respect_gitignore,
+                        ..WalkOptions::default()
+                    };
+                    let expected = candidates_without_pruning(dir.path(), &include, &ignore, opts);
+                    let got = rel_names(
+                        collect_candidates(dir.path(), &include, &ignore, opts).files,
+                        dir.path(),
+                    );
+                    assert!(!expected.is_empty());
+                    assert_eq!(
+                        got, expected,
+                        "hidden={allow_hidden} gitignore={respect_gitignore} ignore={ignore_patterns:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_walk_does_not_descend_into_left_out_folders() {
+        let dir = mixed_tree();
+        for respect_gitignore in [false, true] {
+            for allow_hidden in [false, true] {
+                let opts = WalkOptions {
+                    allow_hidden,
+                    respect_gitignore,
+                    ..WalkOptions::default()
+                };
+                let walked = rel_names(
+                    walk_paths(dir.path(), opts, &PrunedDirs::default()),
+                    dir.path(),
+                );
+                for under in [
+                    "node_modules/",
+                    "docs/build/",
+                    "a/b/vendor/",
+                    ".cache/",
+                    "real/dist/",
+                ] {
+                    assert!(
+                        !walked.iter().any(|p| p.starts_with(under)),
+                        "walked into {under} (hidden={allow_hidden}, gitignore={respect_gitignore}): {walked:?}"
+                    );
+                }
+                assert!(walked.contains("notes/n.md") && walked.contains("a/b/ok.md"));
+                assert_eq!(
+                    walked.iter().any(|p| p.starts_with(".obsidian/")),
+                    allow_hidden,
+                    "hidden folders follow --hidden"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn built_in_folders_are_reported_by_relative_path_without_their_contents() {
+        let dir = mixed_tree();
+        let include = exclusions::build_include_set("**/*.md").unwrap();
+        let ignore = exclusions::build_ignore_set(&[]);
+        let found = collect_candidates(dir.path(), &include, &ignore, WalkOptions::default());
+        // `.cache` is a built-in name too. Hidden-only folders are not reported,
+        // and neither are folders inside an already left-out folder.
+        let mut expected = vec![
+            ".cache",
+            "a/b/vendor",
+            "docs/build",
+            "node_modules",
+            "real/dist",
+            "linked/dist",
+        ];
+        #[cfg(unix)]
+        expected.extend(["build", "target"]);
+        expected.sort();
+        assert_eq!(found.excluded_dirs, expected);
+    }
+
+    #[test]
+    fn the_collection_root_is_never_reported_or_pruned() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("build");
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        write(&root, "notes/n.md", "body");
+        let include = exclusions::build_include_set("**/*.md").unwrap();
+        let ignore = exclusions::build_ignore_set(&[]);
+        let found = collect_candidates(&root, &include, &ignore, WalkOptions::default());
+        assert_eq!(found.files.len(), 1);
+        assert!(found.excluded_dirs.is_empty());
+    }
+
+    #[test]
+    fn excluded_dirs_clause_caps_the_names_and_strips_control_characters() {
+        assert_eq!(excluded_dirs_clause(&[]), None);
+        let one = vec!["build".to_string()];
+        assert_eq!(
+            excluded_dirs_clause(&one).unwrap(),
+            "left out 1 folder(s) by the built-in rule (build/)"
+        );
+        let many: Vec<String> = (0..8).map(|i| format!("p{i}/build")).collect();
+        assert_eq!(
+            excluded_dirs_clause(&many).unwrap(),
+            "left out 8 folder(s) by the built-in rule (p0/build/, p1/build/, p2/build/, p3/build/, p4/build/ +3 more)"
+        );
+        let hostile = vec!["x\u{1b}[2Jy/build".to_string()];
+        let clause = excluded_dirs_clause(&hostile).unwrap();
+        assert!(!clause.contains('\u{1b}'), "{clause:?}");
     }
 }

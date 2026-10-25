@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use std::ffi::OsStr;
 use std::path::Path;
 
 // Directories that are never worth indexing — checked by path component.
@@ -13,9 +14,10 @@ const BUILTIN_EXCLUDED_DIRS: &[&str] = &[
 ];
 
 /// Compile a list of gitignore-style glob patterns into a [GlobSet].
-/// Patterns that fail to parse are silently skipped — appropriate for
-/// *ignore* patterns (an unmatchable extra exclusion is harmless), but this
-/// leniency must NOT be reused for *include* patterns; see [`build_include_set`].
+/// Patterns that fail to parse are skipped here, so a collection stored with a
+/// bad one keeps updating; `collection add` rejects them up front
+/// ([`validate_ignore_patterns`]) and `update` warns ([`invalid_ignore_patterns`]).
+/// This leniency must NOT be reused for *include* patterns; see [`build_include_set`].
 pub fn build_ignore_set(patterns: &[String]) -> GlobSet {
     let mut builder = GlobSetBuilder::new();
     for pat in patterns {
@@ -26,6 +28,46 @@ pub fn build_ignore_set(patterns: &[String]) -> GlobSet {
     builder
         .build()
         .unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap())
+}
+
+/// Every pattern in `patterns` that is not a valid glob, with the parser's reason.
+pub fn invalid_ignore_patterns(patterns: &[String]) -> Vec<(String, String)> {
+    patterns
+        .iter()
+        .filter_map(|pat| Glob::new(pat).err().map(|e| (pat.clone(), e.to_string())))
+        .collect()
+}
+
+/// Fail on the first malformed `--ignore` pattern, so a typo is reported when
+/// the collection is added instead of silently excluding nothing.
+pub fn validate_ignore_patterns(patterns: &[String]) -> Result<()> {
+    match invalid_ignore_patterns(patterns).into_iter().next() {
+        Some((pat, reason)) => anyhow::bail!("invalid ignore pattern '{pat}': {reason}"),
+        None => Ok(()),
+    }
+}
+
+/// True if `name` is one of the built-in excluded directory names.
+pub fn is_builtin_excluded_dir(name: &str) -> bool {
+    BUILTIN_EXCLUDED_DIRS.contains(&name)
+}
+
+/// The built-in excluded directory names, for messages.
+pub fn builtin_excluded_dirs() -> &'static [&'static str] {
+    BUILTIN_EXCLUDED_DIRS
+}
+
+/// True if a path component named `name` excludes the path it appears in.
+fn component_excluded(name: &str, allow_hidden: bool) -> bool {
+    (!allow_hidden && name.starts_with('.')) || is_builtin_excluded_dir(name)
+}
+
+/// True if a directory named `name`, below the collection root, can hold no
+/// file that [`is_excluded`] would keep, so the walk need not descend into it.
+/// Shares [`component_excluded`] with `is_excluded` so the two cannot drift.
+pub fn prunes_dir(name: &OsStr, allow_hidden: bool) -> bool {
+    name.to_str()
+        .is_none_or(|s| component_excluded(s, allow_hidden))
 }
 
 /// Compile a collection's `pattern` mask into a [GlobSet] of alternatives.
@@ -99,10 +141,7 @@ pub fn is_excluded(path: &Path, root: &Path, ignore: &GlobSet, allow_hidden: boo
                 Some(s) => s,
                 None => return true, // non-UTF-8 — exclude; can't index as text anyway
             };
-            if !allow_hidden && s.starts_with('.') {
-                return true;
-            }
-            if BUILTIN_EXCLUDED_DIRS.contains(&s) {
+            if component_excluded(s, allow_hidden) {
                 return true;
             }
         }
@@ -155,6 +194,76 @@ mod tests {
             !is_excluded(&file, &root, &ignore, true),
             "--hidden must allow a dot-directory nested inside the tree"
         );
+    }
+
+    // ── ignore pattern validation and directory pruning ───────────────────────
+
+    #[test]
+    fn validate_ignore_patterns_accepts_good_and_names_the_first_bad_pattern() {
+        let good = vec![
+            "*.log".to_string(),
+            "tmp/".to_string(),
+            "**/{a,b}".to_string(),
+        ];
+        assert!(validate_ignore_patterns(&good).is_ok());
+        assert!(validate_ignore_patterns(&[]).is_ok());
+
+        let bad = vec!["*.log".to_string(), "docs/{a".to_string(), "[".to_string()];
+        let err = validate_ignore_patterns(&bad).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid ignore pattern 'docs/{a'"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn invalid_ignore_patterns_lists_every_bad_pattern_with_its_reason() {
+        let patterns = vec!["*.log".to_string(), "docs/{a".to_string(), "[".to_string()];
+        let bad = invalid_ignore_patterns(&patterns);
+        let names: Vec<&str> = bad.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(names, vec!["docs/{a", "["]);
+        assert!(bad.iter().all(|(_, reason)| !reason.is_empty()));
+    }
+
+    #[test]
+    fn prunes_dir_matches_the_names_is_excluded_rejects() {
+        use std::ffi::OsStr;
+        for name in [
+            "node_modules",
+            "vendor",
+            "dist",
+            "build",
+            "target",
+            ".cache",
+        ] {
+            assert!(prunes_dir(OsStr::new(name), true), "{name} with --hidden");
+            assert!(prunes_dir(OsStr::new(name), false), "{name}");
+            assert!(is_builtin_excluded_dir(name), "{name}");
+        }
+        assert!(prunes_dir(OsStr::new(".obsidian"), false));
+        assert!(!prunes_dir(OsStr::new(".obsidian"), true));
+        assert!(!is_builtin_excluded_dir(".obsidian"));
+        for name in ["notes", "builds", "Build", "targets", "src"] {
+            assert!(!prunes_dir(OsStr::new(name), false), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_pruned_directory_name_excludes_everything_beneath_it() {
+        use std::ffi::OsStr;
+        let root = Path::new("/r");
+        let ignore = empty_ignore();
+        for allow_hidden in [false, true] {
+            for name in ["node_modules", "build", ".git", ".cache", "notes"] {
+                let file = root.join(name).join("deep/x.md");
+                if prunes_dir(OsStr::new(name), allow_hidden) {
+                    assert!(
+                        is_excluded(&file, root, &ignore, allow_hidden),
+                        "{name} hidden={allow_hidden}"
+                    );
+                }
+            }
+        }
     }
 
     // ── build_include_set: five glob-pattern cases ─────────────────────────────

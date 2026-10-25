@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+- `rqmd collection add` and `rqmd update` now name the folders the built-in exclusions
+  (`node_modules`, `vendor`, `dist`, `build`, `target`, `.cache`) left out, at the end of the summary
+  line, for example `left out 2 folder(s) by the built-in rule (build/, node_modules/)`. Paths are
+  relative to the collection root and at most five are named. Nothing is added when no folder was
+  left out. `rqmd collection show` now lists the collection's ignore patterns.
+
+### Changed
+- `rqmd update` no longer walks into the folders the built-in exclusions leave out, nor into hidden
+  folders unless `--hidden` is set, so a large `node_modules` or `target` tree no longer slows it
+  down. The set of indexed documents is unchanged.
+- `rqmd collection add` now rejects a malformed `--ignore` pattern with an error that names it,
+  before anything is stored, instead of silently excluding nothing. A malformed pattern already
+  stored in a collection does not stop `rqmd update`; it prints a warning and the other patterns
+  still apply.
+
 ### Fixed
 - Output is plain text when it is not a terminal. Before, `status`, `update`, `embed`, `doctor` and
   the index warnings wrote ANSI escapes into piped and redirected output. One gate now decides every
