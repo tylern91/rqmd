@@ -104,6 +104,8 @@ subsequent `rqmd update` run — you only need to specify them once.
 | `RQMD_MODEL_IDLE_TTL` | seconds | `300` | MCP daemon: unload an idle model after this many seconds of no use; `0` disables eviction |
 | `RQMD_NO_EXPAND` | `1` | *(unset)* | Equivalent to always passing `--no-expand` to `rqmd query` |
 | `RQMD_VERBOSE` | `1` | *(unset)* | Verbose ORT backend logging |
+| `NO_COLOR` | any value | *(unset)* | Turn off ANSI colour on a terminal. See [Colour and progress output](CLI.md#colour-and-progress-output) |
+| `TERM` | `dumb` | *(from the terminal)* | `dumb` turns off colour and prints progress as plain newline-terminated lines instead of redrawing one |
 
 ---
 

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+- Output is plain text when it is not a terminal. Before, `status`, `update`, `embed`, `doctor` and
+  the index warnings wrote ANSI escapes into piped and redirected output. One gate now decides every
+  escape, per stream, so stdout and stderr are checked separately. `NO_COLOR` turns colour off on a
+  terminal, and `TERM=dumb` turns it off and prints `update`, `embed` and `collection add` progress
+  as plain lines that end in a newline, a line each time a tenth of the work is done, instead of
+  redrawing one line in place. See [docs/CLI.md](docs/CLI.md#colour-and-progress-output).
+- The "embeddings are stale" warning now says to run `rqmd embed`, which re-embeds every document
+  whose vectors are stale. It no longer asks for `rqmd embed --rebuild`, which clears every vector
+  first.
+
 ## [0.29.0] - 2026-10-25
 
 ### Security

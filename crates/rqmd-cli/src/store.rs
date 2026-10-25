@@ -4,7 +4,7 @@ use rqmd_llm::{BackendKind, create_backend, no_backend};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::format::Format;
+use crate::format::{self as fmt, Format};
 
 /// Where the resolved index directory came from — determines whether a
 /// collection's `update_command` hook is trusted to run without `--run-hooks`.
@@ -139,11 +139,18 @@ pub fn warn_if_fingerprint_stale(s: &Store) {
     let ast = expected_ast_fingerprint();
     let breakdown = db::fingerprint_breakdown_active(&s.db).unwrap_or_default();
     if breakdown.iter().any(|(fp, _)| fp != &base && fp != &ast) {
-        eprintln!(
-            "\x1b[33mrqmd: warning: embeddings are stale (model or chunking config changed \
-             since last embed) — run `rqmd embed --rebuild` to refresh\x1b[0m"
-        );
+        eprintln!("{}", stale_embed_warning(fmt::Paint::stderr()));
     }
+}
+
+/// Plain `rqmd embed` re-embeds every hash whose vectors carry a stale
+/// fingerprint (`db::hash_needs_embed`), so the warning does not ask for the
+/// full `--rebuild`.
+fn stale_embed_warning(p: fmt::Paint) -> String {
+    p.yellow(
+        "rqmd: warning: embeddings are stale (model or chunking config changed \
+         since last embed) — run `rqmd embed` to refresh",
+    )
 }
 
 /// Store-config key marking that a full (unscoped) `rqmd update` has completed
@@ -185,10 +192,13 @@ pub fn warn_if_raw_backfill_pending(s: &Store) {
             .unwrap_or(0);
     if has_docs > 0 {
         eprintln!(
-            "\x1b[33mrqmd: warning: index predates the retrieval-text fix — some documents may \
-             still serve another document's text; run `rqmd update` (full, not \
-             --collection-scoped) to repair, then `rqmd embed --rebuild` to also purge \
-             frontmatter that was embedded before the fix\x1b[0m"
+            "{}",
+            fmt::Paint::stderr().yellow(
+                "rqmd: warning: index predates the retrieval-text fix — some documents may \
+                 still serve another document's text; run `rqmd update` (full, not \
+                 --collection-scoped) to repair, then `rqmd embed --rebuild` to also purge \
+                 frontmatter that was embedded before the fix"
+            )
         );
     }
 }
@@ -200,10 +210,13 @@ pub fn warn_if_raw_backfill_pending(s: &Store) {
 pub fn warn_if_fts_rebuild_pending(s: &Store) {
     if s.fts_rebuild_pending().unwrap_or(false) {
         eprintln!(
-            "\x1b[33mrqmd: warning: the full-text index predates the current tokenizer and \
-             schema — some Japanese, Chinese and Korean queries may miss and tags and aliases \
-             are not weighted until `rqmd update` (full, not --collection-scoped) rebuilds \
-             it\x1b[0m"
+            "{}",
+            fmt::Paint::stderr().yellow(
+                "rqmd: warning: the full-text index predates the current tokenizer and \
+                 schema — some Japanese, Chinese and Korean queries may miss and tags and aliases \
+                 are not weighted until `rqmd update` (full, not --collection-scoped) rebuilds \
+                 it"
+            )
         );
     }
 }
@@ -306,5 +319,13 @@ mod tests {
         let roots = collection_roots(&store, Format::Files).unwrap();
 
         assert_eq!(roots.get("notes").map(String::as_str), Some("/repo/notes"));
+    }
+
+    #[test]
+    fn stale_embed_warning_points_at_plain_embed() {
+        let msg = stale_embed_warning(fmt::Paint::plain());
+        assert!(msg.contains("run `rqmd embed` to refresh"), "{msg}");
+        assert!(!msg.contains("--rebuild"), "{msg}");
+        assert!(!msg.contains('\x1b'), "{msg}");
     }
 }
