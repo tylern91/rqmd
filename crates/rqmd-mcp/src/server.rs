@@ -16,8 +16,8 @@ use rmcp::{
 };
 
 use rqmd_core::{
-    Deadline, Document, Store, StoreConfig, db, resolve, snap_char_boundary_backward,
-    store as core_store,
+    Deadline, Document, SearchOptions, Store, StoreConfig, clamp_per_file, db, resolve,
+    section_numbers, snap_char_boundary_backward, store as core_store,
 };
 use rqmd_llm::{BackendKind, create_backend, no_backend};
 
@@ -55,6 +55,14 @@ fn clamp_limit(limit: Option<usize>, default: usize) -> usize {
 /// value cannot size a retrieval pool past the same cap `limit` obeys.
 fn clamp_offset(offset: Option<usize>) -> usize {
     offset.unwrap_or(0).min(MAX_SEARCH_LIMIT)
+}
+
+/// The search options for a client-supplied `per_file`: one section per file
+/// when omitted, never more than `rqmd_core::MAX_PER_FILE`.
+fn search_options(per_file: Option<usize>) -> SearchOptions {
+    SearchOptions {
+        per_file: clamp_per_file(per_file.unwrap_or(1)),
+    }
 }
 
 /// Number of ranked results to fetch so that the page `offset..offset+limit`
@@ -276,6 +284,9 @@ pub struct QueryInput {
     pub limit: Option<usize>,
     /// Number of ranked results to skip, to fetch the next page (default: 0).
     pub offset: Option<usize>,
+    /// Maximum sections of one file to return, best first (default: 1, maximum: 5). A file can then appear more
+    /// than once, each time with a different snippet; limit and offset count sections.
+    pub per_file: Option<usize>,
     /// Set to false to skip LLM reranking (faster, lower quality). Default: true.
     pub rerank: Option<bool>,
     /// Set to false to skip the LLM query-expansion / HyDE round-trip (faster;
@@ -297,6 +308,9 @@ pub struct SearchInput {
     pub limit: Option<usize>,
     /// Number of ranked results to skip, to fetch the next page (default: 0).
     pub offset: Option<usize>,
+    /// Maximum sections of one file to return, best first (default: 1, maximum: 5). A file can then appear more
+    /// than once, each time with a different snippet; limit and offset count sections.
+    pub per_file: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -393,7 +407,7 @@ impl RqmdServer {
             .ml()
             .map_err(|e| format!("Error loading inference backend: {e:#}"))?;
         let outcome = store
-            .hybrid_query_outcome(
+            .hybrid_query_outcome_with(
                 &p.query,
                 intent,
                 fetch_len(offset, limit),
@@ -402,6 +416,7 @@ impl RqmdServer {
                 no_expand,
                 Deadline::after(self.tool_timeout),
                 p.strict_timeout.unwrap_or(false),
+                &search_options(p.per_file),
             )
             .map_err(|e| format!("Error running query: {e:#}"))?;
         let (page, has_more) = page_of(outcome.results, offset, limit);
@@ -419,7 +434,12 @@ impl RqmdServer {
             .fts()
             .map_err(|e| format!("Error opening store: {e:#}"))?;
         let results = store
-            .search_fts_multi(&p.query, fetch_len(offset, limit), cols)
+            .search_fts_multi_with(
+                &p.query,
+                fetch_len(offset, limit),
+                cols,
+                &search_options(p.per_file),
+            )
             .map_err(|e| format!("Error running search: {e:#}"))?;
         let (page, has_more) = page_of(results, offset, limit);
         Ok(format_results(&page, &p.query, offset, has_more))
@@ -496,9 +516,14 @@ fn format_results(
             results.len()
         )
     };
+    let sections = section_numbers(results);
     for (i, r) in results.iter().enumerate() {
+        // A file listed more than once says which section this is.
+        let section = sections[i]
+            .map(|(n, of)| format!(" · section {n} of {of}"))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "[{}] {} #{}\n  rqmd://{}/{} · score {:.3}\n",
+            "[{}] {} #{}\n  rqmd://{}/{} · score {:.3}{section}\n",
             offset + i + 1,
             r.title,
             r.docid,
@@ -885,6 +910,91 @@ mod tests {
         assert_eq!(clamp_limit(Some(0), 10), 1);
     }
 
+    /// A file with `parts` sections, each carrying the word "needleword",
+    /// indexed into the pool server's keyword index.
+    fn index_sectioned_file(server: &RqmdServer, parts: usize) {
+        let fill = "The quick brown fox jumps over the lazy dog. ".repeat(50);
+        let body: String = (0..parts)
+            .map(|n| format!("# Part {n}\n\n{fill}needleword {fill}\n\n"))
+            .collect();
+        let mut store = server.fts().expect("fts store");
+        store
+            .index_document_fts_only("col", "long.md", "Long", &body)
+            .expect("index doc");
+        store.flush().expect("commit");
+    }
+
+    fn needle_search(per_file: Option<usize>) -> SearchInput {
+        SearchInput {
+            query: "needleword".to_string(),
+            collections: None,
+            limit: Some(50),
+            offset: None,
+            per_file,
+        }
+    }
+
+    #[test]
+    fn per_file_defaults_to_one_and_is_clamped_server_side() {
+        assert_eq!(search_options(None).per_file, 1);
+        assert_eq!(search_options(Some(0)).per_file, 1);
+        assert_eq!(search_options(Some(3)).per_file, 3);
+        assert_eq!(
+            search_options(Some(usize::MAX)).per_file,
+            rqmd_core::MAX_PER_FILE
+        );
+    }
+
+    #[test]
+    fn search_without_per_file_returns_one_result_for_a_file() {
+        let (_dir, server) = pool_server(1);
+        index_sectioned_file(&server, 8);
+
+        let out = server.search_blocking(needle_search(None)).expect("search");
+
+        assert_eq!(out.matches("rqmd://col/long.md").count(), 1, "{out}");
+        assert!(!out.contains("section"), "{out}");
+    }
+
+    #[test]
+    fn search_per_file_returns_labelled_sections_up_to_the_cap() {
+        let (_dir, server) = pool_server(1);
+        index_sectioned_file(&server, 8);
+
+        let three = server
+            .search_blocking(needle_search(Some(3)))
+            .expect("search");
+        assert_eq!(three.matches("rqmd://col/long.md").count(), 3, "{three}");
+        assert!(three.contains("section 1 of 3"), "{three}");
+        assert!(three.contains("section 3 of 3"), "{three}");
+
+        let huge = server
+            .search_blocking(needle_search(Some(usize::MAX)))
+            .expect("search");
+        assert_eq!(huge.matches("rqmd://col/long.md").count(), 5, "{huge}");
+    }
+
+    #[test]
+    fn offset_pages_count_sections() {
+        let (_dir, server) = pool_server(1);
+        index_sectioned_file(&server, 8);
+
+        let page = server
+            .search_blocking(SearchInput {
+                limit: Some(2),
+                offset: Some(1),
+                ..needle_search(Some(5))
+            })
+            .expect("search");
+
+        assert_eq!(page.matches("rqmd://col/long.md").count(), 2, "{page}");
+        assert!(page.contains("[2] "), "{page}");
+        assert!(
+            page.contains("More results are available: pass offset=3."),
+            "{page}"
+        );
+    }
+
     #[test]
     fn cap_multi_get_docs_under_limit_is_unchanged() {
         let docs = vec![doc(1), doc(2), doc(3)];
@@ -1182,6 +1292,7 @@ mod tests {
             collections: None,
             limit: None,
             offset: None,
+            per_file: None,
             rerank: None,
             expand: None,
             strict_timeout: None,
@@ -1377,6 +1488,7 @@ mod tests {
                 "intent",
                 "limit",
                 "offset",
+                "per_file",
                 "query",
                 "rerank",
                 "strict_timeout",
@@ -1386,7 +1498,7 @@ mod tests {
         (
             "search",
             "BM25 keyword search. Fast, no model required. Supports \"quoted phrases\" and -negation. Use for known terms or exact phrases.",
-            &["collections", "limit", "offset", "query"],
+            &["collections", "limit", "offset", "per_file", "query"],
             &["query"],
         ),
         (
@@ -1461,6 +1573,7 @@ mod tests {
                     collections: None,
                     limit: None,
                     offset: None,
+                    per_file: None,
                 }))
                 .await
         });

@@ -1,5 +1,7 @@
 use anyhow::Result;
-use rqmd_core::{Deadline, QueryOutcome, QueryStage, RerankStatus, SearchResult, Store};
+use rqmd_core::{
+    Deadline, QueryOutcome, QueryStage, RerankStatus, SearchOptions, SearchResult, Store,
+};
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -42,6 +44,8 @@ pub struct QueryOptions<'a> {
     pub intent: Option<&'a str>,
     pub collections: Option<&'a [String]>,
     pub num: usize,
+    /// Sections of one file to return; the library caps it at 5.
+    pub per_file: usize,
     pub fmt: Format,
     pub no_rerank: bool,
     pub full: bool,
@@ -117,7 +121,7 @@ fn query_with_progress<W: Write + Send + 'static>(
     if active {
         s.set_query_observer(Some(stage_reporter(Arc::clone(&progress))));
     }
-    let outcome = s.hybrid_query_outcome(
+    let outcome = s.hybrid_query_outcome_with(
         query,
         opts.intent,
         opts.num,
@@ -126,6 +130,9 @@ fn query_with_progress<W: Write + Send + 'static>(
         opts.no_expand,
         deadline,
         opts.timeout_strict,
+        &SearchOptions {
+            per_file: opts.per_file,
+        },
     );
     s.set_query_observer(None);
     progress
@@ -151,11 +158,12 @@ pub fn run_search(
     query: &str,
     collections: Option<&[String]>,
     num: usize,
+    per_file: usize,
     fmt: Format,
     full: bool,
 ) -> Result<()> {
     run_search_command(index_dir, query, fmt, full, false, |s| {
-        s.search_fts_multi(query, num, collections)
+        s.search_fts_multi_with(query, num, collections, &SearchOptions { per_file })
     })
 }
 
@@ -164,11 +172,12 @@ pub fn run_vsearch(
     query: &str,
     collections: Option<&[String]>,
     num: usize,
+    per_file: usize,
     fmt: Format,
     full: bool,
 ) -> Result<()> {
     run_search_command(index_dir, query, fmt, full, true, |s| {
-        s.search_vec_multi(query, num, collections)
+        s.search_vec_multi_with(query, num, collections, &SearchOptions { per_file })
     })
 }
 
@@ -278,6 +287,7 @@ mod tests {
             intent: None,
             collections: None,
             num: 10,
+            per_file: 1,
             fmt: Format::Cli,
             no_rerank: false,
             full: false,

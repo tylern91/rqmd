@@ -38,6 +38,12 @@ the LLM query-expansion round-trip). `Store::open` and every method that
 mutates the index (`index_document`, `hybrid_query`, `search_vec`) take
 `&mut self`; `search_fts` alone takes `&self`.
 
+To return several sections of one file, call the `_with` variants
+(`hybrid_query_outcome_with`, `search_fts_multi_with`, `search_vec_multi_with`)
+with `SearchOptions { per_file }`. `per_file` is clamped to `1..=MAX_PER_FILE`
+(5); `limit` then counts sections, and `section_numbers(&results)` says which
+results are repeats of one file. The methods above are the `per_file = 1` case.
+
 This example is kept honest by an identical `no_run` doctest on `Store` itself
 (`crates/rqmd-core/src/store.rs`), compiled by `cargo test --doc` — a future
 signature change fails that build before it can drift from this page.

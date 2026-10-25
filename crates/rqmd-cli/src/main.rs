@@ -35,8 +35,8 @@ struct Cli {
     command: Commands,
 }
 
-/// Shared `-c/--collection`, `-n`, `--format`, `--full` quartet for the three
-/// search commands (`Query`, `Search`, `Vsearch`) — flattened rather than
+/// Shared `-c/--collection`, `-n`, `--per-file`, `--format`, `--full` flags for the
+/// three search commands (`Query`, `Search`, `Vsearch`) — flattened rather than
 /// repeated on each variant.
 #[derive(Args)]
 struct SearchScopeArgs {
@@ -45,6 +45,9 @@ struct SearchScopeArgs {
     collection: Vec<String>,
     #[arg(short = 'n', default_value = "10")]
     num: usize,
+    /// Sections of one file to return, best first (1 to 5; default 1)
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    per_file: usize,
     #[arg(long, value_enum, default_value = "cli")]
     format: format::Format,
     #[arg(long)]
@@ -387,6 +390,7 @@ fn run() -> Result<()> {
                 intent: intent.as_deref(),
                 collections: collections_filter(&scope.collection),
                 num: scope.num,
+                per_file: scope.per_file,
                 fmt: scope.format,
                 no_rerank,
                 full: scope.full,
@@ -400,6 +404,7 @@ fn run() -> Result<()> {
             &query,
             collections_filter(&scope.collection),
             scope.num,
+            scope.per_file,
             scope.format,
             scope.full,
         ),
@@ -408,6 +413,7 @@ fn run() -> Result<()> {
             &query,
             collections_filter(&scope.collection),
             scope.num,
+            scope.per_file,
             scope.format,
             scope.full,
         ),

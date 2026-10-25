@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -16,8 +16,9 @@ use sha2::{Digest, Sha256};
 use crate::{
     chunking::{chunk_document_for_path, first_chunk},
     db::{
-        self, content_hash, doc_for_vid_meta, doc_for_vid_meta_in, docid_from_hash,
-        get_context_for_path, open_db, upsert_content, upsert_document, upsert_vector_meta,
+        self, content_hash, doc_chunk_for_vid_in, doc_for_vid_meta, doc_for_vid_meta_in,
+        docid_from_hash, get_context_for_path, open_db, upsert_content, upsert_document,
+        upsert_vector_meta,
     },
     deadline::Deadline,
     fts::FtsIndex,
@@ -25,8 +26,8 @@ use crate::{
     query::parse_query,
     rrf::{reciprocal_rank_fusion, rrf_weights},
     types::{
-        QueryOutcome, QueryStage, QueryType, RankedListMeta, RankedResult, RerankStatus,
-        SearchResult,
+        Chunk, QueryOutcome, QueryStage, QueryType, RankedListMeta, RankedResult, RerankStatus,
+        SearchOptions, SearchResult, clamp_per_file,
     },
 };
 
@@ -38,6 +39,10 @@ use crate::{
 /// is capped at 100 — rerank builds one fresh `LlamaContext` per candidate,
 /// so its cost is linear in pool size.
 const RERANK_CANDIDATE_LIMIT: usize = 20;
+
+/// Most chunks one rerank pass scores: the candidate pool's own ceiling. Sections
+/// beyond a file's best one are only added while the pass stays within it.
+const RERANK_POOL_CEILING: usize = 100;
 
 /// Candidates per reranker call while a query observer is set, so progress
 /// can be reported between calls. Scores do not depend on the slice size:
@@ -894,13 +899,30 @@ impl Store {
         limit: usize,
         collections: Option<&[String]>,
     ) -> Result<Vec<SearchResult>> {
+        self.search_fts_multi_with(query, limit, collections, &SearchOptions::default())
+    }
+
+    /// [`Self::search_fts_multi`] with `options`. With `per_file` above 1 a file
+    /// can yield several results, each a different section holding the query's
+    /// words; `limit` then counts sections. The default of 1 is one result per
+    /// file showing the file's opening chunk, as before.
+    pub fn search_fts_multi_with(
+        &self,
+        query: &str,
+        limit: usize,
+        collections: Option<&[String]>,
+        options: &SearchOptions,
+    ) -> Result<Vec<SearchResult>> {
         let effective = self.effective_collections(collections)?;
         if matches!(effective, Some(ref cols) if cols.is_empty()) {
             // No collection is default-included and none was requested explicitly.
             return Ok(vec![]);
         }
         let hits = self.fts_scoped(query, limit, effective.as_deref())?;
-        self.hits_to_results(hits, limit)
+        match clamp_per_file(options.per_file) {
+            1 => self.hits_to_results(hits, limit),
+            per_file => self.hits_to_sections(hits, query, limit, per_file),
+        }
     }
 
     /// Vector similarity search only (no BM25, no rerank).
@@ -927,6 +949,21 @@ impl Store {
         limit: usize,
         collections: Option<&[String]>,
     ) -> Result<Vec<SearchResult>> {
+        self.search_vec_multi_with(query, limit, collections, &SearchOptions::default())
+    }
+
+    /// [`Self::search_vec_multi`] with `options`. Each result shows the chunk
+    /// whose vector matched. With `per_file` above 1 a file can yield several
+    /// results, one per matching chunk, best match first; `limit` then counts
+    /// sections.
+    pub fn search_vec_multi_with(
+        &mut self,
+        query: &str,
+        limit: usize,
+        collections: Option<&[String]>,
+        options: &SearchOptions,
+    ) -> Result<Vec<SearchResult>> {
+        let per_file = clamp_per_file(options.per_file);
         let effective = self.effective_collections(collections)?;
         if matches!(effective, Some(ref cols) if cols.is_empty()) {
             return Ok(vec![]);
@@ -942,11 +979,12 @@ impl Store {
         // out to a fixed-size raw top-k). Double `k` until enough in-scope
         // documents are found or the whole index has been searched.
         let mut k = limit.saturating_mul(4).max(1);
-        // `doc_for_vid_meta` gives ranking/dedup document identity without the
-        // body, which is only needed for the final `limit` survivors — fetched
-        // once, below, instead of once per raw HNSW hit on every widening pass
-        // (qmd#987 parity, rqmd#86).
-        let mut by_doc: HashMap<String, (f32, crate::types::Document)> = HashMap::new();
+        // `doc_chunk_for_vid_in` gives ranking/dedup document identity without
+        // the body, which is only needed for the final `limit` survivors —
+        // fetched once, below, instead of once per raw HNSW hit on every
+        // widening pass (rqmd#86).
+        let mut by_doc: HashMap<String, (crate::types::Document, Vec<(f32, usize)>)> =
+            HashMap::new();
 
         loop {
             let raw = self.hnsw.search(&embedding, k)?;
@@ -956,19 +994,16 @@ impl Store {
                 // hash shared across collections must resolve to the
                 // in-scope row here, not to an arbitrary one that then gets
                 // discarded by a post-hoc filter (qmd#933 parity, rqmd#86).
-                let Some(doc) = doc_for_vid_meta_in(&self.db, vid, effective.as_deref())? else {
+                let Some((doc, pos)) = doc_chunk_for_vid_in(&self.db, vid, effective.as_deref())?
+                else {
                     continue;
                 };
                 let filepath = format!("{}/{}", doc.collection, doc.path);
-                // Keep only the best-scoring chunk per document — a multi-chunk
-                // document must appear once in results, not once per chunk.
-                let keep = match by_doc.get(&filepath) {
-                    Some((existing_sim, _)) => sim > *existing_sim,
-                    None => true,
-                };
-                if keep {
-                    by_doc.insert(filepath, (sim, doc));
-                }
+                by_doc
+                    .entry(filepath)
+                    .or_insert_with(|| (doc, Vec::new()))
+                    .1
+                    .push((sim, pos));
             }
 
             if by_doc.len() >= limit || k >= total_vectors {
@@ -977,19 +1012,54 @@ impl Store {
             k = (k * 2).min(total_vectors);
         }
 
-        let mut ranked: Vec<(f32, String, crate::types::Document)> = by_doc
-            .into_iter()
-            .map(|(filepath, (sim, doc))| (sim, filepath, doc))
-            .collect();
-        ranked.sort_by(|a, b| crate::rrf::score_desc_then_path(a.0, &a.1, b.0, &b.1));
-        ranked.truncate(limit);
-
-        let mut results = Vec::with_capacity(ranked.len());
-        for (sim, _, doc) in ranked {
-            let body = db::get_document_raw(&self.db, doc.id)?.unwrap_or_default();
-            results.push(self.result_from_doc(&doc, body, sim));
+        // A multi-chunk document appears once per requested section, not once
+        // per chunk: keep its best-matching chunks only.
+        let mut ids = Vec::with_capacity(by_doc.len());
+        let mut docs = Vec::with_capacity(by_doc.len());
+        let mut picks = Vec::new();
+        for (filepath, (doc, mut hits)) in by_doc {
+            hits.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+            });
+            let mut seen = HashSet::new();
+            hits.retain(|h| seen.insert(h.1));
+            for (rank, (sim, pos)) in hits.into_iter().take(per_file).enumerate() {
+                picks.push(Pick {
+                    filepath: filepath.clone(),
+                    doc: docs.len(),
+                    rank,
+                    score: sim,
+                    chunk: (String::new(), pos),
+                });
+            }
+            ids.push(doc.id);
+            docs.push(PickDoc {
+                title: doc.title,
+                hash: doc.hash,
+                body: String::new(),
+            });
         }
-        Ok(results)
+        rank_picks(&mut picks, limit);
+
+        // Only the survivors' bodies are read. The matched chunk is found by
+        // its stored offset; a body chunked differently since its vectors were
+        // written falls back to the chunk nearest to it.
+        let mut chunked: HashMap<usize, Vec<Chunk>> = HashMap::new();
+        for pick in &mut picks {
+            let chunks = match chunked.entry(pick.doc) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let body = db::get_document_raw(&self.db, ids[pick.doc])?.unwrap_or_default();
+                    let chunks = entry.insert(chunk_document_for_path(&pick.filepath, &body));
+                    docs[pick.doc].body = body;
+                    chunks
+                }
+            };
+            pick.chunk = nearest_chunk(chunks, pick.chunk.1);
+        }
+        Ok(self.picks_to_results(docs, picks))
     }
 
     /// Find documents most similar to an already-indexed document, identified by its
@@ -1189,6 +1259,38 @@ impl Store {
         deadline: Deadline,
         strict_timeout: bool,
     ) -> Result<QueryOutcome> {
+        self.hybrid_query_outcome_with(
+            query,
+            intent,
+            limit,
+            collections,
+            skip_rerank,
+            no_expand,
+            deadline,
+            strict_timeout,
+            &SearchOptions::default(),
+        )
+    }
+
+    /// [`Self::hybrid_query_outcome`] with `options`. With `per_file` above 1 a
+    /// file can yield several results, each a different section holding the
+    /// query's words; `limit` then counts sections. Every extra section is one
+    /// more reranker input, so they are only added while one rerank pass stays
+    /// within the candidate pool's ceiling of 100 chunks, best-ranked files first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hybrid_query_outcome_with(
+        &mut self,
+        query: &str,
+        intent: Option<&str>,
+        limit: usize,
+        collections: Option<&[String]>,
+        skip_rerank: bool,
+        no_expand: bool,
+        deadline: Deadline,
+        strict_timeout: bool,
+        options: &SearchOptions,
+    ) -> Result<QueryOutcome> {
+        let per_file = clamp_per_file(options.per_file);
         let not_run = |results| QueryOutcome {
             results,
             rerank: RerankStatus::NotRun,
@@ -1204,8 +1306,8 @@ impl Store {
         // hardcoded constant, so e.g. `limit=25` isn't silently capped below
         // what was asked for. Capped at 100 — see `RERANK_CANDIDATE_LIMIT`.
         let requested_candidates = limit.saturating_mul(2);
-        let fetch_size = requested_candidates.clamp(RERANK_CANDIDATE_LIMIT, 100);
-        if requested_candidates > 100 {
+        let fetch_size = requested_candidates.clamp(RERANK_CANDIDATE_LIMIT, RERANK_POOL_CEILING);
+        if requested_candidates > RERANK_POOL_CEILING {
             tracing::warn!(
                 "query requested limit={limit} (wants {requested_candidates} rerank \
                  candidates); capping the candidate pool at {fetch_size} since rerank \
@@ -1251,16 +1353,17 @@ impl Store {
         }
 
         // Step 6: chunk selection + rerank.
-        let (best_chunks, rerank_scores, rerank) = self.select_chunks_and_rerank(
+        let (sections, rerank_scores, rerank) = self.select_chunks_and_rerank(
             query,
             &rerank_query,
             effective_intent.as_deref(),
             &candidate_docs,
             skip_rerank,
             (!strict_timeout).then_some(deadline),
+            per_file,
         );
 
-        let results = self.assemble_results(candidate_docs, &best_chunks, rerank_scores, limit);
+        let results = self.assemble_results(candidate_docs, sections, rerank_scores, limit);
         Ok(QueryOutcome { results, rerank })
     }
 
@@ -1450,13 +1553,16 @@ impl Store {
     /// Step 6 of `hybrid_query_multi`: chunk each candidate once (reused for
     /// both the rerank input list and the final `best_chunk`/`best_chunk_pos`),
     /// then rerank with the cross-encoder unless reranking was skipped or the
-    /// active backend doesn't support it. Returns `(best_chunks, rerank_scores,
-    /// status)` — `rerank_scores` is `None` unless the status is `Reranked`, in
-    /// which case `assemble_results` falls back to pure RRF scoring. A reranker
-    /// error, a score count that differs from the candidate count, or scores
-    /// that are all non-finite count as `Failed`, so fusion scores and rerank
-    /// scores are never mixed. With a `soft_deadline`, a rerank that has not
-    /// finished when it passes counts as `DeadlineExpired`.
+    /// active backend doesn't support it. Returns `(sections, rerank_scores,
+    /// status)` — `sections` holds each candidate's chunks, best first, and
+    /// `rerank_scores` one score per chunk in that order. `rerank_scores` is
+    /// `None` unless the status is `Reranked`, in which case `assemble_results`
+    /// falls back to pure RRF scoring. A reranker error, a score count that
+    /// differs from the chunk count, or scores that are all non-finite count as
+    /// `Failed`, so fusion scores and rerank scores are never mixed. With a
+    /// `soft_deadline`, a rerank that has not finished when it passes counts as
+    /// `DeadlineExpired`.
+    #[allow(clippy::too_many_arguments)]
     fn select_chunks_and_rerank(
         &mut self,
         query: &str,
@@ -1465,7 +1571,8 @@ impl Store {
         candidate_docs: &[(RankedResult, String, String)],
         skip_rerank: bool,
         soft_deadline: Option<Deadline>,
-    ) -> (Vec<(String, usize)>, Option<Vec<f32>>, RerankStatus) {
+        per_file: usize,
+    ) -> (Sections, Option<Vec<f32>>, RerankStatus) {
         // Fold intent terms into query terms for better snippet selection.
         let term_source = match effective_intent {
             Some(i) => format!("{i} {query}"),
@@ -1478,13 +1585,20 @@ impl Store {
             .map(|t| t.to_string())
             .collect();
 
-        // Chunk once per candidate.
-        let best_chunks: Vec<(String, usize)> = candidate_docs
+        // Chunk once per candidate. Sections past a file's best one are handed
+        // out in candidate order while the rerank pass stays within its ceiling.
+        let mut extra_budget = RERANK_POOL_CEILING.saturating_sub(candidate_docs.len());
+        let sections: Sections = candidate_docs
             .iter()
-            .map(|(cand, _, body)| best_chunk(&cand.filepath, body, &query_terms))
+            .map(|(cand, _, body)| {
+                let wanted = 1 + (per_file - 1).min(extra_budget);
+                let picked = best_chunks(&cand.filepath, body, &query_terms, wanted);
+                extra_budget -= picked.len() - 1;
+                picked
+            })
             .collect();
 
-        let chunk_refs: Vec<&str> = best_chunks.iter().map(|(t, _)| t.as_str()).collect();
+        let chunk_refs: Vec<&str> = sections.iter().flatten().map(|(t, _)| t.as_str()).collect();
 
         let (rerank_scores, status) = if skip_rerank {
             (None, RerankStatus::NotRun)
@@ -1519,7 +1633,7 @@ impl Store {
             }
         };
 
-        (best_chunks, rerank_scores, status)
+        (sections, rerank_scores, status)
     }
 
     /// Score `chunks` with the reranker: one backend call, or calls of
@@ -1558,53 +1672,93 @@ impl Store {
         Ok(Some(scores))
     }
 
-    /// Step 7 of `hybrid_query_multi`: blend each candidate's rerank score
-    /// with its RRF score (falling back to pure RRF when reranking didn't
-    /// run), build the final `SearchResult`s, then sort by score descending
-    /// and truncate to `limit`.
+    /// Step 7 of `hybrid_query_multi`: blend each section's rerank score
+    /// with its candidate's RRF score (falling back to pure RRF when reranking
+    /// didn't run), build the final `SearchResult`s, then sort by score
+    /// descending and truncate to `limit`.
     fn assemble_results(
         &self,
         candidate_docs: Vec<(RankedResult, String, String)>,
-        best_chunks: &[(String, usize)],
+        sections: Sections,
         rerank_scores: Option<Vec<f32>>,
         limit: usize,
     ) -> Vec<SearchResult> {
-        let mut final_results = Vec::new();
+        let mut picks = Vec::new();
+        let mut docs = Vec::with_capacity(candidate_docs.len());
+        let mut next_score = 0;
 
-        for (i, (cand, hash, body)) in candidate_docs.into_iter().enumerate() {
-            let (chunk_text, chunk_pos) = best_chunks[i].clone();
+        for (i, ((cand, hash, body), chunks)) in
+            candidate_docs.into_iter().zip(sections).enumerate()
+        {
             let rrf_score = cand.backend_score;
-            let score = if let Some(ref rscores) = rerank_scores {
-                let rs = rscores.get(i).copied().unwrap_or(rrf_score);
-                BLEND_HI * rs + BLEND_LO * rrf_score
-            } else {
-                rrf_score
-            };
-
-            let (collection_name, rel_path) = split_filepath(&cand.filepath);
-            let docid = docid_from_hash(&hash).to_string();
-            let ctx = get_context_for_path(&self.db, collection_name, rel_path)
-                .ok()
-                .flatten();
-
-            final_results.push(SearchResult {
-                file: format!("rqmd://{}", cand.filepath),
-                title: cand.title.clone(),
+            for (rank, chunk) in chunks.into_iter().enumerate() {
+                let score = if let Some(ref rscores) = rerank_scores {
+                    let rs = rscores.get(next_score).copied().unwrap_or(rrf_score);
+                    BLEND_HI * rs + BLEND_LO * rrf_score
+                } else {
+                    rrf_score
+                };
+                next_score += 1;
+                picks.push(Pick {
+                    filepath: cand.filepath.clone(),
+                    doc: i,
+                    rank,
+                    score,
+                    chunk,
+                });
+            }
+            docs.push(PickDoc {
+                title: cand.title,
+                hash,
                 body,
-                best_chunk: chunk_text,
-                best_chunk_pos: chunk_pos,
-                score,
-                docid,
-                collection: collection_name.to_string(),
-                path: rel_path.to_string(),
-                context: ctx,
             });
         }
 
-        final_results
-            .sort_by(|a, b| crate::rrf::score_desc_then_path(a.score, &a.file, b.score, &b.file));
-        final_results.truncate(limit);
-        final_results
+        rank_picks(&mut picks, limit);
+        self.picks_to_results(docs, picks)
+    }
+
+    /// Build a result for each pick, in order. A document's body is moved into
+    /// the last result that uses it and cloned for any earlier one.
+    fn picks_to_results(&self, docs: Vec<PickDoc>, picks: Vec<Pick>) -> Vec<SearchResult> {
+        let mut left: HashMap<usize, usize> = HashMap::new();
+        for pick in &picks {
+            *left.entry(pick.doc).or_default() += 1;
+        }
+        let mut docs: Vec<Option<PickDoc>> = docs.into_iter().map(Some).collect();
+        let mut results = Vec::with_capacity(picks.len());
+        for pick in picks {
+            let remaining = left.get_mut(&pick.doc).expect("counted above");
+            *remaining -= 1;
+            let slot = &mut docs[pick.doc];
+            let (title, hash, body) = match slot {
+                Some(doc) if *remaining > 0 => {
+                    (doc.title.clone(), doc.hash.clone(), doc.body.clone())
+                }
+                _ => {
+                    let doc = slot
+                        .take()
+                        .expect("a pick's document is present until its last pick");
+                    (doc.title, doc.hash, doc.body)
+                }
+            };
+            let (collection, path) = split_filepath(&pick.filepath);
+            results.push(SearchResult {
+                file: format!("rqmd://{}", pick.filepath),
+                title,
+                body,
+                best_chunk: pick.chunk.0,
+                best_chunk_pos: pick.chunk.1,
+                score: pick.score,
+                docid: docid_from_hash(&hash).to_string(),
+                collection: collection.to_string(),
+                path: path.to_string(),
+                context: get_context_for_path(&self.db, collection, path)
+                    .ok()
+                    .flatten(),
+            });
+        }
+        results
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1613,7 +1767,7 @@ impl Store {
     /// using the document's first chunk as the snippet (`best_chunk_pos` is
     /// always 0). Shared by the result-construction paths that don't need
     /// term-relevance chunk selection — only [`Self::hybrid_query_multi`]'s
-    /// rerank path needs a real chunk position, via the `best_chunk` helper.
+    /// rerank path needs a real chunk position, via the `best_chunks` helper.
     fn result_from_doc(
         &self,
         doc: &crate::types::Document,
@@ -1675,6 +1829,46 @@ impl Store {
             results.push(self.result_from_doc(&doc, body, score));
         }
         Ok(results)
+    }
+
+    /// [`Self::hits_to_results`] for `per_file` sections of each hit, chosen by
+    /// the words of `query`. Every hit scores each of its sections alike.
+    fn hits_to_sections(
+        &self,
+        hits: Vec<(String, i64, f32)>,
+        query: &str,
+        limit: usize,
+        per_file: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let terms = keyword_terms(query);
+        let mut docs = Vec::new();
+        let mut picks = Vec::new();
+        for (_filepath, doc_id, score) in hits.into_iter().take(limit) {
+            let Some(doc) = db::get_document_by_id(&self.db, doc_id)? else {
+                continue;
+            };
+            let body = db::get_document_raw(&self.db, doc.id)?.unwrap_or_default();
+            let filepath = format!("{}/{}", doc.collection, doc.path);
+            for (rank, chunk) in best_chunks(&filepath, &body, &terms, per_file)
+                .into_iter()
+                .enumerate()
+            {
+                picks.push(Pick {
+                    filepath: filepath.clone(),
+                    doc: docs.len(),
+                    rank,
+                    score,
+                    chunk,
+                });
+            }
+            docs.push(PickDoc {
+                title: doc.title,
+                hash: doc.hash,
+                body,
+            });
+        }
+        rank_picks(&mut picks, limit);
+        Ok(self.picks_to_results(docs, picks))
     }
 
     /// Vector search scoped to `collections`, widening the raw ANN pool until
@@ -1983,29 +2177,120 @@ fn mtime_of(path: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Pick the chunk with the most query-term overlap.
-/// Returns `(text, char_offset)` — chunks once and returns both to avoid
-/// duplicate work in the caller.
-fn best_chunk(filepath: &str, body: &str, query_terms: &[String]) -> (String, usize) {
+/// Up to `n` chunks of `body`, those with the most query-term overlap first.
+/// A tie between chunks goes to the later one. Only the first may contain no
+/// query term at all; every further one must contain a query term in text the
+/// chunks before it do not already show, so a word in the stretch two chunks
+/// share is one section. Chunks once and returns `(text, offset)` pairs, never
+/// an empty list.
+fn best_chunks(
+    filepath: &str,
+    body: &str,
+    query_terms: &[String],
+    n: usize,
+) -> Vec<(String, usize)> {
     let chunks = chunk_document_for_path(filepath, body);
     if chunks.is_empty() {
-        return (String::new(), 0);
+        return vec![(String::new(), 0)];
     }
     if query_terms.is_empty() {
         let c = chunks.into_iter().next().unwrap();
-        return (c.text, c.pos);
+        return vec![(c.text, c.pos)];
     }
-    let best = chunks
+    let mut scored: Vec<(usize, usize, Chunk)> = chunks
         .into_iter()
-        .max_by_key(|c| {
+        .enumerate()
+        .map(|(i, c)| {
             let lower = c.text.to_lowercase();
-            query_terms
+            let hits = query_terms
                 .iter()
                 .filter(|t| lower.contains(t.as_str()))
-                .count()
+                .count();
+            (hits, i, c)
         })
-        .unwrap();
-    (best.text, best.pos)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    let mut picked: Vec<Chunk> = Vec::new();
+    for (hits, _, chunk) in scored {
+        if picked.len() == n || (!picked.is_empty() && hits == 0) {
+            break;
+        }
+        let fresh = uncovered_text(&chunk, &picked).to_lowercase();
+        if picked.is_empty() || query_terms.iter().any(|t| fresh.contains(t.as_str())) {
+            picked.push(chunk);
+        }
+    }
+    picked.into_iter().map(|c| (c.text, c.pos)).collect()
+}
+
+/// The part of `chunk`'s text that no chunk in `taken` already covers. A chunk
+/// that starts inside another loses its head, one that ends inside another its
+/// tail; offsets that do not fall on a character boundary leave the text whole.
+fn uncovered_text<'a>(chunk: &'a Chunk, taken: &[Chunk]) -> &'a str {
+    let (mut from, mut to) = (0, chunk.text.len());
+    for other in taken {
+        let other_end = other.pos + other.text.len();
+        if other.pos <= chunk.pos && chunk.pos < other_end {
+            from = from.max((other_end - chunk.pos).min(chunk.text.len()));
+        } else if chunk.pos < other.pos && other.pos < chunk.pos + chunk.text.len() {
+            to = to.min(other.pos - chunk.pos);
+        }
+    }
+    chunk.text.get(from..to.max(from)).unwrap_or(&chunk.text)
+}
+
+/// The words of a keyword query that a section can contain: quotes stripped,
+/// negated words left out, lowercased, as [`best_chunks`] expects them.
+fn keyword_terms(query: &str) -> Vec<String> {
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .filter(|t| !t.starts_with('-'))
+        .map(|t| t.trim_matches('"'))
+        .filter(|t| t.len() > 2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The chunk that starts at `pos`, or the one starting nearest to it when the
+/// body no longer chunks the way it did when `pos` was stored.
+fn nearest_chunk(chunks: &[Chunk], pos: usize) -> (String, usize) {
+    chunks
+        .iter()
+        .min_by_key(|c| c.pos.abs_diff(pos))
+        .map_or((String::new(), 0), |c| (c.text.clone(), c.pos))
+}
+
+/// Each candidate's chunks as `(text, offset)` pairs, best first.
+type Sections = Vec<Vec<(String, usize)>>;
+
+/// One section chosen for a result, before the result is built.
+struct Pick {
+    /// `collection/path` of its document.
+    filepath: String,
+    /// Index of its document in the list handed to `picks_to_results`.
+    doc: usize,
+    /// 0 for the document's best section, then 1, 2, ... in order.
+    rank: usize,
+    score: f32,
+    chunk: (String, usize),
+}
+
+/// A document that picks refer to.
+struct PickDoc {
+    title: String,
+    hash: String,
+    body: String,
+}
+
+/// Order picks by score descending, then path, then the order within their
+/// document, and keep the first `limit`.
+fn rank_picks(picks: &mut Vec<Pick>, limit: usize) {
+    picks.sort_by(|a, b| {
+        crate::rrf::score_desc_then_path(a.score, &a.filepath, b.score, &b.filepath)
+            .then(a.rank.cmp(&b.rank))
+    });
+    picks.truncate(limit);
 }
 
 /// Current UTC time as an RFC-3339 string (`YYYY-MM-DDTHH:MM:SSZ`).
@@ -3688,9 +3973,10 @@ mod tests {
                     )
                 })
                 .collect();
-            let chunks: Vec<(String, usize)> = order.iter().map(|_| (String::new(), 0)).collect();
+            let chunks: Vec<Vec<(String, usize)>> =
+                order.iter().map(|_| vec![(String::new(), 0)]).collect();
             let got: Vec<String> = store
-                .assemble_results(candidates, &chunks, None, 10)
+                .assemble_results(candidates, chunks, None, 10)
                 .into_iter()
                 .map(|r| r.path)
                 .collect();

@@ -123,6 +123,15 @@
             "null"
           ]
         },
+        "per_file": {
+          "description": "Maximum sections of one file to return, best first (default: 1, maximum: 5). A file can then appear more\nthan once, each time with a different snippet; limit and offset count sections.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "query": {
           "description": "Search query. Supports plain text (auto-expanded via generation model),\n`expand: text`, or a multi-line typed document with `lex:`, `vec:`,\n`hyde:`, and optional `intent:` lines per the rqmd query syntax.",
           "type": "string"
@@ -178,6 +187,15 @@
         },
         "offset": {
           "description": "Number of ranked results to skip, to fetch the next page (default: 0).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "per_file": {
+          "description": "Maximum sections of one file to return, best first (default: 1, maximum: 5). A file can then appear more\nthan once, each time with a different snippet; limit and offset count sections.",
           "format": "uint",
           "minimum": 0,
           "type": [

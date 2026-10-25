@@ -129,6 +129,30 @@ pub enum QueryStage {
     Reranking { done: usize, total: usize },
 }
 
+/// Most sections of one file a search returns. Every extra section is one more
+/// reranker input, so the cap bounds what a single request can cost.
+pub const MAX_PER_FILE: usize = 5;
+
+/// Bring a requested sections-per-file count into `1..=MAX_PER_FILE`.
+pub fn clamp_per_file(per_file: usize) -> usize {
+    per_file.clamp(1, MAX_PER_FILE)
+}
+
+/// Options that shape which results a search returns, beyond its query,
+/// limit and collection scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchOptions {
+    /// Sections returned per file, clamped to `1..=MAX_PER_FILE` when used. The
+    /// default of 1 is one result per file.
+    pub per_file: usize,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self { per_file: 1 }
+    }
+}
+
 /// Results of a hybrid query plus how its rerank stage ended.
 #[derive(Debug, Clone)]
 pub struct QueryOutcome {
@@ -155,4 +179,24 @@ pub struct SearchResult {
     pub path: String,
     /// Collection-level context string (from `rqmd context add`), if set.
     pub context: Option<String>,
+}
+
+/// For each result, `Some((n, of))` when its file occurs `of` > 1 times in
+/// `results` and this is the `n`-th of them (1-based), else `None`. Output uses
+/// it to tell the sections of one file apart in words.
+pub fn section_numbers(results: &[SearchResult]) -> Vec<Option<(usize, usize)>> {
+    let mut totals: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for r in results {
+        *totals.entry(r.file.as_str()).or_default() += 1;
+    }
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    results
+        .iter()
+        .map(|r| {
+            let n = seen.entry(r.file.as_str()).or_default();
+            *n += 1;
+            let of = totals[r.file.as_str()];
+            (of > 1).then_some((*n, of))
+        })
+        .collect()
 }
