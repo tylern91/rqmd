@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- `rqmd update` and `rqmd embed` now stop at the next safe point on `SIGINT`, `SIGTERM` or `SIGHUP`
+  instead of being killed mid-write. `update` finishes the file in hand and saves what it has
+  indexed; `embed` finishes the document in hand and checkpoints its vectors. Both print a resume
+  hint and exit `130`, `143` or `129`, and a rerun continues from there. A second signal exits
+  immediately. See [docs/CLI.md](docs/CLI.md#interrupting-update-and-embed).
 - `rqmd collection add` and `rqmd update` now name the folders the built-in exclusions
   (`node_modules`, `vendor`, `dist`, `build`, `target`, `.cache`) left out, at the end of the summary
   line, for example `left out 2 folder(s) by the built-in rule (build/, node_modules/)`. Paths are
