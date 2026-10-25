@@ -52,6 +52,12 @@ An orphaned vector is a `content_vectors` row whose hash has no active
 document referencing it — left behind when a file is removed or renamed.
 It's unreachable in search, but still occupies disk until reclaimed.
 
+The vectors of a note you just edited are not orphaned yet: `rqmd update`
+keeps them until `rqmd embed` has copied the chunks that did not change, and
+`embed` removes them when it finishes. `doctor` does not count them, and
+`--cleanup` does not touch them. If the edited note cannot be embedded (the
+embed run fails or times out), they stay until a later `rqmd embed` succeeds.
+
 Run `rqmd embed --cleanup` to reclaim it: it sweeps orphaned vectors, deletes
 `content` rows referenced by no document, and `VACUUM`s the database — no
 model load, no re-embed, done in seconds regardless of corpus size.

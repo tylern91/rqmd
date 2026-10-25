@@ -273,7 +273,13 @@ fn checkpoint(
     for hash in pending_deletes.drain() {
         db::delete_vectors_for_hash(&tx, &hash).context("delete stale vectors for hash")?;
     }
+    let mut embedded_hashes: HashSet<String> = HashSet::new();
     for m in pending.drain(..) {
+        if embedded_hashes.insert(m.hash.clone()) {
+            // The new text has its own vectors now, so the version it replaced
+            // no longer needs to survive as a donor.
+            db::clear_prev_hash(&tx, &m.hash).context("clear superseded hash marker")?;
+        }
         db::upsert_vector_meta(
             &tx,
             &m.hash,
@@ -418,6 +424,7 @@ fn embed_docs(
         }
         let body = db::get_content(&s.db, &doc.hash)?.unwrap_or_default();
         if body.is_empty() {
+            db::clear_prev_hash(&s.db, &doc.hash)?;
             continue;
         }
         on_progress(done, bytes_processed, run.new_chunks + run.pending.len());
@@ -584,8 +591,19 @@ pub fn run_embed(
         }
     }
 
-    let mut s = store::open_store_with_backend(index_dir, false)?;
+    let s = store::open_store_with_backend(index_dir, false)?;
+    embed_collections(s, &cols, rebuild, timeout, &lock)
+}
 
+/// The embed pass over an already-open store: advisories, the per-collection
+/// loop, the final checkpoint and the summary.
+fn embed_collections(
+    mut s: rqmd_core::Store,
+    cols: &[Collection],
+    rebuild: bool,
+    timeout: Option<Duration>,
+    lock: &IndexLock,
+) -> Result<()> {
     // Stale-fingerprint advisory: --rebuild already cleared every vector row above,
     // so there is nothing to compare yet; only warn on the incremental path, where
     // a model/chunking change leaves existing vectors under the old fingerprint
@@ -628,7 +646,7 @@ pub fn run_embed(
     // widening the HNSW/DB gap on every run.  Deduping by hash here stops that at source.
     let mut seen_hashes: HashSet<String> = HashSet::new();
 
-    for col in &cols {
+    for col in cols {
         // Collect all docs for this collection.  We embed only those whose content
         // hash has no vector row at the current fingerprint (incremental / resumable;
         // also catches hashes whose only vectors are stale, so a chunker/model change
@@ -693,6 +711,9 @@ pub fn run_embed(
 
     // Final checkpoint for any remaining pending rows.
     checkpoint(&mut s, &mut run.pending, &mut run.pending_deletes)?;
+    // `rqmd update` spares the vectors of a version an edit replaced until the
+    // edit is embedded; the ones nothing needs any more are dropped here.
+    s.reclaim_orphaned_vectors()?;
 
     // Summary — matches qmd's "✓ Done!" line (qmd.ts:1938).
     let elapsed = fmt::format_eta(start.elapsed().as_secs_f64());
@@ -856,6 +877,8 @@ fn run_update_with(
     // — content is deduplicated globally by hash — so the sweep runs once,
     // globally, after every collection's deactivation pass has landed, rather
     // than per-collection against a partial view of which hashes are still active.
+    // A version an edit just replaced is spared until `rqmd embed` has copied
+    // its unchanged chunks (`documents.prev_hash`).
     s.reclaim_orphaned_vectors()?;
 
     // "needs embeddings" notice (qmd.ts:747–748) — printed once after all collections
@@ -2006,5 +2029,292 @@ mod tests {
                 .unwrap();
         }
         run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+    }
+
+    // ── Chunk-vector reuse across `update` → `embed` ─────────────────────────
+
+    type EncodedLog = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// Embeds deterministically from the text and records every text it is
+    /// asked to encode, under the model name the CLI itself would fingerprint.
+    struct CountingBackend {
+        model: String,
+        encoded: EncodedLog,
+    }
+
+    impl rqmd_llm::InferenceBackend for CountingBackend {
+        fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
+            use std::hash::{Hash, Hasher};
+            self.encoded.lock().unwrap().push(text.to_string());
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut h);
+            let seed = h.finish();
+            Ok((0..rqmd_llm::EMBED_DIM)
+                .map(|i| ((seed >> (i % 56)) & 0xff) as f32 / 255.0 + 0.01)
+                .collect())
+        }
+        fn rerank(&mut self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>> {
+            unreachable!()
+        }
+        fn generate(&mut self, _prompt: &str) -> Result<String> {
+            unreachable!()
+        }
+        fn embed_model_name(&self) -> &str {
+            &self.model
+        }
+        fn rerank_model_name(&self) -> &str {
+            "test-rerank"
+        }
+        fn generate_model_name(&self) -> &str {
+            "test-generate"
+        }
+    }
+
+    /// A note of `sections` sections, each long enough to fill its own chunk.
+    /// `edit` swaps one sentence of the last section for different text of the
+    /// same length, so every earlier chunk boundary stays where it was.
+    fn sectioned_note(sections: usize, edit: &str) -> String {
+        (0..sections)
+            .map(|n| {
+                let tail = if n + 1 == sections {
+                    edit
+                } else {
+                    "the original closing remark written"
+                };
+                let filler: String = (0..40)
+                    .map(|k| format!("Section {n} sentence {k} describes topic {n}-{k}. "))
+                    .collect();
+                format!("# Section {n}\n\n{filler}{tail}.\n\n")
+            })
+            .collect()
+    }
+
+    const ORIGINAL_TAIL: &str = "the original closing remark written";
+    const EDITED_TAIL: &str = "an entirely different closing remark";
+    const SECOND_EDIT_TAIL: &str = "yet another distinct closing remarks";
+
+    struct EmbedFixture {
+        index_dir: tempfile::TempDir,
+        src: tempfile::TempDir,
+        encoded: EncodedLog,
+    }
+
+    impl EmbedFixture {
+        fn new(first_body: &str) -> Self {
+            let fx = Self {
+                index_dir: tempfile::tempdir().unwrap(),
+                src: tempfile::tempdir().unwrap(),
+                encoded: EncodedLog::default(),
+            };
+            std::fs::write(fx.src.path().join("note.md"), first_body).unwrap();
+            {
+                let s = store::open_store_no_backend(fx.index_dir.path(), false).unwrap();
+                db::upsert_collection(&s.db, &test_collection("c", fx.src.path())).unwrap();
+            }
+            fx
+        }
+
+        fn write(&self, rel: &str, body: &str) {
+            std::fs::write(self.src.path().join(rel), body).unwrap();
+        }
+
+        fn update(&self) {
+            run_update_with(self.index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+        }
+
+        /// The embed pass `rqmd embed` runs, against the counting backend.
+        fn embed(&self) {
+            let _lock = IndexLock::acquire(self.index_dir.path()).unwrap();
+            let backend = CountingBackend {
+                model: rqmd_llm::BackendKind::from_env().default_embed_model_name(),
+                encoded: self.encoded.clone(),
+            };
+            let s = rqmd_core::Store::open(
+                store::store_config(self.index_dir.path(), false),
+                Box::new(backend),
+            )
+            .unwrap();
+            let cols = db::list_collections(&s.db).unwrap();
+            embed_collections(s, &cols, false, None, &_lock).unwrap();
+        }
+
+        fn take_encoded(&self) -> Vec<String> {
+            let mut got = std::mem::take(&mut *self.encoded.lock().unwrap());
+            got.sort();
+            got
+        }
+
+        fn store(&self) -> rqmd_core::Store {
+            store::open_store_no_backend(self.index_dir.path(), true).unwrap()
+        }
+    }
+
+    fn chunk_texts(path: &str, body: &str) -> HashSet<String> {
+        rqmd_core::chunking::chunk_document_for_path(path, body)
+            .into_iter()
+            .map(|c| c.text)
+            .collect()
+    }
+
+    fn changed_chunks(path: &str, before: &str, after: &str) -> Vec<String> {
+        let old = chunk_texts(path, before);
+        let mut changed: Vec<String> = chunk_texts(path, after)
+            .into_iter()
+            .filter(|t| !old.contains(t))
+            .collect();
+        changed.sort();
+        changed
+    }
+
+    /// Chunk texts are long, so a mismatch reports counts rather than the texts.
+    fn assert_encoded_exactly(got: &[String], want: &[String]) {
+        assert!(
+            got == want,
+            "only the edited chunks may be encoded: encoded {} chunk(s), expected {}",
+            got.len(),
+            want.len()
+        );
+    }
+
+    fn vector_rows(s: &rqmd_core::Store) -> i64 {
+        s.db.query_row("SELECT COUNT(*) FROM content_vectors", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn an_edit_after_update_encodes_only_the_changed_chunks() {
+        let before = sectioned_note(5, ORIGINAL_TAIL);
+        let after = sectioned_note(5, EDITED_TAIL);
+        let fx = EmbedFixture::new(&before);
+        fx.update();
+        fx.embed();
+        let first = fx.take_encoded();
+        assert!(first.len() >= 3, "fixture must span several chunks");
+
+        fx.write("note.md", &after);
+        fx.update();
+        fx.embed();
+
+        let changed = changed_chunks("note.md", &before, &after);
+        assert!(!changed.is_empty() && changed.len() < first.len());
+        assert_encoded_exactly(&fx.take_encoded(), &changed);
+    }
+
+    #[test]
+    fn the_superseded_vectors_are_swept_once_the_edit_is_embedded() {
+        let fx = EmbedFixture::new(&sectioned_note(4, ORIGINAL_TAIL));
+        fx.update();
+        fx.embed();
+        let old_hash = db::list_documents(&fx.store().db, Some("c")).unwrap()[0]
+            .hash
+            .clone();
+
+        fx.write("note.md", &sectioned_note(4, EDITED_TAIL));
+        fx.update();
+        fx.embed();
+
+        let s = fx.store();
+        assert!(!db::hash_has_any_vector(&s.db, &old_hash));
+        assert_eq!(db::count_orphaned_vectors(&s.db).unwrap(), 0);
+        let docs = db::list_documents(&s.db, Some("c")).unwrap();
+        let rows = vector_rows(&s);
+        assert_eq!(
+            rows,
+            db::vids_for_hash(&s.db, &docs[0].hash).unwrap().len() as i64,
+            "only the edited document's own vectors remain"
+        );
+        assert_eq!(
+            s.hnsw_size() as i64,
+            rows,
+            "no vector is left behind in the index"
+        );
+    }
+
+    #[test]
+    fn update_keeps_the_superseded_vectors_and_doctor_counts_no_orphans() {
+        let fx = EmbedFixture::new(&sectioned_note(4, ORIGINAL_TAIL));
+        fx.update();
+        fx.embed();
+        let rows_before = vector_rows(&fx.store());
+
+        fx.write("note.md", &sectioned_note(4, EDITED_TAIL));
+        fx.update();
+
+        let s = fx.store();
+        assert_eq!(
+            vector_rows(&s),
+            rows_before,
+            "update must not sweep the donor vectors"
+        );
+        assert_eq!(db::count_orphaned_vectors(&s.db).unwrap(), 0);
+        assert!(db::orphaned_vector_hashes(&s.db).unwrap().is_empty());
+    }
+
+    #[test]
+    fn two_edits_before_an_embed_still_reuse_the_embedded_chunks() {
+        let original = sectioned_note(5, ORIGINAL_TAIL);
+        let second = sectioned_note(5, SECOND_EDIT_TAIL);
+        let fx = EmbedFixture::new(&original);
+        fx.update();
+        fx.embed();
+        fx.take_encoded();
+
+        fx.write("note.md", &sectioned_note(5, EDITED_TAIL));
+        fx.update();
+        fx.write("note.md", &second);
+        fx.update();
+        fx.embed();
+
+        assert_encoded_exactly(
+            &fx.take_encoded(),
+            &changed_chunks("note.md", &original, &second),
+        );
+        assert_eq!(db::count_orphaned_vectors(&fx.store().db).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_removed_document_is_still_swept_by_update() {
+        let fx = EmbedFixture::new(&sectioned_note(3, ORIGINAL_TAIL));
+        fx.write("other.md", "# Other\n\nanother small note body");
+        fx.update();
+        fx.embed();
+        let removed_hash =
+            db::hashes_for_paths(&fx.store().db, "c", &["note.md".to_string()]).unwrap()[0].clone();
+
+        // A new, not yet embedded note sits beside the removal: it has no
+        // vectors and no `prev_hash`, which must not hide the orphan.
+        fx.write("fresh.md", "# Fresh\n\na note nothing has embedded yet");
+        std::fs::remove_file(fx.src.path().join("note.md")).unwrap();
+        fx.update();
+
+        assert!(!db::hash_has_any_vector(&fx.store().db, &removed_hash));
+    }
+
+    #[test]
+    fn an_edit_to_text_already_embedded_elsewhere_leaves_nothing_spared() {
+        let shared = "# Shared\n\nshared body that another note already carries";
+        let fx = EmbedFixture::new(&sectioned_note(3, ORIGINAL_TAIL));
+        fx.write("twin.md", shared);
+        fx.update();
+        fx.embed();
+        let old_hash =
+            db::hashes_for_paths(&fx.store().db, "c", &["note.md".to_string()]).unwrap()[0].clone();
+
+        fx.write("note.md", shared);
+        fx.update();
+
+        let s = fx.store();
+        assert!(
+            !db::hash_has_any_vector(&s.db, &old_hash),
+            "the old hash has no pending successor to donate to"
+        );
+        let spared: i64 =
+            s.db.query_row(
+                "SELECT COUNT(*) FROM documents WHERE prev_hash IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(spared, 0);
     }
 }

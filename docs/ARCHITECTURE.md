@@ -12,7 +12,11 @@ only touches BM25 and bookkeeping, so it stays usable without a model loaded.
 
 **Embedding** (`rqmd embed`): documents that don't have vectors yet (or, with
 `--rebuild`, every document) are split into chunks, each chunk is embedded,
-and the resulting vectors are added to the HNSW index. `rqmd doctor` can
+and the resulting vectors are added to the HNSW index. A chunk whose text is
+unchanged since an edit reuses the stored vector: `rqmd update` records the
+replaced hash in `documents.prev_hash` and spares its vectors from the orphan
+sweep until `rqmd embed` has embedded the new text, then `embed` sweeps them.
+`rqmd doctor` can
 detect when the chunking parameters or embed model have changed since the
 last embed run by comparing a stored fingerprint (below) against the current
 configuration — that staleness is what `--rebuild` remedies. `--cleanup` is
