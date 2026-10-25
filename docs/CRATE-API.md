@@ -45,8 +45,11 @@ with `SearchOptions { per_file }`. `per_file` is clamped to `1..=MAX_PER_FILE`
 results are repeats of one file. The methods above are the `per_file = 1` case.
 
 `SearchOptions { recency: Some(Recency::new(parse_half_life("30d")?)), .. }`
-weights `hybrid_query_outcome_with` results by file age (`Recency::with_floor`
-changes the 0.5 floor); the other `_with` methods ignore it.
+weights `hybrid_query_outcome_with`, `search_fts_multi_with` and
+`search_vec_multi_with` results by file age (`Recency::with_floor` changes the
+0.5 floor). The two single-signal searches gather the best 4 x `limit` files (at
+most 200, never fewer than `limit`) before weighting, so a recent file just below
+the plain cut can surface.
 
 This example is kept honest by an identical `no_run` doctest on `Store` itself
 (`crates/rqmd-core/src/store.rs`), compiled by `cargo test --doc` — a future

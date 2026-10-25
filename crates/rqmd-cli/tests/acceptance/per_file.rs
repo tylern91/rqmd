@@ -14,7 +14,7 @@ use super::helpers::{Fixture, fixture_collection, refute_vacuous_output, rqmd};
 /// middle of each chunk listed in `needle_chunks`, clear of the overlap it
 /// shares with its neighbours. `tag` makes the body unique to
 /// its document.
-fn sectioned_note(tag: &str, chunks: usize, needle_chunks: &[usize]) -> String {
+pub(super) fn sectioned_note(tag: &str, chunks: usize, needle_chunks: &[usize]) -> String {
     let mut text: String = (0..)
         .map(|i| format!("Sentence {i} of {tag} says nothing in particular.\n"))
         .scan(0, |len, line| {

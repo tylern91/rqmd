@@ -886,7 +886,9 @@ impl Store {
     /// [`Self::search_fts_multi`] with `options`. With `per_file` above 1 a file
     /// can yield several results, each a different section holding the query's
     /// words; `limit` then counts sections. The default of 1 is one result per
-    /// file showing the file's opening chunk, as before.
+    /// file showing the file's opening chunk, as before. With `recency` the
+    /// best [`recency_pool`] files are weighted by age before the first `limit`
+    /// are kept.
     pub fn search_fts_multi_with(
         &self,
         query: &str,
@@ -899,7 +901,14 @@ impl Store {
             // No collection is default-included and none was requested explicitly.
             return Ok(vec![]);
         }
-        let hits = self.fts_scoped(query, limit, effective.as_deref())?;
+        let hits = match &options.recency {
+            None => self.fts_scoped(query, limit, effective.as_deref())?,
+            Some(recency) => {
+                let mut hits = self.fts_scoped(query, recency_pool(limit), effective.as_deref())?;
+                self.weight_hits(recency, &mut hits)?;
+                hits
+            }
+        };
         match clamp_per_file(options.per_file) {
             1 => self.hits_to_results(hits, limit),
             per_file => self.hits_to_sections(hits, query, limit, per_file),
@@ -936,7 +945,8 @@ impl Store {
     /// [`Self::search_vec_multi`] with `options`. Each result shows the chunk
     /// whose vector matched. With `per_file` above 1 a file can yield several
     /// results, one per matching chunk, best match first; `limit` then counts
-    /// sections.
+    /// sections. With `recency` the best [`recency_pool`] files are weighted by
+    /// age before the first `limit` are kept.
     pub fn search_vec_multi_with(
         &mut self,
         query: &str,
@@ -949,6 +959,12 @@ impl Store {
         if matches!(effective, Some(ref cols) if cols.is_empty()) {
             return Ok(vec![]);
         }
+        // Files to gather before the cut: weighting by age can lift a file
+        // that similarity alone ranks below `limit`.
+        let wanted = match options.recency {
+            Some(_) => recency_pool(limit),
+            None => limit,
+        };
 
         let embedding = self.backend.embed_query(query).context("embed query")?;
         let total_vectors = self.hnsw.size();
@@ -987,18 +1003,23 @@ impl Store {
                     .push((sim, pos));
             }
 
-            if by_doc.len() >= limit || k >= total_vectors {
+            if by_doc.len() >= wanted || k >= total_vectors {
                 break;
             }
             k = (k * 2).min(total_vectors);
         }
 
+        let now = SystemTime::now();
         // A multi-chunk document appears once per requested section, not once
         // per chunk: keep its best-matching chunks only.
         let mut ids = Vec::with_capacity(by_doc.len());
         let mut docs = Vec::with_capacity(by_doc.len());
         let mut picks = Vec::new();
         for (filepath, (doc, mut hits)) in by_doc {
+            let factor = match &options.recency {
+                Some(recency) => Some(self.recency_factor(recency, now, &filepath)?),
+                None => None,
+            };
             hits.sort_by(|a, b| {
                 b.0.partial_cmp(&a.0)
                     .unwrap_or(std::cmp::Ordering::Equal)
@@ -1011,7 +1032,7 @@ impl Store {
                     filepath: filepath.clone(),
                     doc: docs.len(),
                     rank,
-                    score: sim,
+                    score: factor.map_or(sim, |factor| sim * factor),
                     chunk: (String::new(), pos),
                 });
             }
@@ -1658,8 +1679,7 @@ impl Store {
         Ok(Some(scores))
     }
 
-    /// The recency factor of each candidate, in order. A file with no recorded
-    /// mtime, or one dated in the future, counts as just modified.
+    /// The recency factor of each candidate, in order.
     fn recency_factors(
         &self,
         recency: &Recency,
@@ -1668,17 +1688,33 @@ impl Store {
         let now = SystemTime::now();
         candidate_docs
             .iter()
-            .map(|(cand, _, _)| {
-                let (collection, path) = split_filepath(&cand.filepath);
-                let mtime = db::document_mtime_ns(&self.db, collection, path)?
-                    .and_then(|ns| u64::try_from(ns).ok())
-                    .map(|ns| UNIX_EPOCH + Duration::from_nanos(ns));
-                let age = mtime
-                    .and_then(|at| now.duration_since(at).ok())
-                    .unwrap_or_default();
-                Ok(recency.factor(age))
-            })
+            .map(|(cand, _, _)| self.recency_factor(recency, now, &cand.filepath))
             .collect()
+    }
+
+    /// The factor the file `filepath` (`collection/path`) multiplies its score
+    /// by at `now`. A file with no recorded mtime, or one dated in the future,
+    /// counts as just modified.
+    fn recency_factor(&self, recency: &Recency, now: SystemTime, filepath: &str) -> Result<f32> {
+        let (collection, path) = split_filepath(filepath);
+        let mtime = db::document_mtime_ns(&self.db, collection, path)?
+            .and_then(|ns| u64::try_from(ns).ok())
+            .map(|ns| UNIX_EPOCH + Duration::from_nanos(ns));
+        let age = mtime
+            .and_then(|at| now.duration_since(at).ok())
+            .unwrap_or_default();
+        Ok(recency.factor(age))
+    }
+
+    /// Scale each keyword hit's score by its file's recency factor, then order
+    /// the hits by score descending and path.
+    fn weight_hits(&self, recency: &Recency, hits: &mut [(String, i64, f32)]) -> Result<()> {
+        let now = SystemTime::now();
+        for hit in hits.iter_mut() {
+            hit.2 *= self.recency_factor(recency, now, &hit.0)?;
+        }
+        hits.sort_by(|a, b| crate::rrf::score_desc_then_path(a.2, &a.0, b.2, &b.0));
+        Ok(())
     }
 
     /// Step 7 of `hybrid_query_multi`: blend each section's rerank score
@@ -2293,6 +2329,23 @@ struct PickDoc {
     title: String,
     hash: String,
     body: String,
+}
+
+/// Files gathered per result wanted when `search` or `vsearch` weights by age.
+const RECENCY_POOL_FACTOR: usize = 4;
+
+/// Most files gathered for weighting, however many results are wanted.
+const RECENCY_POOL_CAP: usize = 200;
+
+/// How many of the best-matching files a recency-weighted `search` or
+/// `vsearch` considers before keeping `limit` of them: `RECENCY_POOL_FACTOR`
+/// times `limit`, at most `RECENCY_POOL_CAP`, and never fewer than `limit`.
+fn recency_pool(limit: usize) -> usize {
+    limit.max(
+        limit
+            .saturating_mul(RECENCY_POOL_FACTOR)
+            .min(RECENCY_POOL_CAP),
+    )
 }
 
 /// Order picks by score descending, then path, then the order within their
@@ -3994,6 +4047,20 @@ mod tests {
                 .collect();
             assert_eq!(got, ["a.md", "c.md", "m.md", "x.md"], "order {order:?}");
         }
+    }
+
+    /// The pool is four times the limit, capped at 200, never below the limit
+    /// and never overflowing.
+    #[test]
+    fn recency_pool_is_four_times_the_limit_capped_and_never_below_it() {
+        assert_eq!(recency_pool(0), 0);
+        assert_eq!(recency_pool(1), 4);
+        assert_eq!(recency_pool(10), 40);
+        assert_eq!(recency_pool(50), 200);
+        assert_eq!(recency_pool(51), 200);
+        assert_eq!(recency_pool(200), 200);
+        assert_eq!(recency_pool(201), 201);
+        assert_eq!(recency_pool(usize::MAX), usize::MAX);
     }
 
     /// Candidates whose recency factors are equal keep the path order; a

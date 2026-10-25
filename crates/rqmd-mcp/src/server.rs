@@ -366,6 +366,11 @@ pub struct SearchInput {
     /// Maximum sections of one file to return, best first (default: 1, maximum: 5). A file can then appear more
     /// than once, each time with a different snippet; limit and offset count sections.
     pub per_file: Option<usize>,
+    /// Rank newer files higher: a half-life such as "30d", "2w" or "12h" (whole number, at
+    /// most 3650d). A file's score is multiplied by a factor that falls with the age of the
+    /// file (its mtime), halving the excess over 50% every half-life. Older files are never
+    /// dropped. Omit for no age weighting.
+    pub recency: Option<String>,
     /// Set to true to bring the full-text index up to date with the collection files before
     /// searching: the same incremental pass as `rqmd update`, for the requested collections (all
     /// when none are given), bounded by the tool timeout. It never runs a collection's update
@@ -503,6 +508,7 @@ impl RqmdServer {
         let limit = clamp_limit(p.limit, 10);
         let offset = clamp_offset(p.offset);
         let cols = p.collections.as_deref();
+        let recency = recency_of(p.recency.as_deref())?;
         let refresh_note = self.refresh_note(p.refresh, cols);
         let store = self
             .fts()
@@ -512,14 +518,19 @@ impl RqmdServer {
                 &p.query,
                 fetch_len(offset, limit),
                 cols,
-                &search_options(p.per_file),
+                &SearchOptions {
+                    recency,
+                    ..search_options(p.per_file)
+                },
             )
             .map_err(|e| format!("Error running search: {e:#}"))?;
         let (page, has_more) = page_of(results, offset, limit);
-        Ok(with_refresh_note(
-            format_results(&page, &p.query, offset, has_more),
-            refresh_note,
-        ))
+        let text = format_results(&page, &p.query, offset, has_more);
+        let text = match recency {
+            Some(recency) => format!("{}\nNote: {}\n", text.trim_end(), recency.notice()),
+            None => text,
+        };
+        Ok(with_refresh_note(text, refresh_note))
     }
 
     fn get_blocking(&self, p: GetInput) -> Result<String, String> {
@@ -1017,6 +1028,7 @@ mod tests {
             limit: Some(50),
             offset: None,
             per_file,
+            recency: None,
             refresh: None,
         }
     }
@@ -1645,6 +1657,7 @@ mod tests {
                 "offset",
                 "per_file",
                 "query",
+                "recency",
                 "refresh",
             ],
             &["query"],
@@ -1733,6 +1746,7 @@ mod tests {
             limit: None,
             offset: None,
             per_file: None,
+            recency: None,
             refresh,
         }
     }
@@ -1829,6 +1843,72 @@ mod tests {
         assert!(text.contains("Note: refresh is not enabled"), "{text}");
     }
 
+    /// Index `col/<path>` with `body`, last modified `age_days` ago.
+    fn index_aged(server: &RqmdServer, path: &str, body: &str, age_days: u64) {
+        let mut store = server.fts().expect("fts store");
+        store
+            .index_document_fts_only("col", path, path, body)
+            .expect("index doc");
+        let at = std::time::SystemTime::now() - Duration::from_secs(age_days * 86_400);
+        let ns = at
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after epoch")
+            .as_nanos();
+        rqmd_core::db::set_document_stat(&store.db, "col", path, Some((1, ns as i64)))
+            .expect("stamp");
+        store.flush().expect("commit");
+    }
+
+    #[test]
+    fn search_with_a_bad_recency_errors_before_refreshing_or_opening_the_index() {
+        let (_dir, server) = pool_server(1);
+        let (refresher, calls) = recording_refresher(Ok(RefreshOutcome::Locked));
+        let server = server.with_refresher(refresher);
+        let held = server.fts().expect("only handle");
+
+        // The only handle is busy: a search that reached it would wait.
+        let err = server
+            .search_blocking(SearchInput {
+                recency: Some("soon".to_string()),
+                refresh: Some(true),
+                ..hello_search(None)
+            })
+            .unwrap_err();
+        drop(held);
+
+        assert!(err.starts_with("Error: invalid half-life"), "{err}");
+        assert!(err.contains("30d, 2w or 12h"), "{err}");
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "no pass for a bad request"
+        );
+    }
+
+    #[test]
+    fn search_with_recency_lists_the_newer_file_first_and_says_so_once() {
+        for (a_days, b_days, first) in [(400, 2, "b.md"), (2, 400, "a.md")] {
+            let (_dir, server) = pool_server(1);
+            index_aged(&server, "a.md", "hello again one", a_days);
+            index_aged(&server, "b.md", "hello again two", b_days);
+            let ask = |recency: Option<&str>| SearchInput {
+                query: "again".to_string(),
+                recency: recency.map(str::to_string),
+                ..hello_search(None)
+            };
+
+            let weighted = server.search_blocking(ask(Some("30d"))).unwrap();
+            let plain = server.search_blocking(ask(None)).unwrap();
+
+            let at = |out: &str, file: &str| out.find(file).unwrap_or(usize::MAX);
+            let other = if first == "a.md" { "b.md" } else { "a.md" };
+            assert!(at(&weighted, first) < at(&weighted, other), "{weighted}");
+            let notes = |out: &str| out.matches("weighted by file age").count();
+            assert_eq!(notes(&weighted), 1, "{weighted}");
+            assert!(weighted.contains("half-life 30d"), "{weighted}");
+            assert_eq!(notes(&plain), 0, "{plain}");
+        }
+    }
+
     #[test]
     fn query_refreshes_after_validating_its_input() {
         let (_dir, server) = server_with_slow_embed_store(Duration::from_secs(30));
@@ -1874,6 +1954,7 @@ mod tests {
                     limit: None,
                     offset: None,
                     per_file: None,
+                    recency: None,
                     refresh: None,
                 }))
                 .await

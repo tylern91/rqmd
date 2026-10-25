@@ -169,6 +169,7 @@ Exact input fields per tool, as accepted by the JSON-RPC tool call
 | | `limit` | `number`, optional | Default 10 |
 | | `offset` | `number`, optional | Results to skip, for the next page. Default 0, capped at 1000 |
 | | `per_file` | `number`, optional | Sections of one file to return, best first. Default 1, capped at 5 (see below) |
+| | `recency` | `string`, optional | Half-life such as `30d`, `2w` or `12h`: rank newer files higher (see below). Default: off |
 | | `refresh` | `boolean`, optional | `true`: bring the full-text index up to date with the files before searching (see [Refreshing before a search](#refreshing-before-a-search)). Default `false` |
 | `get` | `file` | `string` (required) | Path or `#docid` |
 | | `from_line` | `number`, optional | Start line for partial retrieval |
@@ -196,14 +197,18 @@ hold fewer files. Omitted, it is 1: one result per file, as before. Sections
 are chosen as for the CLI's `--per-file`; see
 [Sections per file](CLI.md#sections-per-file).
 
-`recency` makes `query` multiply each result's score by a factor of its file's
-modification time that falls from 1 toward 0.5, with the part above 0.5 halving
-every half-life. Files are only down-weighted, never removed. The value is a whole
-number of days, weeks or hours, above zero and at most `3650d`; anything else
-returns an error that names the accepted form, before any model loads. Omitted,
-results are exactly as before. A response ends with a `Note:` line saying the
-results are weighted by file age. Details and caveats (files without a recorded
-mtime count as new): [Recency](CLI.md#recency).
+`recency` makes `query` and `search` multiply each result's score by a factor
+of its file's modification time that falls from 1 toward 0.5, with the part
+above 0.5 halving every half-life. Files are only down-weighted, never removed.
+The value is a whole number of days, weeks or hours, above zero and at most
+`3650d`; anything else returns an error that names the accepted form, before
+any model loads. Omitted, results are exactly as before. A response ends with a
+`Note:` line saying the results are weighted by file age. `search` first
+gathers the best 4 x (`offset + limit` + 1) files, at most 200, weights them
+and then cuts the page, so a recent file just below the plain cut can appear;
+as that pool grows with the page requested, a result near a page boundary can
+shift by a position, as for `query`. Details and caveats (files without a
+recorded mtime count as new): [Recency](CLI.md#recency).
 
 `get` and `multi_get` also cap each document body at 256 KiB, and `multi_get`
 caps the whole response at 4 MiB. A response cut short by a cap ends with a
