@@ -34,6 +34,12 @@
   pass runs, waits with a growing delay while another process holds it, stays paused while the
   full-text index needs its rebuild, and stops on `SIGINT` or `SIGTERM` (exit `130` or `143`). See
   [docs/CLI.md](docs/CLI.md#watching-for-changes).
+- `rqmd query` now shows its stage on stderr while it works: `Searching keywords`, `Loading model /
+  embedding query`, `Loading model / expanding query`, and `Reranking 4/N` with a live count. On a
+  terminal the line repaints in place; under `TERM=dumb` each stage is a plain line. When stderr is not
+  a terminal nothing is printed and the reranker is called once for all candidates as before, so
+  stdout and piped output are unchanged. Ranking and scores are the same either way. See
+  [docs/CLI.md](docs/CLI.md#colour-and-progress-output).
 
 ### Changed
 - `rqmd update` no longer walks into the folders the built-in exclusions leave out, nor into hidden
@@ -83,6 +89,9 @@
   (`ast-typescript`, `ast-go`, and so on), and a build can enable a single one.
 
 ### Fixed
+- The `--timeout` documentation said loading models is not charged against the deadline. The
+  models are downloaded before the clock starts, but each is loaded into memory inside the stage
+  that first needs it, so that load counts. The code comment in `rqmd query` said the same.
 - Output is plain text when it is not a terminal. Before, `status`, `update`, `embed`, `doctor` and
   the index warnings wrote ANSI escapes into piped and redirected output. One gate now decides every
   escape, per stream, so stdout and stderr are checked separately. `NO_COLOR` turns colour off on a

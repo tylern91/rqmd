@@ -114,6 +114,21 @@ impl RerankStatus {
     }
 }
 
+/// A stage of a hybrid query, reported to the observer set with
+/// `Store::set_query_observer` as the query reaches it. A stage that needs a
+/// model includes loading it when the model is not resident yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryStage {
+    /// Keyword search: the first probe, or a `lex:` sub-query.
+    Searching,
+    /// Embedding query text for vector search.
+    Embedding,
+    /// Generating query expansions and searching with them.
+    Expanding,
+    /// Reranking: `done` of `total` candidates are scored.
+    Reranking { done: usize, total: usize },
+}
+
 /// Results of a hybrid query plus how its rerank stage ended.
 #[derive(Debug, Clone)]
 pub struct QueryOutcome {
