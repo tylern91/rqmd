@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-10-25
+
 ### Added
 - Source files in Go (`.go`), Rust (`.rs`), C# (`.cs`), Kotlin (`.kt`, `.kts`), Swift (`.swift`),
   HCL (`.tf`, `.tfvars`, `.hcl`) and SQL (`.sql`) are now chunked at declaration boundaries, like
