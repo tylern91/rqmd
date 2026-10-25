@@ -13,16 +13,36 @@ publish = false
 workspace = true
 
 [features]
-# AST-aware chunking for source code (function/method/class boundaries) via
-# tree-sitter. Off by default: adds five grammar dependencies and increases
-# build time for a capability only source-code collections need.
+# AST-aware chunking for source code (declaration boundaries) via tree-sitter.
+# Off by default: each grammar adds a dependency and build time for a
+# capability only source-code collections need. `ast-chunking` turns on every
+# language; one `ast-<language>` feature adds a single grammar.
 ast-chunking = [
-    "dep:tree-sitter",
-    "dep:tree-sitter-typescript",
-    "dep:tree-sitter-javascript",
-    "dep:tree-sitter-java",
-    "dep:tree-sitter-python",
+    "ast-typescript",
+    "ast-javascript",
+    "ast-java",
+    "ast-python",
+    "ast-go",
+    "ast-rust",
+    "ast-csharp",
+    "ast-kotlin",
+    "ast-swift",
+    "ast-hcl",
+    "ast-sql",
 ]
+# The parser runtime and registry every language feature builds on.
+ast-registry = ["dep:tree-sitter"]
+ast-typescript = ["ast-registry", "dep:tree-sitter-typescript"]
+ast-javascript = ["ast-registry", "dep:tree-sitter-javascript"]
+ast-java = ["ast-registry", "dep:tree-sitter-java"]
+ast-python = ["ast-registry", "dep:tree-sitter-python"]
+ast-go = ["ast-registry", "dep:tree-sitter-go"]
+ast-rust = ["ast-registry", "dep:tree-sitter-rust"]
+ast-csharp = ["ast-registry", "dep:tree-sitter-c-sharp"]
+ast-kotlin = ["ast-registry", "dep:tree-sitter-kotlin-ng"]
+ast-swift = ["ast-registry", "dep:tree-sitter-swift"]
+ast-hcl = ["ast-registry", "dep:tree-sitter-hcl"]
+ast-sql = ["ast-registry", "dep:tree-sitter-sequel"]
 
 [dependencies]
 anyhow = "1"
@@ -43,6 +63,14 @@ tree-sitter-typescript = { version = "0.23", optional = true }
 tree-sitter-javascript = { version = "0.25", optional = true }
 tree-sitter-java = { version = "0.23", optional = true }
 tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-go = { version = "0.25", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-c-sharp = { version = "0.23", optional = true }
+tree-sitter-kotlin-ng = { version = "1.1", optional = true }
+# Pinned: 0.7.4 is younger than the 30-day dependency soak.
+tree-sitter-swift = { version = "=0.7.3", optional = true }
+tree-sitter-hcl = { version = "1.1", optional = true }
+tree-sitter-sequel = { version = "0.3", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

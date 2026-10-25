@@ -1,4 +1,4 @@
-#[cfg(feature = "ast-chunking")]
+#[cfg(feature = "ast-registry")]
 mod ast_chunk;
 pub mod chunking;
 mod cjk_tokenizer;

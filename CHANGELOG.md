@@ -18,6 +18,15 @@
 - The MCP `status` tool now reports `Pending embed: N`, the number of documents that have no
   current embedding, so a client can tell when semantic results lag behind the BM25 index. The
   count is for the backend the server runs with and is labelled with it.
+- Source files in Go (`.go`), Rust (`.rs`), C# (`.cs`), Kotlin (`.kt`, `.kts`), Swift (`.swift`),
+  HCL (`.tf`, `.tfvars`, `.hcl`) and SQL (`.sql`) are now chunked at declaration boundaries, like
+  TypeScript, JavaScript, Java and Python already were. HCL chunks at top-level blocks and SQL at
+  statements. The comments above a declaration, and Rust attributes, stay with it. Languages live in
+  one registry, so another is one table entry and one `ast-<language>` cargo feature. See
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#ast-chunking-source-code).
+- `rqmd status` now lists, after `Without:`, the indexed file extensions that have no grammar, with
+  their document counts. Prose (`.md`, `.markdown`, `.mdx`, `.txt`) is not listed, and nothing is
+  printed when every indexed file is covered.
 
 ### Changed
 - `rqmd update` no longer walks into the folders the built-in exclusions leave out, nor into hidden
@@ -59,6 +68,12 @@
   from stored metadata only. No re-embed is needed and the embedding fingerprint is unchanged. A
   vector written before `chunk_hash` existed has no key and is filled in when its document is
   next embedded.
+- The first `rqmd embed` after upgrading re-embeds the files of the newly supported languages once,
+  because their chunks and embedding fingerprint change. A file of up to 3,600 bytes reuses its
+  stored vector instead of being encoded again. Files in languages that were already chunked keep
+  their fingerprint byte for byte and are not re-embedded. Nothing else in the index changes and no
+  rebuild is needed. The Cargo feature `ast-chunking` now turns on one feature per language
+  (`ast-typescript`, `ast-go`, and so on), and a build can enable a single one.
 
 ### Fixed
 - Output is plain text when it is not a terminal. Before, `status`, `update`, `embed`, `doctor` and
@@ -107,6 +122,10 @@
   scope is now the exact set of the collection's active documents, applied before the result
   cut, so the result is as full as the collection allows. Scores, ranking and the index format
   are unchanged.
+- `rqmd status`, `rqmd doctor` and `rqmd embed` no longer treat a file whose extension is written in
+  capitals, such as `.PY`, as needing a vector it can never get. They matched the extension without
+  regard to case, while the chunker, which decides the fingerprint, matches it exactly, so such a
+  file stayed pending after it was embedded.
 
 ## [0.29.0] - 2026-10-25
 

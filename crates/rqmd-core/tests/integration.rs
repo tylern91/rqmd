@@ -8,8 +8,8 @@ use rqmd_core::{
         collection_context_key, content_hash, count_docs_needing_embed, count_orphaned_vectors,
         deactivate_missing_documents, docid_from_hash, find_documents_by_needles,
         fingerprint_breakdown_active, get_config, get_context_for_path,
-        get_document_by_docid_prefix, get_document_by_filepath, list_documents, open_db,
-        purge_collection, set_config, upsert_content, upsert_document, upsert_vector_meta,
+        get_document_by_docid_prefix, get_document_by_filepath, hash_needs_embed, list_documents,
+        open_db, purge_collection, set_config, upsert_content, upsert_document, upsert_vector_meta,
     },
     resolve::resolve_multi_get,
     rrf::{reciprocal_rank_fusion, rrf_weights},
@@ -1641,6 +1641,11 @@ fn fingerprint_breakdown_active_still_reports_stale_active_document() {
     assert_eq!(breakdown, vec![("stale-fp".to_string(), 1)]);
 }
 
+/// Every AST fingerprint the test build produces for the `fake` model.
+fn ast_fps() -> Vec<rqmd_core::db::AstFingerprint> {
+    rqmd_core::store::expected_embed_ast_fingerprints("fake")
+}
+
 #[test]
 fn count_docs_needing_embed_counts_stale_fingerprint_as_pending() {
     let dir = TempDir::new().unwrap();
@@ -1662,7 +1667,7 @@ fn count_docs_needing_embed_counts_stale_fingerprint_as_pending() {
 
     // No vectors at all yet — pending.
     assert_eq!(
-        count_docs_needing_embed(&store.db, &current, &current).unwrap(),
+        count_docs_needing_embed(&store.db, &current, &ast_fps()).unwrap(),
         1
     );
 
@@ -1680,7 +1685,7 @@ fn count_docs_needing_embed_counts_stale_fingerprint_as_pending() {
     )
     .unwrap();
     assert_eq!(
-        count_docs_needing_embed(&store.db, &current, &current).unwrap(),
+        count_docs_needing_embed(&store.db, &current, &ast_fps()).unwrap(),
         1,
         "a hash whose only vectors are stale must still count as pending"
     );
@@ -1699,7 +1704,7 @@ fn count_docs_needing_embed_counts_stale_fingerprint_as_pending() {
     )
     .unwrap();
     assert_eq!(
-        count_docs_needing_embed(&store.db, &current, &current).unwrap(),
+        count_docs_needing_embed(&store.db, &current, &ast_fps()).unwrap(),
         0
     );
 }
@@ -1727,7 +1732,7 @@ fn count_docs_needing_embed_counts_by_body_length_not_content() {
     }
     let current = rqmd_core::store::expected_embed_fingerprint("fake");
     assert_eq!(
-        count_docs_needing_embed(&store.db, &current, &current).unwrap(),
+        count_docs_needing_embed(&store.db, &current, &ast_fps()).unwrap(),
         4,
         "empty bodies must be excluded, every other body counted"
     );
@@ -1776,7 +1781,10 @@ fn count_docs_needing_embed_is_path_aware_for_ast_eligibility() {
     let ast = rqmd_core::store::expected_embed_fingerprint_for_path("fake", "Foo.java");
 
     // Nothing embedded yet — both docs pending under either signature.
-    assert_eq!(count_docs_needing_embed(&store.db, &base, &ast).unwrap(), 2);
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap(),
+        2
+    );
 
     // Embed the markdown doc under the base fingerprint — it's the correct one
     // for a non-eligible path, so it must stop counting as pending.
@@ -1792,7 +1800,10 @@ fn count_docs_needing_embed_is_path_aware_for_ast_eligibility() {
         "2024-01-01T00:00:00Z",
     )
     .unwrap();
-    assert_eq!(count_docs_needing_embed(&store.db, &base, &ast).unwrap(), 1);
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap(),
+        1
+    );
 
     // Embedding the java doc under the *base* fingerprint (wrong for an
     // AST-eligible path when the feature is compiled in) must not clear it
@@ -1809,7 +1820,7 @@ fn count_docs_needing_embed_is_path_aware_for_ast_eligibility() {
         "2024-01-01T00:00:00Z",
     )
     .unwrap();
-    let still_pending = count_docs_needing_embed(&store.db, &base, &ast).unwrap();
+    let still_pending = count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap();
     if base == ast {
         assert_eq!(still_pending, 0);
     } else {
@@ -1833,7 +1844,210 @@ fn count_docs_needing_embed_is_path_aware_for_ast_eligibility() {
         "2024-01-01T00:00:00Z",
     )
     .unwrap();
-    assert_eq!(count_docs_needing_embed(&store.db, &base, &ast).unwrap(), 0);
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap(),
+        0
+    );
+}
+
+/// Indexes one document per `path` (a distinct body each) and returns the hash
+/// of every one, in order.
+fn index_documents(store: &Store, paths: &[&str]) -> Vec<String> {
+    paths
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let body = format!("body of document {i}");
+            let hash = content_hash(&body);
+            upsert_content(&store.db, &hash, &body, "2024-01-01T00:00:00Z").unwrap();
+            upsert_document(&store.db, "coll", path, "T", &hash, "2024-01-01T00:00:00Z").unwrap();
+            hash
+        })
+        .collect()
+}
+
+fn store_vector(store: &Store, hash: &str, fingerprint: &str, vid: u64) {
+    upsert_vector_meta(
+        &store.db,
+        hash,
+        0,
+        0,
+        "fake",
+        fingerprint,
+        1,
+        vid,
+        "2024-01-01T00:00:00Z",
+    )
+    .unwrap();
+}
+
+/// A file whose extension has no grammar is chunked as text and expected to
+/// carry the base fingerprint, whatever grammars the build has.
+#[test]
+fn extension_without_a_grammar_is_expected_to_carry_the_base_fingerprint() {
+    let dir = TempDir::new().unwrap();
+    let store = test_store(&dir);
+    let hashes = index_documents(&store, &["a.xyz", "b.md", "Makefile"]);
+    let base = rqmd_core::store::expected_embed_fingerprint("fake");
+    for (i, hash) in hashes.iter().enumerate() {
+        store_vector(&store, hash, &base, i as u64);
+    }
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap(),
+        0
+    );
+    for hash in &hashes {
+        assert!(!hash_needs_embed(&store.db, hash, &base, &ast_fps()).unwrap());
+    }
+}
+
+/// The languages that were AST-chunked before the registry keep the fingerprint
+/// the previous release wrote (a literal, for the model `fake`), so their
+/// stored vectors stay current: nothing is pending and `hash_needs_embed` agrees.
+#[cfg(all(
+    feature = "ast-typescript",
+    feature = "ast-javascript",
+    feature = "ast-java",
+    feature = "ast-python"
+))]
+#[test]
+fn existing_ast_languages_are_not_re_embedded() {
+    let dir = TempDir::new().unwrap();
+    let store = test_store(&dir);
+    let paths = [
+        "a.ts", "a.tsx", "a.js", "a.jsx", "a.mjs", "a.cjs", "a.java", "a.py",
+    ];
+    let hashes = index_documents(&store, &paths);
+    let base = rqmd_core::store::expected_embed_fingerprint("fake-model");
+    let asts = rqmd_core::store::expected_embed_ast_fingerprints("fake-model");
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &asts).unwrap(),
+        paths.len() as i64
+    );
+    for (i, hash) in hashes.iter().enumerate() {
+        store_vector(&store, hash, "239714", i as u64);
+    }
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &asts).unwrap(),
+        0
+    );
+    for hash in &hashes {
+        assert!(!hash_needs_embed(&store.db, hash, &base, &asts).unwrap());
+    }
+}
+
+/// A file of a language the registry added, embedded under the base fingerprint
+/// by the previous release, is pending until it carries its language's own
+/// fingerprint; the extensions of one language share it.
+#[cfg(all(
+    feature = "ast-go",
+    feature = "ast-rust",
+    feature = "ast-csharp",
+    feature = "ast-kotlin",
+    feature = "ast-swift",
+    feature = "ast-hcl",
+    feature = "ast-sql"
+))]
+#[test]
+fn added_languages_are_pending_until_embedded_under_their_own_fingerprint() {
+    let dir = TempDir::new().unwrap();
+    let store = test_store(&dir);
+    let paths = [
+        "a.go", "a.rs", "a.cs", "a.kt", "a.kts", "a.swift", "a.tf", "a.tfvars", "a.hcl", "a.sql",
+    ];
+    let hashes = index_documents(&store, &paths);
+    let base = rqmd_core::store::expected_embed_fingerprint("fake");
+    for (i, hash) in hashes.iter().enumerate() {
+        store_vector(&store, hash, &base, i as u64);
+    }
+    let pending = |store: &Store| count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap();
+    assert_eq!(pending(&store), paths.len() as i64);
+    for hash in &hashes {
+        assert!(hash_needs_embed(&store.db, hash, &base, &ast_fps()).unwrap());
+    }
+
+    for (i, (path, hash)) in paths.iter().zip(&hashes).enumerate() {
+        let own = rqmd_core::store::expected_embed_fingerprint_for_path("fake", path);
+        assert_ne!(own, base, "{path}");
+        store_vector(&store, hash, &own, 100 + i as u64);
+    }
+    assert_eq!(pending(&store), 0);
+    for hash in &hashes {
+        assert!(!hash_needs_embed(&store.db, hash, &base, &ast_fps()).unwrap());
+    }
+}
+
+/// A language's fingerprint satisfies only the documents of that language: a
+/// `.go` vector does not clear a `.rs` document, which expects its own.
+#[cfg(all(feature = "ast-go", feature = "ast-rust"))]
+#[test]
+fn one_languages_fingerprint_does_not_satisfy_another() {
+    let dir = TempDir::new().unwrap();
+    let store = test_store(&dir);
+    let hashes = index_documents(&store, &["a.rs"]);
+    let base = rqmd_core::store::expected_embed_fingerprint("fake");
+    let go = rqmd_core::store::expected_embed_fingerprint_for_path("fake", "a.go");
+    store_vector(&store, &hashes[0], &go, 1);
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap(),
+        1
+    );
+    assert!(hash_needs_embed(&store.db, &hashes[0], &base, &ast_fps()).unwrap());
+}
+
+/// A hash shared by a `.go` and a `.md` document is satisfied by either
+/// document's fingerprint, as for the languages before the registry.
+#[cfg(feature = "ast-go")]
+#[test]
+fn shared_hash_is_satisfied_by_either_route_across_languages() {
+    let dir = TempDir::new().unwrap();
+    let store = test_store(&dir);
+    upsert_content(&store.db, "shared", "same body", "2024-01-01T00:00:00Z").unwrap();
+    for path in ["readme.md", "main.go"] {
+        upsert_document(
+            &store.db,
+            "coll",
+            path,
+            "T",
+            "shared",
+            "2024-01-01T00:00:00Z",
+        )
+        .unwrap();
+    }
+    let base = rqmd_core::store::expected_embed_fingerprint("fake");
+    let go = rqmd_core::store::expected_embed_fingerprint_for_path("fake", "main.go");
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap(),
+        1
+    );
+    store_vector(&store, "shared", &go, 1);
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap(),
+        0
+    );
+    assert!(!hash_needs_embed(&store.db, "shared", &base, &ast_fps()).unwrap());
+}
+
+/// The extension match is case-sensitive, as the chunker's is: an `.SQL` file
+/// is not chunked as SQL, so it carries the base fingerprint and is current
+/// with it. A case-insensitive match here would leave it pending forever.
+#[cfg(all(feature = "ast-sql", feature = "ast-python"))]
+#[test]
+fn upper_case_extension_is_expected_to_carry_the_base_fingerprint() {
+    let dir = TempDir::new().unwrap();
+    let store = test_store(&dir);
+    let hashes = index_documents(&store, &["QUERY.SQL", "TOOL.PY"]);
+    let base = rqmd_core::store::expected_embed_fingerprint("fake");
+    for (i, hash) in hashes.iter().enumerate() {
+        store_vector(&store, hash, &base, i as u64);
+    }
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap(),
+        0
+    );
+    for hash in &hashes {
+        assert!(!hash_needs_embed(&store.db, hash, &base, &ast_fps()).unwrap());
+    }
 }
 
 /// The live-index defect this fix targets: an AST-eligible path (`.py`) and a
@@ -1879,7 +2093,10 @@ fn count_docs_needing_embed_satisfied_by_either_route_on_shared_hash() {
     let ast = rqmd_core::store::expected_embed_fingerprint_for_path("fake", "script.py");
 
     // Nothing embedded — the shared hash is pending (counts once, not twice).
-    assert_eq!(count_docs_needing_embed(&store.db, &base, &ast).unwrap(), 1);
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap(),
+        1
+    );
 
     // run_embed's hash-level dedup reaches this hash via whichever path arrives
     // first; here it embeds under the AST fingerprint (the .py doc's route).
@@ -1897,7 +2114,7 @@ fn count_docs_needing_embed_satisfied_by_either_route_on_shared_hash() {
     .unwrap();
 
     assert_eq!(
-        count_docs_needing_embed(&store.db, &base, &ast).unwrap(),
+        count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap(),
         0,
         "a vector at the AST fingerprint must satisfy the hash even though a \
          non-eligible document (readme.md) sharing the hash expects the base \
@@ -1998,7 +2215,6 @@ fn unchanged_reindex_backfills_raw_and_heals_content_without_forcing_reembed() {
     assert_eq!(outcome, rqmd_core::IndexOutcome::New);
 
     let base = rqmd_core::store::expected_embed_fingerprint("fake");
-    let ast = rqmd_core::store::expected_embed_fingerprint_for_path("fake", "a.md");
     upsert_vector_meta(
         &store.db,
         &hash,
@@ -2011,7 +2227,10 @@ fn unchanged_reindex_backfills_raw_and_heals_content_without_forcing_reembed() {
         "2024-01-01T00:00:00Z",
     )
     .unwrap();
-    assert_eq!(count_docs_needing_embed(&store.db, &base, &ast).unwrap(), 0);
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap(),
+        0
+    );
 
     // Content identity is unchanged (same indexed_text) but the frontmatter changed.
     let outcome2 = store
@@ -2029,7 +2248,7 @@ fn unchanged_reindex_backfills_raw_and_heals_content_without_forcing_reembed() {
         "hash didn't change, so the outcome must still read Unchanged"
     );
     assert_eq!(
-        count_docs_needing_embed(&store.db, &base, &ast).unwrap(),
+        count_docs_needing_embed(&store.db, &base, &ast_fps()).unwrap(),
         0,
         "an Unchanged reindex must not make an already-embedded hash look pending again"
     );
@@ -2173,7 +2392,7 @@ fn supersede_cycle_leaves_exactly_one_fingerprint_and_no_growth() {
         &current_fingerprint
     ));
     assert_eq!(
-        count_docs_needing_embed(&store.db, &current_fingerprint, &current_fingerprint).unwrap(),
+        count_docs_needing_embed(&store.db, &current_fingerprint, &ast_fps()).unwrap(),
         0
     );
 }

@@ -772,7 +772,7 @@ fn build_status(store: &Store) -> String {
     let pending: i64 = db::count_docs_needing_embed(
         &store.db,
         &core_store::expected_fingerprint(),
-        &core_store::expected_ast_fingerprint(),
+        &core_store::expected_ast_fingerprints(),
     )
     .unwrap_or(0);
     let backend = format!("{:?}", BackendKind::from_env()).to_ascii_lowercase();

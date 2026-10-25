@@ -610,10 +610,13 @@ impl Store {
         let kind = self.backend.embed_backend_kind().to_string();
         let model = self.backend.embed_model_name().to_string();
         let context_size = self.backend.embed_context_size();
-        let fingerprints = [
-            embed_fingerprint(&model, ""),
-            embed_fingerprint(&model, "placeholder.py"),
-        ];
+        let fingerprints: Vec<String> = std::iter::once(embed_fingerprint(&model, ""))
+            .chain(
+                expected_embed_ast_fingerprints(&model)
+                    .into_iter()
+                    .map(|g| g.fingerprint),
+            )
+            .collect();
         let fingerprints: Vec<&str> = fingerprints.iter().map(String::as_str).collect();
         db::backfill_vector_keys(&self.db, &model, &fingerprints, |chunk_hash| {
             vector_key(&kind, &model, context_size, chunk_hash)
@@ -1981,21 +1984,24 @@ fn format_rfc3339(secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// Whether `chunk_document_for_path(rel_path, _)` would actually dispatch to the
-/// AST chunker for `rel_path` — i.e. the `ast-chunking` feature is compiled in
-/// *and* `rel_path`'s extension is one AST chunking supports. `embed_fingerprint`
-/// uses this to decide whether a document's fingerprint needs the AST marker:
-/// without it, a binary built without `ast-chunking` silently re-chunks source
-/// files with the markdown regex chunker under the *same* fingerprint as an
-/// AST-enabled binary, so the invalidation mechanism never notices the swap
-/// (see the incident that motivated this: PR #64's local verification lost the
-/// feature flag via an in-place binary overwrite, and nothing detected it).
+/// The fingerprint marker of the AST language `chunk_document_for_path(rel_path, _)`
+/// would actually chunk `rel_path` with — `None` when no compiled grammar owns
+/// its extension. `embed_fingerprint` uses this to decide whether a document's
+/// fingerprint needs an AST marker: without it, a binary built without a
+/// grammar silently re-chunks source files with the markdown regex chunker
+/// under the *same* fingerprint as a binary that has it, so the invalidation
+/// mechanism never notices the swap.
+fn ast_marker_for_path(rel_path: &str) -> Option<&'static str> {
+    std::path::Path::new(rel_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(crate::chunking::ast_fingerprint_marker)
+}
+
+/// Whether `chunk_document_for_path(rel_path, _)` would dispatch to the AST
+/// chunker for `rel_path`.
 pub fn embed_fingerprint_applies_ast(rel_path: &str) -> bool {
-    crate::chunking::ast_chunking_compiled()
-        && std::path::Path::new(rel_path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|ext| crate::chunking::ast_chunking_extensions().contains(&ext))
+    ast_marker_for_path(rel_path).is_some()
 }
 
 /// Hash identifying one chunk's text, independent of the document it sits in.
@@ -2015,14 +2021,15 @@ fn vector_key(backend_kind: &str, model: &str, context_size: usize, chunk_hash: 
 }
 
 /// Embedding fingerprint: 6-hex-char hash of model name + chunk constants, plus
-/// an AST-chunking marker when [`embed_fingerprint_applies_ast`] is true for
+/// the language's AST marker when [`embed_fingerprint_applies_ast`] is true for
 /// `rel_path`. Used to detect stale embeddings after a model or chunking-config
 /// change.
 ///
 /// The AST marker is scoped to eligible paths rather than folded in
-/// unconditionally so that enabling/disabling the `ast-chunking` feature does
-/// not invalidate every markdown/text vector in the index — only the source
-/// files the chunker choice actually affects.
+/// unconditionally so that enabling/disabling a grammar does not invalidate
+/// every markdown/text vector in the index — only the source files the chunker
+/// choice actually affects. It is also per language, so one grammar change
+/// re-embeds only that language's files.
 ///
 /// Derives from the real `chunking::CHUNK_SIZE_CHARS`/`CHUNK_OVERLAP_CHARS` constants
 /// rather than hardcoded literals, so a future change to those constants actually
@@ -2045,14 +2052,31 @@ fn embed_fingerprint_with_prefixes(
     query_prefix: &str,
     passage_prefix: &str,
 ) -> String {
+    marked_fingerprint(
+        model,
+        query_prefix,
+        passage_prefix,
+        ast_marker_for_path(rel_path),
+    )
+}
+
+/// The fingerprint of `model` and the chunking constants with `ast_marker`
+/// appended, or the markdown chunker's marker when there is none.
+fn marked_fingerprint(
+    model: &str,
+    query_prefix: &str,
+    passage_prefix: &str,
+    ast_marker: Option<&str>,
+) -> String {
     let mut sig = format!(
         "model:{model}\nchunk_size_chars:{}\nchunk_overlap_chars:{}\nchunk_strategy_version:{}\nquery_prefix:{query_prefix}\npassage_prefix:{passage_prefix}",
         crate::chunking::CHUNK_SIZE_CHARS,
         crate::chunking::CHUNK_OVERLAP_CHARS,
         crate::chunking::CHUNK_STRATEGY_VERSION,
     );
-    if embed_fingerprint_applies_ast(rel_path) {
-        sig.push_str("\nast_chunking:1");
+    if let Some(marker) = ast_marker {
+        sig.push('\n');
+        sig.push_str(marker);
     } else {
         // Only the markdown chunker repeats table headers; AST-chunked source
         // vectors are unaffected and keep their fingerprint.
@@ -2104,12 +2128,43 @@ pub fn expected_fingerprint_for_path(rel_path: &str) -> String {
     expected_embed_fingerprint_for_path(&name, rel_path)
 }
 
-/// The AST-marked variant of [`expected_fingerprint`] — what any AST-eligible
-/// path currently produces. Any eligible extension yields the same value, so
-/// callers that need "the" AST fingerprint (not a specific document's) use
-/// this instead of inventing a placeholder path themselves.
-pub fn expected_ast_fingerprint() -> String {
-    expected_fingerprint_for_path("placeholder.py")
+/// Every AST fingerprint a fresh `rqmd embed` run produces for `embed_model_name`:
+/// one per fingerprint marker, with the extensions that carry it. Empty when no
+/// grammar is compiled in.
+pub fn expected_embed_ast_fingerprints(embed_model_name: &str) -> Vec<db::AstFingerprint> {
+    crate::chunking::ast_fingerprint_groups()
+        .into_iter()
+        .map(|(marker, extensions)| db::AstFingerprint {
+            extensions,
+            fingerprint: marked_fingerprint(
+                embed_model_name,
+                rqmd_llm::EMBEDDINGGEMMA_QUERY_PREFIX,
+                rqmd_llm::EMBEDDINGGEMMA_PASSAGE_PREFIX,
+                Some(marker),
+            ),
+        })
+        .collect()
+}
+
+/// [`expected_embed_ast_fingerprints`] for the currently configured backend —
+/// what the AST-eligible paths currently produce. Callers that need "the AST
+/// fingerprints" (not a specific document's) use this instead of inventing a
+/// placeholder path themselves.
+pub fn expected_ast_fingerprints() -> Vec<db::AstFingerprint> {
+    let name = BackendKind::from_env().default_embed_model_name();
+    expected_embed_ast_fingerprints(&name)
+}
+
+/// Every fingerprint that is current right now: the base one and each AST one.
+/// A stored vector at any other fingerprint is stale.
+pub fn expected_fingerprint_set() -> Vec<String> {
+    std::iter::once(expected_fingerprint())
+        .chain(
+            expected_ast_fingerprints()
+                .into_iter()
+                .map(|g| g.fingerprint),
+        )
+        .collect()
 }
 
 #[cfg(test)]
@@ -2628,13 +2683,13 @@ mod tests {
     }
 
     /// An AST-eligible path only diverges from the base fingerprint when the
-    /// `ast-chunking` feature is actually compiled in — the marker describes
-    /// what the binary will *do*, not merely what extension the file has.
+    /// grammar is actually compiled in — the marker describes what the binary
+    /// will *do*, not merely what extension the file has.
     #[test]
     fn ast_eligible_path_diverges_from_base_iff_feature_compiled() {
         let base = expected_embed_fingerprint("fake-model");
         let for_py = expected_embed_fingerprint_for_path("fake-model", "src/module.py");
-        if crate::chunking::ast_chunking_compiled() {
+        if cfg!(feature = "ast-python") {
             assert_ne!(
                 for_py, base,
                 "AST-eligible paths must diverge once the feature is compiled in"
@@ -2781,12 +2836,95 @@ mod tests {
         );
         assert_ne!(md, fingerprint_of(&base_signature("m")));
 
-        if crate::chunking::ast_chunking_compiled() {
+        if cfg!(feature = "ast-python") {
             assert_eq!(
                 embed_fingerprint("m", "src/a.py"),
                 fingerprint_of(&format!("{}\nast_chunking:1", base_signature("m")))
             );
         }
+    }
+
+    /// The fingerprints the previous release wrote for the languages that were
+    /// already AST-chunked, for the model name `fake-model`. They are literals,
+    /// not recomputed, so a change to the registry that moves any of them
+    /// fails here instead of silently re-embedding every source file.
+    #[cfg(all(
+        feature = "ast-typescript",
+        feature = "ast-javascript",
+        feature = "ast-java",
+        feature = "ast-python"
+    ))]
+    #[test]
+    fn existing_ast_languages_keep_their_fingerprints() {
+        for ext in ["ts", "tsx", "js", "jsx", "mjs", "cjs", "java", "py"] {
+            assert_eq!(
+                embed_fingerprint("fake-model", &format!("src/a.{ext}")),
+                "239714",
+                ".{ext} fingerprint moved"
+            );
+        }
+        assert_eq!(embed_fingerprint("fake-model", "notes/a.md"), "284aed");
+    }
+
+    /// Each language added after the registry carries its own marker: its files
+    /// differ from every other language and from the base fingerprint, while
+    /// the extensions of one language share it.
+    #[cfg(all(
+        feature = "ast-go",
+        feature = "ast-rust",
+        feature = "ast-csharp",
+        feature = "ast-kotlin",
+        feature = "ast-swift",
+        feature = "ast-hcl",
+        feature = "ast-sql",
+        feature = "ast-python"
+    ))]
+    #[test]
+    fn added_languages_have_their_own_fingerprints() {
+        let fp = |path: &str| embed_fingerprint("fake-model", path);
+        let one_per_language = [
+            "a.go", "a.rs", "a.cs", "a.kt", "a.swift", "a.tf", "a.sql", "a.py",
+        ];
+        let mut seen: Vec<String> = one_per_language.iter().map(|p| fp(p)).collect();
+        seen.push(fp("a.md"));
+        let distinct: std::collections::HashSet<_> = seen.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            seen.len(),
+            "two languages share a fingerprint"
+        );
+
+        assert_eq!(fp("a.kt"), fp("a.kts"));
+        assert_eq!(fp("a.tf"), fp("a.tfvars"));
+        assert_eq!(fp("a.tf"), fp("a.hcl"));
+        assert_eq!(
+            fp("a.go"),
+            fingerprint_of(&format!(
+                "{}\nast_chunking:1\nast_language:go:1",
+                base_signature("fake-model")
+            ))
+        );
+    }
+
+    /// The current set is the base fingerprint plus one per marker group, and
+    /// every group's extensions map to the fingerprint the document would get.
+    #[test]
+    fn expected_fingerprint_set_covers_base_and_every_ast_group() {
+        let groups = expected_embed_ast_fingerprints("fake-model");
+        let base = expected_embed_fingerprint("fake-model");
+        for group in &groups {
+            assert_ne!(group.fingerprint, base);
+            for ext in &group.extensions {
+                assert_eq!(
+                    group.fingerprint,
+                    embed_fingerprint("fake-model", &format!("x.{ext}")),
+                    ".{ext}"
+                );
+            }
+        }
+        let covered: usize = groups.iter().map(|g| g.extensions.len()).sum();
+        assert_eq!(covered, crate::chunking::ast_chunking_extensions().len());
+        assert_eq!(groups.is_empty(), !crate::chunking::ast_chunking_compiled());
     }
 
     #[test]
@@ -3095,6 +3233,56 @@ mod tests {
                 r.seq
             );
         }
+    }
+
+    /// A small file of a language the registry added was embedded by the
+    /// previous release under the base fingerprint. It is pending once under
+    /// the language's own fingerprint, and re-embedding it encodes nothing,
+    /// because its single chunk is the same text either way.
+    #[cfg(feature = "ast-go")]
+    #[test]
+    fn added_language_file_is_re_embedded_once_without_encoding() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, encoded) = recording_store(dir.path());
+        let body = "package main\n\nfunc alpha() {\n\t_ = 1\n}\n";
+        let hash = content_hash(body);
+        upsert_content(&store.db, &hash, body, "2026-01-01T00:00:00Z").unwrap();
+        upsert_document(
+            &store.db,
+            "c",
+            "main.go",
+            "main",
+            &hash,
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+
+        // What the previous release stored: the markdown chunker's fingerprint.
+        let old = store.embed_document_chunks(&hash, "main.md", body).unwrap();
+        persist(&mut store, &hash, &old);
+        let base = expected_embed_fingerprint("recording-embed");
+        let go = expected_embed_ast_fingerprints("recording-embed");
+        assert_eq!(old[0].fingerprint, base);
+        let pending = |store: &Store| db::count_docs_needing_embed(&store.db, &base, &go).unwrap();
+        assert_eq!(
+            pending(&store),
+            1,
+            "the new fingerprint makes the file pending"
+        );
+
+        encoded.lock().unwrap().clear();
+        let new = store.embed_document_chunks(&hash, "main.go", body).unwrap();
+        persist(&mut store, &hash, &new);
+        assert!(
+            encoded.lock().unwrap().is_empty(),
+            "an unchanged chunk reuses its vector"
+        );
+        assert_eq!(
+            new[0].fingerprint,
+            embed_fingerprint("recording-embed", "main.go")
+        );
+        assert_ne!(new[0].fingerprint, base);
+        assert_eq!(pending(&store), 0, "re-embedded once, then current");
     }
 
     #[test]
