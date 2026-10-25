@@ -1,0 +1,125 @@
+name: MSRV tracker
+
+# Keeps `rust-version` at the newest stable Rust minor, as CONTRIBUTING.md
+# ("MSRV policy") requires. Once a week (and on demand) it reads the newest
+# stable minor from the Rust release channel and compares it with Cargo.toml.
+# When the stable minor is newer AND nixpkgs-unstable already ships that
+# toolchain, it opens one pull request labelled `minor` (or refreshes the open
+# one) on branch chore/msrv-<minor>. When nixpkgs is behind, it ends green and
+# tries again next week, so the Nix dev shell never breaks. It never merges:
+# a person merges after CI, and clippy on the new stable, pass. All logic is in
+# scripts/msrv-track.sh, which scripts/tests/msrv-track.test.sh covers offline.
+#
+# The pull request and its branch are created with a GitHub App token, because
+# events caused by GITHUB_TOKEN do not start other workflows, and the PR would
+# get no CI. The token is minted only when a PR is about to be written and
+# carries just the three permissions that needs (the same App and secrets as
+# release.yml). The workflow's own GITHUB_TOKEN stays read-only: it is never
+# used for a write.
+#
+# Closing the PR without merging skips that minor; the next stable release gets
+# its own branch. A branch that holds a commit the tracker did not make (for
+# example a lint fix) is never overwritten.
+#
+# The pull_request trigger only runs the self-test, and only when the tracker
+# or one of the files it edits changes. The track job runs from main only, so a dispatch from another branch
+# can never reach the App token.
+
+on:
+  schedule:
+    # Mondays 05:17 UTC, off the hour to stay clear of the scheduled-run rush.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/msrv-track.sh"
+      - "scripts/tests/msrv-track.test.sh"
+      - "scripts/tests/fixtures/msrv-track/**"
+      - ".github/workflows/msrv-track.yml"
+      # The files the tracker edits: the self-test applies a raise to the
+      # repository's own copies, so a PR that moves an MSRV mention without
+      # updating the script's edit list fails here instead of on Monday.
+      - "Cargo.toml"
+      - ".github/workflows/rust.yml"
+      - "CONTRIBUTING.md"
+      - "docs/INSTALL.md"
+      - "flake.nix"
+
+permissions:
+  contents: read
+
+concurrency:
+  # PR runs cancel superseded PR runs. Scheduled and manual runs share one
+  # group and queue, so two tracker runs never write the same branch at once.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'weekly' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  self-test:
+    name: Self-test the tracker script
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Run the offline tests
+        run: bash scripts/tests/msrv-track.test.sh
+
+  track:
+    name: Raise the MSRV when a newer stable Rust is out
+    needs: self-test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 20
+    steps:
+      # Full history: the script compares the tracker branch with origin/main.
+      # No credentials are stored; the push step passes its token per command.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Compare rust-version with the newest stable Rust
+        id: detect
+        run: bash scripts/msrv-track.sh detect
+
+      - uses: cachix/install-nix-action@v31
+        if: steps.detect.outputs.action == 'bump'
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Edit the places that name the MSRV
+        id: apply
+        if: steps.detect.outputs.action == 'bump'
+        env:
+          # A number the script itself validated and wrote (detect step).
+          MSRV_TARGET_MINOR: ${{ steps.detect.outputs.latest_minor }}
+        run: bash scripts/msrv-track.sh apply
+
+      - name: Mint a token from the GitHub App
+        id: app-token
+        if: steps.apply.outputs.applied == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HOMEBREW_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
+          owner: tylern91
+          repositories: rqmd
+          # Push the branch (workflows is needed because the edit set changes
+          # .github/workflows/rust.yml) and open the pull request.
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
+      - name: Open or refresh the pull request
+        if: steps.apply.outputs.applied == 'true'
+        env:
+          # GITHUB_REPOSITORY is already set by the runner.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          MSRV_TARGET_MINOR: ${{ steps.detect.outputs.latest_minor }}
+        run: bash scripts/msrv-track.sh publish

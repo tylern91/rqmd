@@ -97,7 +97,8 @@ Rust build. Pushes to `main`, the weekly run and manual dispatches always run
 everything. A weekly (and manually dispatched) run also executes the full suite
 on macOS, including the model-download test that the per-PR jobs skip.
 `lock-soak.yml` runs only when a PR changes `Cargo.lock` or the soak script (see
-"Dependency updates"). `security.yml` (Trivy) runs on every PR regardless; only a **CRITICAL** vulnerability with a known fix blocks the
+"Dependency updates"). `msrv-track.yml` runs on a weekly schedule, and on a PR only to self-test
+its script, when the PR changes the script or a file it edits (see "MSRV policy"). `security.yml` (Trivy) runs on every PR regardless; only a **CRITICAL** vulnerability with a known fix blocks the
 merge, HIGH severity is recorded to the Security tab but doesn't block.
 
 ## Acceptance-test tier
@@ -152,6 +153,26 @@ MSRV therefore follows each stable release, raised within days of it.
   `flake.lock` (`nix flake update nixpkgs`, so the dev shell's `rustc` meets
   the new floor). Use `rust-version = "1.N"`, not `"1.N.P"`, so a nixpkgs
   that ships `1.N.0` still meets it.
+- **MSRV tracker.** `.github/workflows/msrv-track.yml` makes that raise
+  without anyone remembering it. Every Monday (and on manual dispatch) it
+  reads the newest stable minor from
+  `https://static.rust-lang.org/dist/channel-rust-stable.toml` and compares it
+  with `rust-version`. When the stable minor is newer and `nixpkgs-unstable`
+  already has `pkgs/development/compilers/rust/1_<minor>.nix`, it makes the
+  edits above, adds a CHANGELOG "Changed" line, and opens one PR on branch
+  `chore/msrv-<minor>` labelled `minor` (or refreshes the open one). If
+  nixpkgs is behind, the run ends green and tries again the next week, so the
+  Nix dev shell never breaks. It opens the PR with the repository's GitHub App
+  token (the one `release.yml` uses), because a PR opened with `GITHUB_TOKEN`
+  starts no CI. The tracker never merges. A person merges after CI and clippy
+  on the new stable pass, and fixes any new lint in that PR: the tracker
+  refreshes the branch only while every commit on it is its own, so a pushed
+  fix is never overwritten. Close the PR without merging to skip that minor.
+  The logic is in `scripts/msrv-track.sh`; run its offline tests with
+  `bash scripts/tests/msrv-track.test.sh`. The script fails, rather than
+  guessing, when one of the places listed above no longer matches, so change
+  the script's edit list in the same PR that moves any of them (that PR's
+  tracker self-test fails until you do).
 - There is no `rust-toolchain.toml`. CI builds on stable, and `rust.yml`'s
   `build-linux` job also runs a `["stable", "1.99"]` toolchain matrix; the
   pinned leg only runs `cargo check --workspace --all-targets` (no tests) and is
