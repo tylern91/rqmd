@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use std::collections::HashSet;
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,7 +14,9 @@ use tantivy::{
     collector::{DocSetCollector, FilterCollector, TopDocs},
     directory::error::LockError,
     doc,
-    query::{BooleanQuery, ConstScoreQuery, PhraseQuery, Query, QueryParser, TermQuery},
+    query::{
+        BooleanQuery, ConstScoreQuery, PhraseQuery, Query, QueryParser, RangeQuery, TermQuery,
+    },
     schema::{FAST, Field, IndexRecordOption, STORED, Schema, SchemaBuilder, TEXT, Value},
     tokenizer::{LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer},
 };
@@ -185,6 +188,9 @@ pub struct FtsIndex {
     pub query_parser: QueryParser,
     /// Index directory, kept only to name it in the LockBusy error message.
     dir: PathBuf,
+    /// `(filepath, doc_id)` of every entry staged since the last commit. A
+    /// search cannot see them, so a delete reads this list as well.
+    staged: Vec<(String, i64)>,
 }
 
 impl FtsIndex {
@@ -219,6 +225,7 @@ impl FtsIndex {
             writer: None,
             query_parser,
             dir: dir.to_path_buf(),
+            staged: Vec::new(),
         })
     }
 
@@ -340,6 +347,7 @@ impl FtsIndex {
             document.add_text(field, normalize_nfc(frontmatter));
         }
         self.writer_mut()?.add_document(document)?;
+        self.staged.push((filepath.to_string(), doc_id));
         Ok(())
     }
 
@@ -359,6 +367,7 @@ impl FtsIndex {
         self.writer_mut()?
             .delete_all_documents()
             .context("delete all tantivy docs")?;
+        self.staged.clear();
         for doc in docs {
             let staged = doc.and_then(|(filepath, title, body, frontmatter, doc_id)| {
                 self.insert_document(&filepath, &title, &body, &frontmatter, doc_id)
@@ -367,6 +376,7 @@ impl FtsIndex {
                 self.writer_mut()?
                     .rollback()
                     .context("roll back partial tantivy rebuild")?;
+                self.staged.clear();
                 return Err(e);
             }
         }
@@ -379,6 +389,7 @@ impl FtsIndex {
         // Taking the lock first keeps another writer from racing the delete.
         self.writer_mut()?;
         self.writer = None;
+        self.staged.clear();
         for entry in std::fs::read_dir(&self.dir).context("read tantivy dir")? {
             let path = entry.context("tantivy dir entry")?.path();
             if path
@@ -416,12 +427,62 @@ impl FtsIndex {
     /// Used both to clear the stale entry before re-indexing an updated
     /// document (`add_document`) and to sweep entries for files removed or
     /// renamed on disk (`Store::update`'s prune pass).
+    ///
+    /// The path match is a token phrase, so it also hits a longer path that
+    /// contains this one (`proj/docs/a.md` for `docs/a.md`) and a path that
+    /// differs only in case or separators. One search over the committed index
+    /// finds the candidates; those whose stored path equals `filepath`, plus
+    /// the entries staged under it, are deleted by their `doc_id`, so no other
+    /// entry is touched.
     pub fn delete_by_filepath(&mut self, filepath: &str) -> Result<()> {
-        if let Some(query) = self.exact_filepath_query(filepath)? {
-            let w = self.writer_mut()?;
-            w.delete_query(query).context("delete tantivy doc")?;
+        let Some(phrase) = self.exact_filepath_query(filepath)? else {
+            return Ok(());
+        };
+        let mut ids = self.committed_doc_ids_at(phrase.as_ref(), filepath)?;
+        self.staged.retain(|(path, id)| {
+            let own = path == filepath;
+            if own {
+                ids.insert(*id);
+            }
+            !own
+        });
+        if ids.is_empty() {
+            return Ok(());
         }
+        let field = self.schema.doc_id;
+        let by_id: Vec<Box<dyn Query>> = ids
+            .into_iter()
+            .map(|id| {
+                let term = Term::from_field_i64(field, id);
+                Box::new(RangeQuery::new(
+                    Bound::Included(term.clone()),
+                    Bound::Included(term),
+                )) as Box<dyn Query>
+            })
+            .collect();
+        let query = BooleanQuery::intersection(vec![phrase, Box::new(BooleanQuery::union(by_id))]);
+        self.writer_mut()?
+            .delete_query(Box::new(query))
+            .context("delete tantivy doc")?;
         Ok(())
+    }
+
+    /// The `doc_id` of every committed entry that `phrase` matches and whose
+    /// stored `filepath` is exactly `filepath`.
+    fn committed_doc_ids_at(&self, phrase: &dyn Query, filepath: &str) -> Result<HashSet<i64>> {
+        let searcher = self.reader.searcher();
+        let mut ids = HashSet::new();
+        for addr in searcher.search(phrase, &DocSetCollector)? {
+            let doc: TantivyDocument = searcher.doc(addr).context("read tantivy doc")?;
+            let stored = doc.get_first(self.schema.filepath).and_then(|v| v.as_str());
+            if stored != Some(filepath) {
+                continue;
+            }
+            if let Some(id) = doc.get_first(self.schema.doc_id).and_then(|v| v.as_i64()) {
+                ids.insert(id);
+            }
+        }
+        Ok(ids)
     }
 
     /// The stored `filepath` of every live document in the committed index.
@@ -443,27 +504,9 @@ impl FtsIndex {
         Ok(paths)
     }
 
-    /// The stored `filepath` of every committed entry that
-    /// [`FtsIndex::delete_by_filepath`] would remove for `filepath`. The match
-    /// is a token phrase, so a longer path that contains this one
-    /// (`proj/docs/a.md` for `docs/a.md`) is included.
-    pub fn filepaths_matched_by(&self, filepath: &str) -> Result<Vec<String>> {
-        let Some(query) = self.exact_filepath_query(filepath)? else {
-            return Ok(Vec::new());
-        };
-        let searcher = self.reader.searcher();
-        let mut paths = Vec::new();
-        for addr in searcher.search(query.as_ref(), &DocSetCollector)? {
-            let doc: TantivyDocument = searcher.doc(addr).context("read tantivy doc")?;
-            if let Some(path) = doc.get_first(self.schema.filepath).and_then(|v| v.as_str()) {
-                paths.push(path.to_string());
-            }
-        }
-        Ok(paths)
-    }
-
-    /// Build a query that matches only documents indexed under exactly this
-    /// `filepath` string.
+    /// Build a query that matches documents whose indexed `filepath` contains
+    /// this `filepath`'s token sequence: every entry stored under exactly this
+    /// string, and any other path with the same tokens inside it.
     ///
     /// `filepath` is a tokenized `TEXT` field (not a raw/`STRING` field), so a
     /// term built from the whole untokenized string — as
@@ -478,9 +521,10 @@ impl FtsIndex {
     /// `RemoveLongFilter` can't shift a false match onto a different path).
     /// A plain intersection (AND) of the tokens would over-match any other
     /// path whose token set is a superset of this one's — fine for a search
-    /// pushdown with a post-filter (see `collection_pushdown_clause`), but
-    /// not for a destructive delete. Returns `None` when tokenization yields
-    /// no usable terms (matches nothing).
+    /// pushdown with a post-filter (see `collection_pushdown_clause`). The
+    /// phrase still over-matches a longer path, so `delete_by_filepath`
+    /// narrows it by `doc_id`. Returns `None` when tokenization yields no
+    /// usable terms (matches nothing).
     fn exact_filepath_query(&self, filepath: &str) -> Result<Option<Box<dyn Query>>> {
         let terms = self.path_terms(filepath)?;
 
@@ -511,6 +555,7 @@ impl FtsIndex {
             return Ok(());
         };
         writer.commit().context("tantivy commit")?;
+        self.staged.clear();
         self.reader.reload().context("tantivy reader reload")?;
         Ok(())
     }
@@ -999,6 +1044,115 @@ mod tests {
         idx.delete_by_filepath("never/indexed.md").unwrap();
         idx.commit().unwrap();
         assert_eq!(idx.reader.searcher().num_docs(), 0);
+    }
+
+    fn indexed_sorted(idx: &FtsIndex) -> Vec<String> {
+        let mut paths = idx.indexed_filepaths().unwrap();
+        paths.sort();
+        paths
+    }
+
+    /// A delete matches a token phrase, so `docs/a.md` is also found inside
+    /// `proj/docs/a.md`; only the exact stored path may be removed.
+    #[test]
+    fn delete_by_filepath_keeps_a_longer_path_that_contains_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("docs/a.md", "T", "zebra short", 1)
+            .unwrap();
+        idx.add_document("proj/docs/a.md", "T", "zebra nested", 2)
+            .unwrap();
+        idx.commit().unwrap();
+
+        idx.delete_by_filepath("docs/a.md").unwrap();
+        idx.commit().unwrap();
+
+        assert_eq!(indexed_sorted(&idx), vec!["proj/docs/a.md"]);
+        assert_eq!(idx.search_fts("nested", 10, None).unwrap().len(), 1);
+    }
+
+    /// Entries staged in the same batch are not visible to a search yet, so
+    /// the delete has to account for them too.
+    #[test]
+    fn delete_by_filepath_keeps_a_longer_path_staged_in_the_same_batch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.insert_document("proj/docs/a.md", "T", "nested", "", 2)
+            .unwrap();
+
+        idx.delete_by_filepath("docs/a.md").unwrap();
+        idx.commit().unwrap();
+
+        assert_eq!(indexed_sorted(&idx), vec!["proj/docs/a.md"]);
+    }
+
+    /// Paths that tokenize identically but differ in case are different
+    /// entries.
+    #[test]
+    fn delete_by_filepath_keeps_a_path_that_differs_only_in_case() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("Docs/A.md", "T", "upper", 1).unwrap();
+        idx.add_document("docs/a.md", "T", "lower", 2).unwrap();
+        idx.commit().unwrap();
+
+        idx.delete_by_filepath("docs/a.md").unwrap();
+        idx.commit().unwrap();
+
+        assert_eq!(indexed_sorted(&idx), vec!["Docs/A.md"]);
+    }
+
+    /// Re-adding the same path replaces its entry, whether the earlier one is
+    /// committed or staged in the same batch.
+    #[test]
+    fn add_document_replaces_the_entry_for_the_same_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("docs/a.md", "T", "first", 1).unwrap();
+        idx.commit().unwrap();
+
+        idx.add_document("docs/a.md", "T", "second", 1).unwrap();
+        idx.add_document("docs/a.md", "T", "third", 1).unwrap();
+        idx.commit().unwrap();
+
+        assert_eq!(indexed_sorted(&idx), vec!["docs/a.md"]);
+        assert!(idx.search_fts("first", 10, None).unwrap().is_empty());
+        assert!(idx.search_fts("second", 10, None).unwrap().is_empty());
+        assert_eq!(idx.search_fts("third", 10, None).unwrap().len(), 1);
+    }
+
+    /// Every entry stored under the exact path goes, including a duplicate
+    /// left by an earlier run.
+    #[test]
+    fn delete_by_filepath_removes_every_entry_under_the_exact_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.insert_document("docs/a.md", "T", "one", "", 1).unwrap();
+        idx.insert_document("docs/a.md", "T", "two", "", 2).unwrap();
+        idx.insert_document("proj/docs/a.md", "T", "nested", "", 3)
+            .unwrap();
+        idx.commit().unwrap();
+
+        idx.delete_by_filepath("docs/a.md").unwrap();
+        idx.commit().unwrap();
+
+        assert_eq!(indexed_sorted(&idx), vec!["proj/docs/a.md"]);
+    }
+
+    /// A path with no entry of its own changes nothing, even when a longer
+    /// path contains it.
+    #[test]
+    fn delete_by_filepath_missing_leaves_a_containing_path_alone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("proj/docs/a.md", "T", "nested", 2)
+            .unwrap();
+        idx.commit().unwrap();
+
+        idx.delete_by_filepath("docs/a.md").unwrap();
+        idx.commit().unwrap();
+
+        assert_eq!(indexed_sorted(&idx), vec!["proj/docs/a.md"]);
     }
 
     /// A collection-scoped query must not under-return: if more than `limit`

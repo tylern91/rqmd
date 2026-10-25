@@ -85,3 +85,7 @@ daemon_idle_exit	3	efd50bb5c51653ec3c64ba7ab6cc9521ebd90e72	2026-10-25
 daemon_idle_exit	4	efd50bb5c51653ec3c64ba7ab6cc9521ebd90e72	2026-10-25
 daemon_idle_exit	5	efd50bb5c51653ec3c64ba7ab6cc9521ebd90e72	2026-10-25
 daemon_idle_exit	6	efd50bb5c51653ec3c64ba7ab6cc9521ebd90e72	2026-10-25
+fts_exact_delete	1	b20385ed00aa1ab39cc740841496d0eb5b814a2e	2026-10-25
+fts_exact_delete	2	b20385ed00aa1ab39cc740841496d0eb5b814a2e	2026-10-25
+fts_exact_delete	3	b20385ed00aa1ab39cc740841496d0eb5b814a2e	2026-10-25
+fts_exact_delete	4	b20385ed00aa1ab39cc740841496d0eb5b814a2e	2026-10-25

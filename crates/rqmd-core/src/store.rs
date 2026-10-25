@@ -749,10 +749,7 @@ impl Store {
     /// Every full-text entry that no active document accounts for is removed
     /// first, which covers the old name's entries and any left by an earlier
     /// rename; the renamed collection's documents are then indexed again under
-    /// the new name. A full-text delete matches a token phrase, so it can also
-    /// hit a longer live path in another collection (`proj/docs/a.md` for
-    /// `docs/a.md`); those entries are written back. All deletes are staged
-    /// before any insert. The SQLite changes commit only after the full-text
+    /// the new name. All deletes are staged before any insert. The SQLite changes commit only after the full-text
     /// writes are staged; call this from a writer that holds the index lock.
     pub fn rename_collection(&mut self, old: &str, new: &str) -> Result<RenameSummary> {
         let tx = self.db.unchecked_transaction()?;
@@ -769,12 +766,11 @@ impl Store {
                 r.get::<_, String>(4)?,
             ))
         };
-        let mut rows = tx
+        let rows = tx
             .prepare(&format!("{ROW_SQL}d.collection = ?1"))?
             .query_map([new], read_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let documents = rows.len();
-        let renamed: HashSet<&str> = rows.iter().map(|r| r.0.as_str()).collect();
 
         let live = db::active_filepaths(&tx)?;
         let old_prefix = format!("{old}/");
@@ -790,24 +786,9 @@ impl Store {
             deletes.push(filepath);
         }
 
-        let mut hit = HashSet::new();
         for filepath in &deletes {
-            for matched in self.fts.filepaths_matched_by(filepath)? {
-                if live.contains(&matched) && !renamed.contains(matched.as_str()) {
-                    hit.insert(matched);
-                }
-            }
             self.fts.delete_by_filepath(filepath)?;
         }
-        let mut stmt = tx.prepare(&format!("{ROW_SQL}d.collection || '/' || d.path = ?1"))?;
-        for filepath in &hit {
-            rows.extend(
-                stmt.query_map([filepath], read_row)?
-                    .take(1)
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
-            );
-        }
-        drop(stmt);
 
         for (filepath, title, doc, id, raw) in &rows {
             self.fts
