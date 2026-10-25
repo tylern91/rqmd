@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-25
+
 ### Fixed
 - Changing or removing a file no longer drops the keyword-search entry of a different file whose path
   contains it. `rqmd update` and `rqmd collection remove` matched an entry by a token phrase over its
@@ -29,6 +31,11 @@
   recent file just below the plain cut can appear. Without the flag results are unchanged. No
   index change: it reads the mtime `rqmd update` already records. See
   [docs/CLI.md](docs/CLI.md#recency).
+
+### Changed
+- Dependency updates, all published at least 30 days ago: `dirs` 6 to 7 (the index and cache locations
+  are unchanged on macOS), `encoding_rs` 0.8.35 to 0.8.42 (adds `simdutf8`, `core_detect` and
+  `multiversion_no_op`), `serde_json` 1.0.150 to 1.0.151 and `libc` 0.2.186 to 0.2.189.
 
 ## [0.31.0] - 2026-10-25
 
