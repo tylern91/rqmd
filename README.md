@@ -105,6 +105,7 @@ rqmd mcp --http --port 8181         # Streamable HTTP transport
 | `rqmd search <text>` | BM25 keyword search only |
 | `rqmd vsearch <text>` | Vector similarity only |
 | `rqmd embed` / `rqmd update` | Generate embeddings / re-index changed files |
+| `rqmd watch` | Keep the full-text index current while files change (no embedding, no hooks) |
 | `rqmd embed --cleanup` | Reclaim orphaned vectors and unreferenced content (no model, no re-embed) |
 | `rqmd mcp` | Start the MCP server |
 | `rqmd collection add <path>` | Add a directory as a collection |

@@ -17,6 +17,7 @@
 | `rqmd embed --cleanup` | Reclaim orphaned vectors and unreferenced content — no model, no re-embed. Vectors of an edited note that `rqmd embed` has not embedded yet are kept, because the next `embed` copies its unchanged chunks from them |
 | `rqmd unlock [--force [--yes]]` | Remove the write lock left by a crashed or hung `embed`/`update`. Removes it only when the holder is provably dead; a live holder that has made no progress for `RQMD_LOCK_STALE_SECS` (default 600) needs `--force` and a confirmation. A holder that is alive and recently active is never removed |
 | `rqmd update [-c collection] [--run-hooks] [--full]` | Re-index: reports new, updated, unchanged, and removed (soft-deleted) document counts. A file whose size and mtime match its last indexing is counted unchanged without being read; `--full` re-reads and re-hashes every file instead. `--run-hooks` runs each collection's `update_command` even when the index was picked up implicitly from a project-local `.rqmd/` — see [Update hook trust](SECURITY.md#update-hook-trust). The summary line ends with the folders the [built-in exclusions](CONFIGURATION.md#excluding-files) left out, when there are any, and a stored ignore pattern that no longer parses is reported as a warning. A hook that runs longer than `RQMD_HOOK_TIMEOUT_SECS` (default 300) is killed; a failed or timed-out hook never stops the other collections, and is listed at the end. `SIGINT` or `SIGTERM` stops it after the file in hand; see [Interrupting update and embed](#interrupting-update-and-embed) |
+| `rqmd watch [-c collection] [--interval SECS]` | Keep the full-text index current while files change: checks the collections every `--interval` seconds (default 5, minimum 1) and re-indexes a collection whose files changed, with the same walk and rules as `rqmd update`. Keyword search only: it never embeds and never runs a collection's `update_command`. See [Watching for changes](#watching-for-changes) |
 | `rqmd status` | Index health and collection summary. The AST Chunking block lists the extensions chunked at declaration boundaries and, after `Without:`, the indexed extensions that have no grammar with their document counts (prose such as `.md` and `.txt` is not listed) |
 | `rqmd doctor` | Diagnose config, index, model, and device issues |
 | `rqmd bench [-n N]` | Embed throughput benchmark (default: 5 rounds) |
@@ -157,7 +158,7 @@ stderr, is plain text. `NO_COLOR` (set to any value) turns styling off on a term
 | `1` | Error — the command did not complete |
 | `2` | Completed with failures: `rqmd update` ran every collection but one or more update hooks failed or timed out, or `rqmd embed` finished but skipped documents it could not embed. Everything else was still indexed or embedded. (Command-line usage errors also exit `2`; they print usage text instead of a summary.) |
 | `124` | Stopped by `--timeout` (the `timeout(1)` convention). `rqmd query` exits `124` only when the deadline passes before it has results, or with `--timeout-strict`; see [Timeouts](#timeouts) |
-| `129`, `130`, `143` | `rqmd update` or `rqmd embed` stopped by `SIGHUP`, `SIGINT` or `SIGTERM` (`128` plus the signal number); see [Interrupting update and embed](#interrupting-update-and-embed) and [Update hooks and signals](#update-hooks-and-signals) |
+| `129`, `130`, `143` | `rqmd update`, `rqmd embed` or `rqmd watch` stopped by `SIGHUP`, `SIGINT` or `SIGTERM` (`128` plus the signal number); see [Interrupting update and embed](#interrupting-update-and-embed) and [Update hooks and signals](#update-hooks-and-signals) |
 
 `rqmd embed` stops early, with exit `1`, after five documents in a row fail to embed — that
 pattern points at the model or GPU rather than at a document. Work embedded up to that point
@@ -178,6 +179,34 @@ already reaches a hook that shares rqmd's foreground group, so `SIGINT` is not s
 second time. A signal that rqmd's parent had set to be ignored (for example `SIGHUP` under
 `nohup`) stays ignored. A second signal while the hook is being stopped kills the hook at once
 instead of waiting out the 5 seconds.
+
+### Watching for changes
+
+`rqmd watch` is a long-running command for keeping keyword search current without running
+`rqmd update` by hand. Every `--interval` seconds (default 5, minimum 1) it walks each collection
+and compares the files' sizes and modification times with what it saw on the previous check. It
+opens the index only for a collection whose files differ, and re-indexes that collection the way
+`rqmd update` does, so the mask, ignore patterns, hidden-file, `.gitignore`, size-limit and symlink
+rules are the same. New files become searchable, edited files are replaced, and deleted files are
+removed. `-c` limits it to one collection; a collection added or removed while it runs is picked up
+on the next check. It polls, so a change shows up within about one interval plus the time the pass
+takes. A file written within the last couple of seconds is looked at again on the next check.
+
+- **Keyword search only.** It loads no model and never embeds. Run `rqmd embed` when you want
+  vectors for what changed.
+- **Hooks never run.** A collection's `update_command` is not run by `rqmd watch`, whatever the
+  index's origin, because a command that fires on every file change is not what the hook was set up
+  for.
+- **The lock is held only while a pass runs.** `rqmd update`, `rqmd embed` and
+  `rqmd collection` work while a watch is idle. When another process holds the index lock, watch
+  prints `waiting for the index lock` once and tries again, waiting longer each time (up to 30
+  seconds), instead of failing.
+- **Paused during a rebuild.** While the full-text index still needs its one-time rebuild (an
+  index from an older release, or a new one nothing has run `rqmd update` on yet), watch prints
+  that it is paused and indexes nothing. It does not take the lock then, so the `rqmd update` that
+  performs the rebuild is not held up; watch resumes by itself afterwards.
+- **Stopping.** `SIGINT` (Ctrl-C) or `SIGTERM` stops it after the file in hand, releases the lock
+  and exits `130` or `143`. A second signal exits immediately.
 
 ### Interrupting update and embed
 

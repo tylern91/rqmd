@@ -27,6 +27,13 @@
 - `rqmd status` now lists, after `Without:`, the indexed file extensions that have no grammar, with
   their document counts. Prose (`.md`, `.markdown`, `.mdx`, `.txt`) is not listed, and nothing is
   printed when every indexed file is covered.
+- `rqmd watch [-c collection] [--interval SECS]` keeps the full-text index current while files
+  change. It checks the collections every `--interval` seconds (default 5, minimum 1) and
+  re-indexes one whose files changed, with the same rules as `rqmd update`. It indexes for keyword
+  search only: it never embeds and never runs update hooks. It holds the index lock only while a
+  pass runs, waits with a growing delay while another process holds it, stays paused while the
+  full-text index needs its rebuild, and stops on `SIGINT` or `SIGTERM` (exit `130` or `143`). See
+  [docs/CLI.md](docs/CLI.md#watching-for-changes).
 
 ### Changed
 - `rqmd update` no longer walks into the folders the built-in exclusions leave out, nor into hidden

@@ -983,13 +983,13 @@ fn stopped_by_signal(signal: i32) -> anyhow::Error {
 }
 
 /// What `update_one_collection` reports back to `run_update`.
-struct CollectionOutcome {
+pub(super) struct CollectionOutcome {
     /// The collection was fully walked and every file indexed without error.
-    clean: bool,
+    pub(super) clean: bool,
     /// Why the collection's update hook failed or timed out, if it did.
     hook_failure: Option<String>,
     /// The signal that stopped this collection's update before it finished.
-    interrupted: Option<i32>,
+    pub(super) interrupted: Option<i32>,
 }
 
 /// Re-walk one collection's directory, run its update hook, re-index changed
@@ -1009,14 +1009,14 @@ struct CollectionOutcome {
 /// caller opted in — see `store::hooks_allowed`.
 /// Per-invocation settings shared by every collection in one `rqmd update`.
 #[derive(Clone, Copy)]
-struct UpdateRun {
-    progress_mode: fmt::ProgressMode,
-    hooks_allowed: bool,
-    full: bool,
-    hook_config: HookConfig,
+pub(super) struct UpdateRun {
+    pub(super) progress_mode: fmt::ProgressMode,
+    pub(super) hooks_allowed: bool,
+    pub(super) full: bool,
+    pub(super) hook_config: HookConfig,
 }
 
-fn update_one_collection(
+pub(super) fn update_one_collection(
     s: &mut rqmd_core::Store,
     col: &Collection,
     run: UpdateRun,
