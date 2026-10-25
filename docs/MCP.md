@@ -138,7 +138,7 @@ Exact input fields per tool, as accepted by the JSON-RPC tool call
 | `multi_get` | `pattern` | `string` (required) | Glob pattern |
 | | `collections` | `string[]`, optional | Scope to these collections |
 | | `max_lines` | `number`, optional | Cap on lines returned per document (default 2000) |
-| `status` | *(none)* | | Takes no input. Reports document/vector counts and per-collection document counts; it does not disclose filesystem paths |
+| `status` | *(none)* | | Takes no input. Reports document/vector counts, `Pending embed: N` (documents whose text has no current embedding, counted for the backend the server runs with, so it can differ from a CLI run under another `RQMD_INFERENCE_BACKEND`) and per-collection document counts; it does not disclose filesystem paths |
 
 `query` and `search` page with `offset`: a response that is followed by more
 results ends with `More results are available: pass offset=N.`, and an

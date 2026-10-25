@@ -15,7 +15,10 @@ use rmcp::{
     schemars, serde, tool, tool_handler, tool_router,
 };
 
-use rqmd_core::{Deadline, Document, Store, StoreConfig, db, resolve, snap_char_boundary_backward};
+use rqmd_core::{
+    Deadline, Document, Store, StoreConfig, db, resolve, snap_char_boundary_backward,
+    store as core_store,
+};
 use rqmd_llm::{BackendKind, create_backend, no_backend};
 
 /// Hard cap on documents returned by a single `multi_get` call. Without this,
@@ -747,8 +750,20 @@ fn build_status(store: &Store) -> String {
         .query_row("SELECT COUNT(*) FROM content_vectors", [], |r| r.get(0))
         .unwrap_or(0);
 
-    let mut out =
-        format!("RQMD Index Status\n  Docs:     {total_docs}\n  Vectors:  {total_vecs}\n\n");
+    // Counted for the backend this server is configured with, so a client that
+    // reads it knows the number can differ from a CLI run under another backend.
+    let pending: i64 = db::count_docs_needing_embed(
+        &store.db,
+        &core_store::expected_fingerprint(),
+        &core_store::expected_ast_fingerprint(),
+    )
+    .unwrap_or(0);
+    let backend = format!("{:?}", BackendKind::from_env()).to_ascii_lowercase();
+
+    let mut out = format!(
+        "RQMD Index Status\n  Docs:     {total_docs}\n  Vectors:  {total_vecs}\n  \
+         Pending embed: {pending} (backend: {backend})\n\n"
+    );
 
     let cols = db::list_collections(&store.db).unwrap_or_default();
     if cols.is_empty() {
@@ -757,8 +772,8 @@ fn build_status(store: &Store) -> String {
         out.push_str(&format!("  {:<28}  {:>6}\n", "COLLECTION", "DOCS"));
         out.push_str(&format!("  {}\n", "─".repeat(36)));
         for col in &cols {
-            let count = db::list_documents(&store.db, Some(&col.name))
-                .map(|d| d.len())
+            let count = db::collection_doc_stats(&store.db, &col.name)
+                .map(|(n, _)| n)
                 .unwrap_or(0);
             out.push_str(&format!("  {:<28}  {:>6}\n", col.name, count));
         }
@@ -1023,6 +1038,50 @@ mod tests {
                 "home dir leaked: {out}"
             );
         }
+    }
+
+    /// The expected fingerprint for the backend the server was started with,
+    /// computed from the public core API rather than the helper under test.
+    fn server_expected_fingerprint() -> String {
+        let model = BackendKind::from_env().default_embed_model_name();
+        rqmd_core::store::expected_embed_fingerprint(&model)
+    }
+
+    #[test]
+    fn status_reports_documents_pending_embedding() {
+        let (_dir, server) = test_server_with_doc();
+        let store = server.fts().expect("fts store");
+        let out = build_status(&store);
+        assert!(
+            out.contains("Pending embed: 1 (backend: "),
+            "pending count missing: {out}"
+        );
+    }
+
+    #[test]
+    fn status_pending_embed_drops_to_zero_once_embedded() {
+        let (_dir, server) = test_server_with_doc();
+        let store = server.fts().expect("fts store");
+        let hash: String = store
+            .db
+            .query_row("SELECT hash FROM documents WHERE active=1", [], |r| {
+                r.get(0)
+            })
+            .expect("doc hash");
+        db::upsert_vector_meta(
+            &store.db,
+            &hash,
+            0,
+            0,
+            "model",
+            &server_expected_fingerprint(),
+            1,
+            11,
+            "2024-01-01T00:00:00Z",
+        )
+        .expect("vector meta");
+        let out = build_status(&store);
+        assert!(out.contains("Pending embed: 0 "), "got: {out}");
     }
 
     fn pool_server(readers: usize) -> (tempfile::TempDir, RqmdServer) {

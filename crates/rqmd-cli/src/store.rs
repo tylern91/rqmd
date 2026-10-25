@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use crate::format::{self as fmt, Format};
 
+pub use core_store::{expected_ast_fingerprint, expected_fingerprint};
+
 /// Where the resolved index directory came from — determines whether a
 /// collection's `update_command` hook is trusted to run without `--run-hooks`.
 /// `ProjectLocal` is the risky case: `rqmd update` picks up `.rqmd/` from the
@@ -89,37 +91,6 @@ pub fn open_store_with_backend_kind(
 ) -> Result<Store> {
     let backend = create_backend(kind).context("failed to initialize inference backend")?;
     Store::open(store_config(index_dir, read_only), backend)
-}
-
-/// The `embed_fingerprint` the currently *configured* backend (per
-/// `RQMD_INFERENCE_BACKEND`) + chunking constants would produce. Compare
-/// against `db::fingerprint_breakdown` rows to detect stale vectors — shared
-/// by `doctor`, `embed`, `query`, and `vsearch` so there is exactly one
-/// staleness detection path.
-///
-/// Derived from `BackendKind::default_embed_model_name()`, not a hardcoded
-/// `LlamaCppConfig::default()` — otherwise this permanently disagrees with the
-/// real fingerprint whenever a non-default backend (e.g. ORT) is active.
-pub fn expected_fingerprint() -> String {
-    let name = BackendKind::from_env().default_embed_model_name();
-    core_store::expected_embed_fingerprint(&name)
-}
-
-/// The `embed_fingerprint` a fresh `rqmd embed` run would produce for
-/// `rel_path` specifically, given the currently configured backend — the
-/// AST-marked variant when `rel_path` is AST-eligible, otherwise identical to
-/// [`expected_fingerprint`].
-pub fn expected_fingerprint_for_path(rel_path: &str) -> String {
-    let name = BackendKind::from_env().default_embed_model_name();
-    core_store::expected_embed_fingerprint_for_path(&name, rel_path)
-}
-
-/// The AST-marked variant of [`expected_fingerprint`] — what any AST-eligible
-/// path currently produces. Any eligible extension yields the same value, so
-/// callers that need "the" AST fingerprint (not a specific document's) use
-/// this instead of inventing a placeholder path themselves.
-pub fn expected_ast_fingerprint() -> String {
-    expected_fingerprint_for_path("placeholder.py")
 }
 
 /// Warn once if any content_vectors row *reachable from an active document*

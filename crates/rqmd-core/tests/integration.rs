@@ -1668,6 +1668,35 @@ fn count_docs_needing_embed_counts_stale_fingerprint_as_pending() {
     );
 }
 
+/// Only the byte length of a body decides whether it is embeddable: empty
+/// bodies never count, while one-character, multi-byte and multi-page bodies
+/// all do, on both the plain-path and the AST-eligible-path query.
+#[test]
+fn count_docs_needing_embed_counts_by_body_length_not_content() {
+    let dir = TempDir::new().unwrap();
+    let store = test_store(&dir);
+    let now = "2024-01-01T00:00:00Z";
+    let big = "x".repeat(200_000);
+    let docs: [(&str, &str, &str); 6] = [
+        ("h-empty", "", "empty.md"),
+        ("h-one", "x", "one.md"),
+        ("h-multibyte", "\u{e9}", "accent.md"),
+        ("h-big", big.as_str(), "big.md"),
+        ("h-empty-java", "", "Empty.java"),
+        ("h-big-java", big.as_str(), "Big.java"),
+    ];
+    for (hash, body, path) in docs {
+        upsert_content(&store.db, hash, body, now).unwrap();
+        upsert_document(&store.db, "coll", path, path, hash, now).unwrap();
+    }
+    let current = rqmd_core::store::expected_embed_fingerprint("fake");
+    assert_eq!(
+        count_docs_needing_embed(&store.db, &current, &current).unwrap(),
+        4,
+        "empty bodies must be excluded, every other body counted"
+    );
+}
+
 /// A `.java` doc is pending under the base fingerprint but not under the AST
 /// one, and a `.md` doc is the inverse — `count_docs_needing_embed` must pick
 /// the right expected fingerprint per document's path, not a single global one.

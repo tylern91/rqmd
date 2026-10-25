@@ -10,5 +10,6 @@ mod hook_signals;
 mod index_rebuild;
 mod output_plain;
 mod security;
+mod status_cost;
 mod update_skip;
 mod walk_filters;

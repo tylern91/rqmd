@@ -222,7 +222,7 @@ fn list(index_dir: &Path) -> Result<()> {
     println!("{:<30}  {:<8}  {:<12}  PATH", "NAME", "DOCS", "INCLUDED");
     println!("{}", "─".repeat(80));
     for col in &cols {
-        let count = db::list_documents(&s.db, Some(&col.name))?.len();
+        let (count, _) = db::collection_doc_stats(&s.db, &col.name)?;
         let included = if col.include_by_default { "yes" } else { "no" };
         println!(
             "{:<30}  {:<8}  {:<12}  {}",
@@ -293,7 +293,7 @@ fn show(index_dir: &Path, name: &str) -> Result<()> {
         .iter()
         .find(|c| c.name == name)
         .with_context(|| format!("collection '{name}' not found"))?;
-    let count = db::list_documents(&s.db, Some(name))?.len();
+    let (count, _) = db::collection_doc_stats(&s.db, name)?;
 
     println!("Collection: {}", col.name);
     println!("  Path:     {}", col.path);
