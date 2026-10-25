@@ -496,6 +496,42 @@ fn search_fts_multi_finds_minority_collection_despite_bulk_corpus() {
 }
 
 #[test]
+fn search_fts_multi_scope_is_exact_when_other_paths_contain_the_collection_name() {
+    // The collection is pushed down as a tokenized path match, which also
+    // matches other collections' files under a `docs/` directory. When enough
+    // of those outrank the real `docs` collection, the candidate pool used to
+    // fill with out-of-scope hits and the scoped search came back short.
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+
+    for i in 0..60 {
+        store
+            .index_document_fts_only(
+                "bulk",
+                &format!("docs/doc{i}.md"),
+                "Bulk Doc",
+                "widget widget widget widget",
+            )
+            .unwrap();
+    }
+    for i in 0..2 {
+        store
+            .index_document_fts_only("docs", &format!("doc{i}.md"), "Docs Doc", "widget")
+            .unwrap();
+    }
+    store.flush().unwrap();
+
+    let scope = vec!["docs".to_string()];
+    let hits = store.search_fts_multi("widget", 2, Some(&scope)).unwrap();
+    assert_eq!(
+        hits.len(),
+        2,
+        "expected both docs-collection hits despite out-of-scope docs/ paths outranking them: {hits:?}"
+    );
+    assert!(hits.iter().all(|h| h.collection == "docs"));
+}
+
+#[test]
 fn search_fts_lenient_parse_recovers_from_colon_syntax() {
     // Regression guard: a query fragment tantivy's default parser reads as a
     // field specifier (the colon in "error: connection refused" looks like

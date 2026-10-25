@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use rqmd_llm::{BackendKind, InferenceBackend};
@@ -831,9 +832,7 @@ impl Store {
             // No collection is default-included and none was requested explicitly.
             return Ok(vec![]);
         }
-        let hits = self
-            .fts
-            .search_fts_multi(query, limit, effective.as_deref())?;
+        let hits = self.fts_scoped(query, limit, effective.as_deref())?;
         self.hits_to_results(hits, limit)
     }
 
@@ -1216,9 +1215,7 @@ impl Store {
                 };
                 match sub.qtype {
                     QueryType::Lex => {
-                        let hits = self
-                            .fts
-                            .search_fts_multi(&sub.text, fetch_size, collections)?;
+                        let hits = self.fts_scoped(&sub.text, fetch_size, collections)?;
                         if !hits.is_empty() {
                             ranked_lists.push(fts_hits_to_ranked(&hits));
                             list_meta.push(RankedListMeta {
@@ -1270,9 +1267,7 @@ impl Store {
             let expand_text = parsed.expand_text.as_deref().unwrap_or(query);
 
             // Step 1: BM25 probe on the raw query.
-            let initial_fts = self
-                .fts
-                .search_fts_multi(expand_text, fetch_size, collections)?;
+            let initial_fts = self.fts_scoped(expand_text, fetch_size, collections)?;
             let top_score = initial_fts.first().map(|r| r.2).unwrap_or(0.0);
             let second_score = initial_fts.get(1).map(|r| r.2).unwrap_or(0.0);
             let strong_signal = !initial_fts.is_empty()
@@ -1528,6 +1523,26 @@ impl Store {
         }
     }
 
+    /// BM25 search limited to `collections`. A scope is resolved to the exact
+    /// set of active document ids first, so the full-text top-`limit` cut only
+    /// counts in-scope documents; no scope searches the whole index.
+    fn fts_scoped(
+        &self,
+        query: &str,
+        limit: usize,
+        collections: Option<&[String]>,
+    ) -> Result<Vec<(String, i64, f32)>> {
+        let ids = match collections.filter(|c| !c.is_empty()) {
+            Some(cols) => Some(Arc::new(
+                db::active_document_ids_in_collections(&self.db, cols)
+                    .context("resolve collection scope")?,
+            )),
+            None => None,
+        };
+        self.fts
+            .search_fts_scoped(query, limit, collections, ids.as_ref())
+    }
+
     fn hits_to_results(
         &self,
         hits: Vec<(String, i64, f32)>,
@@ -1658,7 +1673,7 @@ impl Store {
                     && !language_mismatch(text)
                     && seen.insert(("lex", text))
                 {
-                    let hits = self.fts.search_fts_multi(text, fetch_size, collections)?;
+                    let hits = self.fts_scoped(text, fetch_size, collections)?;
                     if !hits.is_empty() {
                         lists.push(fts_hits_to_ranked(&hits));
                         metas.push(RankedListMeta {

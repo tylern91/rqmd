@@ -383,3 +383,30 @@ fn ac_10_readd_keeps_hook_and_include_setting() {
         .stdout(contains("Included: false"))
         .stdout(contains("Pattern:  **/*.txt"));
 }
+
+/// A scoped keyword search returns every in-scope match even when many files of
+/// another collection, stored under a `docs/` directory, outrank them.
+#[test]
+fn ac_11_scoped_search_is_not_crowded_out_by_paths_that_contain_the_collection_name() {
+    let index_dir = TempDir::new().expect("tempdir");
+    let bulk = fixture_collection("bulk", "widget widget widget widget\n");
+    let nested = bulk.path.join("docs");
+    std::fs::create_dir_all(&nested).expect("mkdir nested");
+    for i in 0..60 {
+        std::fs::write(
+            nested.join(format!("n{i}.md")),
+            "widget widget widget widget\n",
+        )
+        .expect("write nested doc");
+    }
+    let docs = fixture_collection("docs", "widget\n");
+    std::fs::write(docs.path.join("other.md"), "widget\n").expect("write second doc");
+    add_collection(index_dir.path(), &bulk.path, "bulk");
+    add_collection(index_dir.path(), &docs.path, "docs");
+
+    let out = search_stdout(index_dir.path(), &["widget", "-c", "docs", "-n", "2"]);
+
+    assert!(out.contains("doc.md"), "missing doc.md in: {out}");
+    assert!(out.contains("other.md"), "missing other.md in: {out}");
+    assert!(!out.contains("bulk"), "out-of-scope hit in: {out}");
+}
