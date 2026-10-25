@@ -87,6 +87,8 @@ fn add(
         .to_string();
 
     let pattern = mask.unwrap_or("**/*.md").to_string();
+    exclusions::validate_ignore_patterns(&ignore)
+        .with_context(|| format!("collection '{collection_name}'"))?;
 
     eprintln!(
         "Adding collection '{}' → {}",
@@ -118,6 +120,7 @@ fn add(
     let document::Candidates {
         files: candidates,
         too_large,
+        excluded_dirs,
     } = document::collect_candidates(
         &abs_dir,
         &include_set,
@@ -189,14 +192,19 @@ fn add(
     if errors > 0 {
         summary.push_str(&format!(" · {errors} error(s)"));
     }
+    if let Some(clause) = document::excluded_dirs_clause(&excluded_dirs) {
+        summary.push_str(&format!(" · {clause}"));
+    }
     summary.push('.');
     println!("{summary}");
 
     if count == 0 {
         eprintln!(
             "  WARN: 0 documents indexed into new collection '{collection_name}'. Likely causes: \
-             the mask '{pattern}' matched nothing, every matched file was unreadable, or files live \
-             under a dot-directory that was excluded (try --hidden)."
+             the mask '{pattern}' matched nothing, every matched file was unreadable, files live \
+             under a dot-directory that was excluded (try --hidden), or files live under a folder \
+             the built-in rule leaves out ({}).",
+            exclusions::builtin_excluded_dirs().join(", ")
         );
     }
 
@@ -293,6 +301,11 @@ fn show(index_dir: &Path, name: &str) -> Result<()> {
     println!("  Docs:     {count}");
     println!("  Included: {}", col.include_by_default);
     println!("  Hidden:   {}", col.allow_hidden);
+    if col.ignore.is_empty() {
+        println!("  Ignore:   (none)");
+    } else {
+        println!("  Ignore:   {}", col.ignore.join(", "));
+    }
     println!("  Gitignore: {}", col.respect_gitignore);
     println!(
         "  Max file: {} bytes",

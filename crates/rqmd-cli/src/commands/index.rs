@@ -1022,6 +1022,12 @@ fn update_one_collection(
             });
         }
     };
+    for (pattern, reason) in exclusions::invalid_ignore_patterns(&col.ignore) {
+        eprintln!(
+            "  WARN: collection '{}': ignoring invalid ignore pattern '{pattern}': {reason}",
+            col.name
+        );
+    }
     let ignore_set = exclusions::build_ignore_set(&col.ignore);
 
     let mut new_count = 0usize;
@@ -1038,6 +1044,7 @@ fn update_one_collection(
     let document::Candidates {
         files,
         too_large: too_large_count,
+        excluded_dirs,
     } = document::collect_candidates(
         dir,
         &include_set,
@@ -1155,15 +1162,18 @@ fn update_one_collection(
 
     progress.clear();
 
-    // Summary line matching qmd's "Indexed: X new, Y updated..." (qmd.ts:735), extended
-    // with an honest skip-reason breakdown instead of silently dropping unreadable files.
+    // Summary line: the counts, an honest skip-reason breakdown instead of silently
+    // dropping unreadable files, then the folders the built-in rule left out.
     let skip_suffix = if skips.total() > 0 {
         format!(", skipped {} ({})", skips.total(), skips.describe())
     } else {
         String::new()
     };
+    let excluded_suffix = document::excluded_dirs_clause(&excluded_dirs)
+        .map(|clause| format!(" · {clause}"))
+        .unwrap_or_default();
     println!(
-        "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, {removed_count} removed{skip_suffix}"
+        "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, {removed_count} removed{skip_suffix}{excluded_suffix}"
     );
     Ok(CollectionOutcome {
         clean,

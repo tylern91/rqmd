@@ -17,7 +17,14 @@ By default rqmd indexes every file matching a collection's mask pattern
   a dot-prefixed directory (e.g. `~/.dotfiles`) as a collection always works
   regardless of `--hidden`.
 - `node_modules`, `vendor`, `dist`, `build`, `target`, `.cache` — these are
-  always skipped and are not affected by `--hidden`.
+  always skipped and are not affected by `--hidden`. The walk does not
+  descend into them, so a large `node_modules` or `target` tree costs nothing
+  on `rqmd update`. `collection add` and `update` name the folders they left
+  out on the summary line, relative to the collection root and capped at five
+  names:
+  `left out 2 folder(s) by the built-in rule (build/, node_modules/)`. The
+  clause is absent when nothing was left out. A folder inside a left-out
+  folder is not listed separately, and hidden folders are not listed.
 
 ```sh
 # Index hidden files/dirs under the collection root too
@@ -69,8 +76,12 @@ rqmd collection add ~/docs --mask 'docs/**/*.md'
 An invalid `--mask` glob is a hard error at `collection add` time (it decides
 what gets indexed at all, so a silently-dropped alternative would mean
 documents vanish from the index with no diagnostic). An invalid `--ignore`
-glob, by contrast, is silently skipped — an unmatchable extra exclusion is
-harmless.
+glob is also a hard error at `collection add` time: the message names the
+pattern and nothing is stored, because a mistyped pattern would otherwise
+exclude nothing without saying so. A pattern that is already stored and
+invalid (from an earlier release) does not stop `rqmd update`; it prints
+`WARN: collection '<name>': ignoring invalid ignore pattern '<pattern>'` and
+the remaining patterns still apply.
 
 **Per-collection ignore patterns** (gitignore-style globs):
 
@@ -84,6 +95,7 @@ rqmd collection add ~/docs --ignore 'drafts/**' --ignore '**/node_modules'
 
 Mask and ignore patterns are stored with the collection and apply on every
 subsequent `rqmd update` run — you only need to specify them once.
+`rqmd collection show <name>` lists the stored ignore patterns (or `(none)`).
 
 ---
 

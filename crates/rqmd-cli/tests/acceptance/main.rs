@@ -3,6 +3,7 @@
 //! linked issue. Enforced by scripts/lint-acceptance-tests.sh, not at runtime.
 mod collection;
 mod embed_reuse;
+mod exclusion_visibility;
 mod helpers;
 mod hook_signals;
 mod index_rebuild;
