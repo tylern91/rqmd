@@ -1330,7 +1330,7 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         let cols = db::list_collections(&s.db)?;
         println!("\n  Collections:   {}", cols.len());
         for col in &cols {
-            let count = db::list_documents(&s.db, Some(&col.name))?.len();
+            let (count, _) = db::collection_doc_stats(&s.db, &col.name)?;
             println!("    {} — {count} docs at {}", col.name, col.path);
         }
 

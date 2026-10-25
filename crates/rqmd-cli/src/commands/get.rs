@@ -160,7 +160,7 @@ pub fn run_ls(index_dir: &Path, path: Option<&str>) -> Result<()> {
             return Ok(());
         }
         for col in &cols {
-            let count = db::list_documents(&s.db, Some(&col.name))?.len();
+            let (count, _) = db::collection_doc_stats(&s.db, &col.name)?;
             let default_marker = if col.include_by_default {
                 ""
             } else {

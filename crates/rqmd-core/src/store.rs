@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use rqmd_llm::InferenceBackend;
+use rqmd_llm::{BackendKind, InferenceBackend};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -1832,6 +1832,37 @@ pub fn expected_embed_fingerprint(embed_model_name: &str) -> String {
 /// per-document basis.
 pub fn expected_embed_fingerprint_for_path(embed_model_name: &str, rel_path: &str) -> String {
     embed_fingerprint(embed_model_name, rel_path)
+}
+
+/// The `embed_fingerprint` the currently *configured* backend (per
+/// `RQMD_INFERENCE_BACKEND`) + chunking constants would produce. Compare
+/// against `db::fingerprint_breakdown` rows to detect stale vectors — shared
+/// by `doctor`, `embed`, `query`, `vsearch` and the MCP `status` tool so there
+/// is exactly one staleness detection path.
+///
+/// Derived from `BackendKind::default_embed_model_name()`, not a hardcoded
+/// `LlamaCppConfig::default()` — otherwise this permanently disagrees with the
+/// real fingerprint whenever a non-default backend (e.g. ORT) is active.
+pub fn expected_fingerprint() -> String {
+    let name = BackendKind::from_env().default_embed_model_name();
+    expected_embed_fingerprint(&name)
+}
+
+/// The `embed_fingerprint` a fresh `rqmd embed` run would produce for
+/// `rel_path` specifically, given the currently configured backend — the
+/// AST-marked variant when `rel_path` is AST-eligible, otherwise identical to
+/// [`expected_fingerprint`].
+pub fn expected_fingerprint_for_path(rel_path: &str) -> String {
+    let name = BackendKind::from_env().default_embed_model_name();
+    expected_embed_fingerprint_for_path(&name, rel_path)
+}
+
+/// The AST-marked variant of [`expected_fingerprint`] — what any AST-eligible
+/// path currently produces. Any eligible extension yields the same value, so
+/// callers that need "the" AST fingerprint (not a specific document's) use
+/// this instead of inventing a placeholder path themselves.
+pub fn expected_ast_fingerprint() -> String {
+    expected_fingerprint_for_path("placeholder.py")
 }
 
 #[cfg(test)]

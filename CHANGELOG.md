@@ -13,6 +13,9 @@
   line, for example `left out 2 folder(s) by the built-in rule (build/, node_modules/)`. Paths are
   relative to the collection root and at most five are named. Nothing is added when no folder was
   left out. `rqmd collection show` now lists the collection's ignore patterns.
+- The MCP `status` tool now reports `Pending embed: N`, the number of documents that have no
+  current embedding, so a client can tell when semantic results lag behind the BM25 index. The
+  count is for the backend the server runs with and is labelled with it.
 
 ### Changed
 - `rqmd update` no longer walks into the folders the built-in exclusions leave out, nor into hidden
@@ -22,6 +25,13 @@
   before anything is stored, instead of silently excluding nothing. A malformed pattern already
   stored in a collection does not stop `rqmd update`; it prints a warning and the other patterns
   still apply.
+- `rqmd status`, `rqmd doctor` and `rqmd embed` no longer read every document body to find the
+  ones that need embedding. The query now uses `octet_length()`, which takes the size from the
+  row header, so its cost no longer grows with the size of the corpus. On a 3000-document,
+  340 MB test index it dropped from about 280 ms to about 5 ms with identical counts.
+- `rqmd doctor`, `rqmd collection list`, `rqmd collection show`, `rqmd ls` and the MCP `status`
+  tool count a collection's documents with `COUNT(*)` instead of loading every document row.
+  The numbers shown are unchanged.
 
 ### Fixed
 - Output is plain text when it is not a terminal. Before, `status`, `update`, `embed`, `doctor` and

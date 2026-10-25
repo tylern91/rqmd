@@ -561,9 +561,13 @@ pub fn has_vector(conn: &Connection, hash: &str, seq: i64, fingerprint: &str) ->
 /// `ast_fingerprint` vector, AND no non-eligible document on the hash has its
 /// `base_fingerprint` vector.
 ///
-/// The `length(c.doc) > 0` filter mirrors run_embed's `if body.is_empty() { continue; }`
+/// The `octet_length(c.doc) > 0` filter mirrors run_embed's `if body.is_empty() { continue; }`
 /// skip — without it, empty files (hash = SHA-256 of "") count as pending forever
-/// but never embed. A hash with vectors only under a *stale* fingerprint (neither
+/// but never embed. `octet_length` rather than `length`: on TEXT, `length` makes
+/// SQLite read every overflow page of the body to count characters, so the
+/// call would cost as much as the corpus is large; `octet_length` reads the
+/// stored size from the record header. Both are 0 exactly for an empty body.
+/// A hash with vectors only under a *stale* fingerprint (neither
 /// current `base_fingerprint` nor `ast_fingerprint`) still counts as pending.
 pub fn count_docs_needing_embed(
     conn: &Connection,
@@ -575,7 +579,7 @@ pub fn count_docs_needing_embed(
         return conn.query_row(
             "SELECT COUNT(DISTINCT d.hash) FROM documents d \
              JOIN content c ON c.hash = d.hash \
-             WHERE d.active = 1 AND length(c.doc) > 0 \
+             WHERE d.active = 1 AND octet_length(c.doc) > 0 \
              AND NOT EXISTS (\
                  SELECT 1 FROM content_vectors cv \
                  WHERE cv.hash = d.hash AND cv.embed_fingerprint = ?1\
@@ -597,7 +601,7 @@ pub fn count_docs_needing_embed(
                  MIN(CASE WHEN {eligible_clause} THEN 1 ELSE 0 END) AS all_ast \
              FROM documents d \
              JOIN content c ON c.hash = d.hash \
-             WHERE d.active = 1 AND length(c.doc) > 0 \
+             WHERE d.active = 1 AND octet_length(c.doc) > 0 \
              GROUP BY d.hash\
          ) h \
          WHERE (h.has_ast = 0 OR NOT EXISTS (\
