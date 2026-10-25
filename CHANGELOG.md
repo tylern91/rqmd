@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-25
+
 ### Added
 - `rqmd update` and `rqmd embed` now stop at the next safe point on `SIGINT`, `SIGTERM` or `SIGHUP`
   instead of being killed mid-write. `update` finishes the file in hand and saves what it has
