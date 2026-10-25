@@ -45,6 +45,12 @@
   The default of 1 is one result per file as before. `-n` and `limit` count sections, and a file
   listed more than once is labelled `section n of m`. See
   [docs/CLI.md](docs/CLI.md#sections-per-file).
+- `rqmd query --recency <half-life>`, and the MCP `query` field `recency`, rank newer files higher:
+  each score is multiplied by a factor of the file's modification time that falls from 1 to a floor
+  of 0.5, with the part above the floor halving every half-life (`30d`, `2w` or `12h`). Old files
+  are only down-weighted, never dropped. Off by default, and without it results are unchanged. No
+  index change: it reads the mtime `rqmd update` already records. See
+  [docs/CLI.md](docs/CLI.md#recency).
 
 ### Changed
 - `rqmd update` no longer walks into the folders the built-in exclusions leave out, nor into hidden

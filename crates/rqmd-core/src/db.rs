@@ -332,6 +332,21 @@ pub fn load_doc_stat_cache(
     Ok(rows)
 }
 
+/// The recorded file mtime (nanoseconds since the epoch) of the active
+/// document at `collection`/`path`. `None` when it has none: not scanned since
+/// the column was added, or too recent to trust when it was indexed.
+pub fn document_mtime_ns(conn: &Connection, collection: &str, path: &str) -> Result<Option<i64>> {
+    let mtime: Option<Option<i64>> = conn
+        .query_row(
+            "SELECT mtime_ns FROM documents WHERE collection=?1 AND path=?2 AND active=1",
+            params![collection, path],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("get document mtime")?;
+    Ok(mtime.flatten())
+}
+
 /// Record (or clear, with `None`) the stat a document was just indexed from.
 pub fn set_document_stat(
     conn: &Connection,

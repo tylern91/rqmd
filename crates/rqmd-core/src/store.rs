@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rqmd_llm::{BackendKind, InferenceBackend};
 use sha2::{Digest, Sha256};
@@ -26,8 +26,8 @@ use crate::{
     query::parse_query,
     rrf::{reciprocal_rank_fusion, rrf_weights},
     types::{
-        Chunk, QueryOutcome, QueryStage, QueryType, RankedListMeta, RankedResult, RerankStatus,
-        SearchOptions, SearchResult, clamp_per_file,
+        Chunk, QueryOutcome, QueryStage, QueryType, RankedListMeta, RankedResult, Recency,
+        RerankStatus, SearchOptions, SearchResult, clamp_per_file,
     },
 };
 
@@ -1363,7 +1363,12 @@ impl Store {
             per_file,
         );
 
-        let results = self.assemble_results(candidate_docs, sections, rerank_scores, limit);
+        let recency = match options.recency {
+            Some(recency) => Some(self.recency_factors(&recency, &candidate_docs)?),
+            None => None,
+        };
+        let results =
+            self.assemble_results(candidate_docs, sections, rerank_scores, recency, limit);
         Ok(QueryOutcome { results, rerank })
     }
 
@@ -1672,15 +1677,40 @@ impl Store {
         Ok(Some(scores))
     }
 
+    /// The recency factor of each candidate, in order. A file with no recorded
+    /// mtime, or one dated in the future, counts as just modified.
+    fn recency_factors(
+        &self,
+        recency: &Recency,
+        candidate_docs: &[(RankedResult, String, String)],
+    ) -> Result<Vec<f32>> {
+        let now = SystemTime::now();
+        candidate_docs
+            .iter()
+            .map(|(cand, _, _)| {
+                let (collection, path) = split_filepath(&cand.filepath);
+                let mtime = db::document_mtime_ns(&self.db, collection, path)?
+                    .and_then(|ns| u64::try_from(ns).ok())
+                    .map(|ns| UNIX_EPOCH + Duration::from_nanos(ns));
+                let age = mtime
+                    .and_then(|at| now.duration_since(at).ok())
+                    .unwrap_or_default();
+                Ok(recency.factor(age))
+            })
+            .collect()
+    }
+
     /// Step 7 of `hybrid_query_multi`: blend each section's rerank score
     /// with its candidate's RRF score (falling back to pure RRF when reranking
-    /// didn't run), build the final `SearchResult`s, then sort by score
-    /// descending and truncate to `limit`.
+    /// didn't run), scale it by the candidate's `recency` factor when there is
+    /// one, build the final `SearchResult`s, then sort by score descending and
+    /// truncate to `limit`.
     fn assemble_results(
         &self,
         candidate_docs: Vec<(RankedResult, String, String)>,
         sections: Sections,
         rerank_scores: Option<Vec<f32>>,
+        recency: Option<Vec<f32>>,
         limit: usize,
     ) -> Vec<SearchResult> {
         let mut picks = Vec::new();
@@ -1699,6 +1729,7 @@ impl Store {
                     rrf_score
                 };
                 next_score += 1;
+                let score = score * recency.as_ref().map_or(1.0, |factors| factors[i]);
                 picks.push(Pick {
                     filepath: cand.filepath.clone(),
                     doc: i,
@@ -3976,11 +4007,51 @@ mod tests {
             let chunks: Vec<Vec<(String, usize)>> =
                 order.iter().map(|_| vec![(String::new(), 0)]).collect();
             let got: Vec<String> = store
-                .assemble_results(candidates, chunks, None, 10)
+                .assemble_results(candidates, chunks, None, None, 10)
                 .into_iter()
                 .map(|r| r.path)
                 .collect();
             assert_eq!(got, ["a.md", "c.md", "m.md", "x.md"], "order {order:?}");
+        }
+    }
+
+    /// Candidates whose recency factors are equal keep the path order; a
+    /// smaller factor moves a candidate down without dropping it.
+    #[test]
+    fn assemble_results_with_recency_keeps_ties_in_path_order() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = open_stub_store(dir.path(), tie_stub());
+        let ids = ["m", "c", "x", "a"];
+        for (factors, expected) in [
+            (vec![0.8; 4], vec!["a.md", "c.md", "m.md", "x.md"]),
+            // Factors follow `ids`: m 1.0, c 0.5, x 1.0, a 0.5.
+            (
+                vec![1.0, 0.5, 1.0, 0.5],
+                vec!["m.md", "x.md", "a.md", "c.md"],
+            ),
+        ] {
+            let candidates: Vec<(RankedResult, String, String)> = ids
+                .iter()
+                .map(|id| {
+                    (
+                        RankedResult {
+                            filepath: format!("coll/{id}.md"),
+                            title: id.to_string(),
+                            backend_score: 0.5,
+                        },
+                        format!("{id}hash"),
+                        format!("body {id}"),
+                    )
+                })
+                .collect();
+            let chunks: Vec<Vec<(String, usize)>> =
+                ids.iter().map(|_| vec![(String::new(), 0)]).collect();
+            let got: Vec<String> = store
+                .assemble_results(candidates, chunks, None, Some(factors), 10)
+                .into_iter()
+                .map(|r| r.path)
+                .collect();
+            assert_eq!(got, expected);
         }
     }
 

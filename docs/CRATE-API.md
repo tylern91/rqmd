@@ -44,6 +44,10 @@ with `SearchOptions { per_file }`. `per_file` is clamped to `1..=MAX_PER_FILE`
 (5); `limit` then counts sections, and `section_numbers(&results)` says which
 results are repeats of one file. The methods above are the `per_file = 1` case.
 
+`SearchOptions { recency: Some(Recency::new(parse_half_life("30d")?)), .. }`
+weights `hybrid_query_outcome_with` results by file age (`Recency::with_floor`
+changes the 0.5 floor); the other `_with` methods ignore it.
+
 This example is kept honest by an identical `no_run` doctest on `Store` itself
 (`crates/rqmd-core/src/store.rs`), compiled by `cargo test --doc` — a future
 signature change fails that build before it can drift from this page.
