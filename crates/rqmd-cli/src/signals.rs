@@ -132,8 +132,13 @@ mod imp {
         }
     }
 
-    /// The last signal received since the outermost guard was installed.
+    /// The last signal received since the outermost guard was installed. A thread
+    /// without a guard sees none, so a signal raised under another thread's guard
+    /// cannot stop unrelated work.
     pub fn pending() -> Option<i32> {
+        if !HELD.with(Cell::get) {
+            return None;
+        }
         match RECEIVED.load(Ordering::SeqCst) {
             0 => None,
             signal => Some(signal),
