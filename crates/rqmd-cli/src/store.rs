@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::format::{self as fmt, Format};
 
-pub use core_store::{expected_ast_fingerprint, expected_fingerprint};
+pub use core_store::{expected_ast_fingerprints, expected_fingerprint, expected_fingerprint_set};
 
 /// Where the resolved index directory came from — determines whether a
 /// collection's `update_command` hook is trusted to run without `--run-hooks`.
@@ -101,15 +101,14 @@ pub fn open_store_with_backend_kind(
 /// indefinitely, so counting them here would warn on an index with nothing
 /// actually stale.
 ///
-/// Two fingerprints — base and AST-marked — are simultaneously current: a
-/// path-scoped marker means eligible and non-eligible paths legitimately
-/// coexist under different fingerprints, so this checks membership in
-/// `{base, ast}` rather than equality with a single expected value.
+/// The base fingerprint and one AST fingerprint per language marker are
+/// simultaneously current: a path-scoped marker means eligible and non-eligible
+/// paths legitimately coexist under different fingerprints, so this checks
+/// membership in that set rather than equality with a single expected value.
 pub fn warn_if_fingerprint_stale(s: &Store) {
-    let base = expected_fingerprint();
-    let ast = expected_ast_fingerprint();
+    let current = expected_fingerprint_set();
     let breakdown = db::fingerprint_breakdown_active(&s.db).unwrap_or_default();
-    if breakdown.iter().any(|(fp, _)| fp != &base && fp != &ast) {
+    if breakdown.iter().any(|(fp, _)| !current.contains(fp)) {
         eprintln!("{}", stale_embed_warning(fmt::Paint::stderr()));
     }
 }

@@ -557,21 +557,86 @@ pub fn has_vector(conn: &Connection, hash: &str, seq: i64, fingerprint: &str) ->
     Ok(count > 0)
 }
 
+/// Active documents per file extension, exact case and without the dot, most
+/// common first (ties by name). Documents with no extension are not counted.
+/// Reads paths only, never a body.
+pub fn active_extension_counts(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare("SELECT path FROM documents WHERE active = 1")?;
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    for path in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        let path = path?;
+        if let Some(ext) = Path::new(&path).extension().and_then(|e| e.to_str()) {
+            *counts.entry(ext.to_string()).or_default() += 1;
+        }
+    }
+    let mut counts: Vec<(String, i64)> = counts.into_iter().collect();
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok(counts)
+}
+
+/// An embed fingerprint that applies to the files of some AST languages, as
+/// opposed to the base fingerprint every other file carries. Languages added
+/// after the registry each have their own, so one `Vec<AstFingerprint>` holds
+/// every AST fingerprint a build currently produces (empty without AST
+/// chunking). See `store::expected_ast_fingerprints`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AstFingerprint {
+    pub extensions: Vec<&'static str>,
+    pub fingerprint: String,
+}
+
+/// SQL condition, over a `documents` row aliased `d`, that is true when the
+/// path ends in one of `extensions`. `GLOB` is case-sensitive, like the
+/// extension match the chunker itself makes, so a `.SQL` file is not expected
+/// to carry the fingerprint of a language it is never chunked as.
+fn path_has_extension_clause(extensions: &[&str]) -> String {
+    extensions
+        .iter()
+        .map(|ext| format!("d.path GLOB '*.{ext}'"))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+/// Aggregate columns, per hash, over the active documents carrying it: `g<i>`
+/// is 1 when any of them belongs to AST group `i`, `all_ast` is 1 when every
+/// one belongs to some group.
+fn ast_flag_columns(groups: &[AstFingerprint]) -> String {
+    let every_extension: Vec<&str> = groups
+        .iter()
+        .flat_map(|g| g.extensions.iter().copied())
+        .collect();
+    let mut cols: Vec<String> = groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            format!(
+                "MAX(CASE WHEN {} THEN 1 ELSE 0 END) AS g{i}",
+                path_has_extension_clause(&g.extensions)
+            )
+        })
+        .collect();
+    cols.push(format!(
+        "MIN(CASE WHEN {} THEN 1 ELSE 0 END) AS all_ast",
+        path_has_extension_clause(&every_extension)
+    ));
+    cols.join(", ")
+}
+
 /// Count distinct content hashes still needing embedding: active documents with
 /// NON-EMPTY content whose hash has no content_vectors row at any fingerprint
-/// that *some* document sharing that hash currently expects — `ast_fingerprint`
-/// for a path matching `chunking::ast_chunking_extensions()`, `base_fingerprint`
-/// otherwise (see `store::expected_fingerprint`/`expected_fingerprint_for_path`).
+/// that *some* document sharing that hash currently expects — the fingerprint of
+/// the AST group a document's extension belongs to (`ast`, see
+/// `store::expected_ast_fingerprints`), `base_fingerprint` for any other path.
 ///
 /// A hash is satisfied per-hash, not per-document-row: `content_vectors` is keyed
 /// `(hash, seq)` and `ON CONFLICT DO UPDATE` on `embed_fingerprint` means a hash
 /// can carry exactly one fingerprint at a time (`run_embed`'s `seen_hashes` dedup
 /// embeds whichever path reaches a hash first). Requiring every document's own
 /// path-expected fingerprint to match — the old per-row behavior — can never be
-/// satisfied when an AST-eligible and a non-eligible path share a hash, since the
-/// single stored fingerprint cannot equal both. So a hash counts as pending only
-/// if NEITHER route is satisfied: no AST-eligible document on the hash has its
-/// `ast_fingerprint` vector, AND no non-eligible document on the hash has its
+/// satisfied when documents of different groups share a hash, since the single
+/// stored fingerprint cannot equal both. So a hash counts as pending only if
+/// NONE of its routes is satisfied: no document on the hash has its group's
+/// fingerprint vector, AND no non-AST document on the hash has its
 /// `base_fingerprint` vector.
 ///
 /// The `octet_length(c.doc) > 0` filter mirrors run_embed's `if body.is_empty() { continue; }`
@@ -581,14 +646,13 @@ pub fn has_vector(conn: &Connection, hash: &str, seq: i64, fingerprint: &str) ->
 /// call would cost as much as the corpus is large; `octet_length` reads the
 /// stored size from the record header. Both are 0 exactly for an empty body.
 /// A hash with vectors only under a *stale* fingerprint (neither
-/// current `base_fingerprint` nor `ast_fingerprint`) still counts as pending.
+/// current `base_fingerprint` nor any `ast` one) still counts as pending.
 pub fn count_docs_needing_embed(
     conn: &Connection,
     base_fingerprint: &str,
-    ast_fingerprint: &str,
+    ast: &[AstFingerprint],
 ) -> rusqlite::Result<i64> {
-    let extensions = crate::chunking::ast_chunking_extensions();
-    if extensions.is_empty() {
+    if ast.is_empty() {
         return conn.query_row(
             "SELECT COUNT(DISTINCT d.hash) FROM documents d \
              JOIN content c ON c.hash = d.hash \
@@ -602,33 +666,34 @@ pub fn count_docs_needing_embed(
         );
     }
 
-    let eligible_clause = extensions
-        .iter()
-        .map(|ext| format!("lower(d.path) LIKE '%.{ext}'"))
+    let satisfied_by_group = (0..ast.len())
+        .map(|i| {
+            format!(
+                "(h.g{i} = 1 AND EXISTS (\
+                     SELECT 1 FROM content_vectors cv \
+                     WHERE cv.hash = h.hash AND cv.embed_fingerprint = ?{}))",
+                i + 2
+            )
+        })
         .collect::<Vec<_>>()
         .join(" OR ");
     let sql = format!(
         "SELECT COUNT(*) FROM (\
-             SELECT d.hash AS hash, \
-                 MAX(CASE WHEN {eligible_clause} THEN 1 ELSE 0 END) AS has_ast, \
-                 MIN(CASE WHEN {eligible_clause} THEN 1 ELSE 0 END) AS all_ast \
+             SELECT d.hash AS hash, {flags} \
              FROM documents d \
              JOIN content c ON c.hash = d.hash \
              WHERE d.active = 1 AND octet_length(c.doc) > 0 \
              GROUP BY d.hash\
          ) h \
-         WHERE (h.has_ast = 0 OR NOT EXISTS (\
+         WHERE NOT ({satisfied_by_group} OR (h.all_ast = 0 AND EXISTS (\
              SELECT 1 FROM content_vectors cv \
-             WHERE cv.hash = h.hash AND cv.embed_fingerprint = ?2\
-         )) \
-         AND (h.all_ast = 1 OR NOT EXISTS (\
-             SELECT 1 FROM content_vectors cv \
-             WHERE cv.hash = h.hash AND cv.embed_fingerprint = ?1\
-         ))"
+             WHERE cv.hash = h.hash AND cv.embed_fingerprint = ?1)))",
+        flags = ast_flag_columns(ast)
     );
-    conn.query_row(&sql, params![base_fingerprint, ast_fingerprint], |r| {
-        r.get(0)
-    })
+    let fingerprints = std::iter::once(base_fingerprint)
+        .chain(ast.iter().map(|g| g.fingerprint.as_str()))
+        .collect::<Vec<_>>();
+    conn.query_row(&sql, rusqlite::params_from_iter(fingerprints), |r| r.get(0))
 }
 
 /// Check whether a content hash has at least one vector row under any fingerprint
@@ -645,22 +710,21 @@ pub fn hash_has_any_vector(conn: &Connection, hash: &str) -> bool {
         > 0
 }
 
-/// Per-hash equivalent of [`count_docs_needing_embed`]'s "satisfied by either
+/// Per-hash equivalent of [`count_docs_needing_embed`]'s "satisfied by any
 /// route" rule — used by `run_embed` to decide whether a hash still needs
 /// embedding, instead of the per-document [`hash_has_vector_with_fingerprint`]
-/// check, which disagrees with the counter for a hash shared by an AST-eligible
-/// and a non-eligible path (the counter says satisfied once either fingerprint
+/// check, which disagrees with the counter for a hash shared by documents of
+/// different groups (the counter says satisfied once any expected fingerprint
 /// is present; the per-document check demands a specific one and can churn
-/// forever). `has_ast`/`all_ast` mirror the SQL aggregate in the counter: `true`
-/// if any/every document currently active on this hash is AST-eligible.
+/// forever). The group flags mirror the SQL aggregate in the counter: group `i`
+/// is set if any document currently active on this hash belongs to it.
 pub fn hash_needs_embed(
     conn: &Connection,
     hash: &str,
     base_fingerprint: &str,
-    ast_fingerprint: &str,
+    ast: &[AstFingerprint],
 ) -> rusqlite::Result<bool> {
-    let extensions = crate::chunking::ast_chunking_extensions();
-    if extensions.is_empty() {
+    if ast.is_empty() {
         return Ok(!hash_has_vector_with_fingerprint(
             conn,
             hash,
@@ -668,24 +732,22 @@ pub fn hash_needs_embed(
         ));
     }
 
-    let eligible_clause = extensions
-        .iter()
-        .map(|ext| format!("lower(d.path) LIKE '%.{ext}'"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
     let sql = format!(
-        "SELECT MAX(CASE WHEN {eligible_clause} THEN 1 ELSE 0 END), \
-                MIN(CASE WHEN {eligible_clause} THEN 1 ELSE 0 END) \
-         FROM documents d WHERE d.hash = ?1 AND d.active = 1"
+        "SELECT {} FROM documents d WHERE d.hash = ?1 AND d.active = 1",
+        ast_flag_columns(ast)
     );
-    let (has_ast, all_ast): (Option<i64>, Option<i64>) =
-        conn.query_row(&sql, params![hash], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    let has_ast = has_ast.unwrap_or(0) == 1;
-    let all_ast = all_ast.unwrap_or(0) == 1;
+    let flags: Vec<Option<i64>> = conn.query_row(&sql, params![hash], |r| {
+        (0..=ast.len()).map(|i| r.get(i)).collect()
+    })?;
+    let flag = |i: usize| flags[i].unwrap_or(0) == 1;
 
-    let ast_satisfied = has_ast && hash_has_vector_with_fingerprint(conn, hash, ast_fingerprint);
-    let base_satisfied = !all_ast && hash_has_vector_with_fingerprint(conn, hash, base_fingerprint);
-    Ok(!(ast_satisfied || base_satisfied))
+    let group_satisfied = ast
+        .iter()
+        .enumerate()
+        .any(|(i, g)| flag(i) && hash_has_vector_with_fingerprint(conn, hash, &g.fingerprint));
+    let base_satisfied =
+        !flag(ast.len()) && hash_has_vector_with_fingerprint(conn, hash, base_fingerprint);
+    Ok(!(group_satisfied || base_satisfied))
 }
 
 /// Check whether a content hash already has a vector row at the *current*

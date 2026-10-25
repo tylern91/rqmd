@@ -390,12 +390,12 @@ pub fn chunk_document(text: &str) -> Vec<Chunk> {
 }
 
 /// Chunk `text` from `path`, dispatching to AST-aware declaration-boundary
-/// chunking for source code when the `ast-chunking` feature is compiled in
-/// and `path`'s extension has a supported grammar; otherwise (or if the parse
+/// chunking for source code when a grammar for `path`'s extension is compiled
+/// in; otherwise (or if the parse
 /// finds no boundaries) falls back to [`chunk_document`]'s markdown-oriented
 /// chunker so markdown/text/unknown-extension behavior is unchanged.
 pub fn chunk_document_for_path(path: &str, text: &str) -> Vec<Chunk> {
-    #[cfg(feature = "ast-chunking")]
+    #[cfg(feature = "ast-registry")]
     {
         if let Some(chunks) = std::path::Path::new(path)
             .extension()
@@ -405,7 +405,7 @@ pub fn chunk_document_for_path(path: &str, text: &str) -> Vec<Chunk> {
             return chunks;
         }
     }
-    #[cfg(not(feature = "ast-chunking"))]
+    #[cfg(not(feature = "ast-registry"))]
     {
         let _ = path;
     }
@@ -417,20 +417,48 @@ pub fn chunk_document_for_path(path: &str, text: &str) -> Vec<Chunk> {
 /// time, so this is accurate regardless of whether the calling crate (e.g.
 /// `rqmd-cli`) declares an `ast-chunking` feature of its own.
 pub fn ast_chunking_compiled() -> bool {
-    cfg!(feature = "ast-chunking")
+    cfg!(feature = "ast-registry")
 }
 
-/// File extensions dispatched to AST chunking when [`ast_chunking_compiled`]
-/// is `true`. Empty when the feature is off — every extension falls back to
+/// File extensions dispatched to AST chunking, one per compiled grammar. Empty
+/// when no grammar is compiled in — every extension falls back to
 /// [`chunk_document`] in that case.
-pub fn ast_chunking_extensions() -> &'static [&'static str] {
-    #[cfg(feature = "ast-chunking")]
+pub fn ast_chunking_extensions() -> Vec<&'static str> {
+    #[cfg(feature = "ast-registry")]
     {
-        &["ts", "tsx", "js", "jsx", "mjs", "cjs", "java", "py"]
+        crate::ast_chunk::extensions()
     }
-    #[cfg(not(feature = "ast-chunking"))]
+    #[cfg(not(feature = "ast-registry"))]
     {
-        &[]
+        Vec::new()
+    }
+}
+
+/// The text a language adds to the embed fingerprint of its files, or `None`
+/// when `ext` has no compiled grammar.
+pub fn ast_fingerprint_marker(ext: &str) -> Option<&'static str> {
+    #[cfg(feature = "ast-registry")]
+    {
+        crate::ast_chunk::fingerprint_marker(ext)
+    }
+    #[cfg(not(feature = "ast-registry"))]
+    {
+        let _ = ext;
+        None
+    }
+}
+
+/// Compiled extensions grouped by fingerprint marker: the files of one group
+/// share one embed fingerprint, and each group is a distinct "current"
+/// fingerprint besides the base one.
+pub fn ast_fingerprint_groups() -> Vec<(&'static str, Vec<&'static str>)> {
+    #[cfg(feature = "ast-registry")]
+    {
+        crate::ast_chunk::extensions_by_marker()
+    }
+    #[cfg(not(feature = "ast-registry"))]
+    {
+        Vec::new()
     }
 }
 

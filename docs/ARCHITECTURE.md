@@ -97,18 +97,45 @@ The break-point scoring above is tuned for prose — it has no notion of a
 function or class boundary, so source files chunked that way get
 near-arbitrary cuts (there's rarely a blank line or heading near the
 3,600-character target inside code). Under the default `ast-chunking`
-feature, files with a recognized extension (`.ts`/`.tsx`, `.js`/`.jsx`/`.mjs`/`.cjs`,
-`.java`, `.py`) are parsed with `tree-sitter` instead, and chunked at
-declaration boundaries — function, method, class, interface, and similar
-top-level constructs, kept deliberately narrow per language rather than
-exhaustive. Parsing is capped at 5 seconds to guard against pathological
-input; the chunker falls back to the character-offset chunker above whenever
+feature, files with a recognized extension are parsed with `tree-sitter`
+instead, and chunked at declaration boundaries — function, method, class,
+interface, and similar top-level constructs, kept deliberately narrow per
+language rather than exhaustive:
+
+| Language | Extensions |
+|---|---|
+| TypeScript, JavaScript | `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs` |
+| Java, Python | `.java`, `.py` |
+| Go, Rust, C# | `.go`, `.rs`, `.cs` |
+| Kotlin, Swift | `.kt`, `.kts`, `.swift` |
+| HCL (Terraform) | `.tf`, `.tfvars`, `.hcl` (top-level blocks only; a nested block is not a boundary) |
+| SQL | `.sql` (one boundary per statement) |
+
+For Go, Rust, C#, Kotlin, Swift, HCL and SQL, the comments (and, in Rust, the
+attributes) on the lines directly above a declaration travel with it, so a
+chunk does not end on the doc comment of the next declaration. Extensions are
+matched exactly as written, so `.SQL` is not chunked as SQL. Parsing is capped
+at 5 seconds to guard against pathological input; the chunker falls back to the character-offset chunker above whenever
 the extension isn't recognized, parsing fails, or the parse yields no
 boundary nodes at all (e.g. an empty file). An oversized single function
 still gets a reasonable backward-break split via the same windowed-join
 primitive the markdown chunker uses, rather than a hard cut mid-token.
 Building without the `ast-chunking` feature falls back to the markdown
-chunker for every file, source code included.
+chunker for every file, source code included. `rqmd status` lists the indexed
+extensions that have no grammar.
+
+Languages live in one registry (`crates/rqmd-core/src/ast_chunk.rs`) keyed by
+file extension. Adding one takes a table entry (extensions, grammar, boundary
+node kinds) and an `ast-<language>` cargo feature with its optional grammar
+crate in `crates/rqmd-core/Cargo.toml`, listed in `ast-chunking`; a build can
+enable a single language with `--no-default-features --features
+rqmd-core/ast-go` instead. Each entry names the text it adds to the embed
+fingerprint of its files. The languages chunked before the registry share the
+original `ast_chunking:1` marker, so their fingerprints did not change;
+every language added since carries its own, so changing one grammar re-embeds
+only that language's files. Files of a newly supported language are
+re-embedded once, and a chunk whose text is unchanged (every file of up to
+3,600 bytes) reuses its stored vector instead of being encoded again.
 
 ### Security boundaries
 
