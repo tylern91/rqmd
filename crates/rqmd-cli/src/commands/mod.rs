@@ -8,3 +8,4 @@ pub mod mcp;
 pub mod query;
 pub mod similar;
 pub mod unlock;
+pub mod watch;

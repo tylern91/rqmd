@@ -85,13 +85,23 @@ impl IndexLock {
     /// `embed`/`update` is genuinely running; silently reclaims the lock
     /// when its owner is provably gone.
     pub fn acquire(index_dir: &Path) -> Result<Self> {
+        match Self::try_acquire(index_dir)? {
+            Ok(lock) => Ok(lock),
+            Err(holder) => bail!("{}", busy_message(&holder)),
+        }
+    }
+
+    /// Like [`acquire`](Self::acquire), but a lock held by another process is
+    /// returned as `Ok(Err(holder))` so the caller can wait and retry instead of
+    /// failing. Other failures stay errors.
+    pub fn try_acquire(index_dir: &Path) -> Result<std::result::Result<Self, Holder>> {
         let _guard = Guard::lock(index_dir)?;
         let dir = index_dir.join(LOCK_DIR_NAME);
         match fs::create_dir(&dir) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if let LockState::Held(holder) = inspect(&dir) {
-                    bail!("{}", busy_message(&holder));
+                    return Ok(Err(holder));
                 }
                 // Owner is gone (or never identified itself) — reclaim.
                 fs::remove_dir_all(&dir).ok();
@@ -105,11 +115,11 @@ impl IndexLock {
             }
         }
         write_metadata(&dir)?;
-        Ok(Self {
+        Ok(Ok(Self {
             index_dir: index_dir.to_path_buf(),
             dir,
             last_beat: Cell::new(Instant::now()),
-        })
+        }))
     }
 
     /// Record progress so `rqmd unlock` can tell a slow holder from a hung
@@ -355,6 +365,16 @@ mod tests {
         let err = IndexLock::acquire(tmp.path()).unwrap_err();
         assert!(err.to_string().contains("already writing"), "{err}");
         assert!(err.to_string().contains("rqmd unlock"), "{err}");
+    }
+
+    #[test]
+    fn try_acquire_reports_the_holder_instead_of_failing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = IndexLock::try_acquire(tmp.path()).unwrap().unwrap();
+        let holder = IndexLock::try_acquire(tmp.path()).unwrap().unwrap_err();
+        assert_eq!(holder.pid, Some(std::process::id()));
+        drop(first);
+        assert!(IndexLock::try_acquire(tmp.path()).unwrap().is_ok());
     }
 
     #[test]

@@ -174,6 +174,15 @@ enum Commands {
         #[arg(long)]
         full: bool,
     },
+    /// Keep the full-text index current while files change (never embeds, never runs hooks)
+    Watch {
+        #[arg(short = 'c', long)]
+        collection: Option<String>,
+        /// Seconds between checks of the collections for changes
+        #[arg(long, value_name = "SECS", default_value = "5",
+              value_parser = clap::value_parser!(u64).range(1..))]
+        interval: u64,
+    },
     /// Diagnose config, index, model, and device issues
     Doctor,
     /// Benchmark embed throughput for the configured backend
@@ -455,6 +464,14 @@ fn run() -> Result<()> {
             collection.as_deref(),
             store::hooks_allowed(index_source, run_hooks),
             full,
+        ),
+        Commands::Watch {
+            collection,
+            interval,
+        } => commands::watch::run_watch(
+            &index_dir,
+            collection.as_deref(),
+            std::time::Duration::from_secs(interval),
         ),
         Commands::Doctor => commands::index::run_doctor(&index_dir),
         Commands::Bench { rounds } => commands::bench::run_bench(&index_dir, rounds),
