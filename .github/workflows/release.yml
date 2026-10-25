@@ -22,6 +22,8 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # Read-only: lets "Require green CI" list the workflow runs of the commit.
+  actions: read
 
 concurrency:
   group: release-main
@@ -38,7 +40,8 @@ jobs:
          contains(github.event.pull_request.labels.*.name, 'patch')) &&
         !contains(github.event.pull_request.labels.*.name, 'skip-release')))
     runs-on: ubuntu-slim
-    timeout-minutes: 10
+    # 10 for the steps, plus the 15-minute CI wait of "Require green CI", plus slack.
+    timeout-minutes: 30
     outputs:
       version: ${{ steps.ver.outputs.next }}
       latest: ${{ steps.ver.outputs.latest }}
@@ -182,6 +185,32 @@ jobs:
           else
             printf 'empty=false\n' >> "$GITHUB_OUTPUT"
           fi
+      - name: Require green CI on the commit being released
+        # Nothing in GitHub stops a red build from reaching main (the ruleset
+        # has no required checks), so refuse to tag a commit whose Security
+        # Scan, or Rust CI when the commits since the last tag touch Rust CI
+        # paths, has not succeeded. Waits up to 15 minutes for the push-to-main
+        # runs to finish; fails on failure, cancellation or timeout. Runs after
+        # the cheap checks above and before any tag exists, for both triggers.
+        # A dry run checks once and only warns, so it still previews the notes.
+        # The values reach the script through env, never through the shell text.
+        if: >
+          steps.guard.outputs.skip == 'false' &&
+          steps.notes_guard.outputs.empty == 'false'
+        env:
+          LATEST_TAG: ${{ steps.ver.outputs.latest }}
+          DRY_RUN: ${{ steps.ctx.outputs.dry_run }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          if [ "$DRY_RUN" = "true" ]; then
+            RQMD_CI_WAIT_TIMEOUT=0 RQMD_CI_LEVEL=warning \
+              bash scripts/require-green-ci.sh "$sha" "$LATEST_TAG" \
+              || echo "::warning::dry run: CI is not green on $sha yet; a real release would wait up to 15 minutes and then fail"
+          else
+            bash scripts/require-green-ci.sh "$sha" "$LATEST_TAG"
+          fi
+
       - name: Import GPG key
         id: gpg
         if: steps.guard.outputs.skip == 'false'
