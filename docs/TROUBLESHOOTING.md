@@ -37,6 +37,14 @@ specific token instead of the cached one.
 `OrtBackend` handles embeddings only. Reranking uses `LlamaCppBackend`
 automatically as a fallback.
 
+## "results were not reranked"
+
+`rqmd query` prints this warning on stderr, and the MCP `query` tool ends its text with the same
+message as a `Note:` line, when the rerank model failed or the active backend cannot rerank. The
+results are still valid, in BM25 + vector fusion order, and the exit code is `0`. Run the query
+again with `RUST_LOG=warn` to see the underlying error, which usually points at a missing or
+corrupt rerank model file (see [MODELS.md](MODELS.md)). See [Rerank fallback](CLI.md#rerank-fallback).
+
 ## Japanese, Chinese or Korean search finds nothing
 
 If `rqmd search` warns that the full-text index predates the current tokenizer and schema, the

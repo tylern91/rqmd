@@ -114,6 +114,11 @@ passed at the next stage boundary (before expansion, each expanded sub-query, or
 model call already running is not interrupted, so a call can overrun by one stage. The other
 tools are single index lookups and have no such bound.
 
+If the rerank model fails, returns an unusable score list, or the active backend cannot rerank,
+`query` still returns its results in fusion order and ends the text with one `Note:` line saying
+the results were not reranked. The note names no file path and does not repeat the error; the
+daemon's log (`RUST_LOG=warn`) has it. Passing `rerank: false` is a request and adds no note.
+
 ## MCP tool parameters
 
 Exact input fields per tool, as accepted by the JSON-RPC tool call

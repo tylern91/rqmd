@@ -196,6 +196,21 @@ run, and `update` may leave files it indexed in that run missing from search res
 for the index lock, loading a model and a single model call cannot be interrupted: the signal
 is acted on once they return, or send a second one to leave at once.
 
+## Rerank fallback
+
+`rqmd query` reranks the fused candidates with the cross-encoder. If the rerank model fails, returns
+an unusable score list (a different count than there are candidates, or no finite score), or the
+active inference backend cannot rerank, the results keep their BM25 + vector fusion order and the
+exit code stays `0`. Stderr gets one plain line, so stdout and `--format json` stay parseable and
+the line reads the same under `NO_COLOR` and `TERM=dumb`:
+
+```
+rqmd: warning: results were not reranked: the rerank model failed, so they are in keyword and vector fusion order (set RUST_LOG=warn for details)
+```
+
+`RUST_LOG=warn` also logs the underlying error. `--no-rerank` is a request, not a failure, and
+prints no warning.
+
 ## Timeouts
 
 `rqmd query --timeout SECS` and `rqmd embed --timeout SECS` stop with exit `124` once the

@@ -388,8 +388,8 @@ impl RqmdServer {
         let mut store = self
             .ml()
             .map_err(|e| format!("Error loading inference backend: {e:#}"))?;
-        let results = store
-            .hybrid_query_multi_with_deadline(
+        let outcome = store
+            .hybrid_query_outcome(
                 &p.query,
                 intent,
                 fetch_len(offset, limit),
@@ -399,8 +399,11 @@ impl RqmdServer {
                 Deadline::after(self.tool_timeout),
             )
             .map_err(|e| format!("Error running query: {e:#}"))?;
-        let (page, has_more) = page_of(results, offset, limit);
-        Ok(format_results(&page, &p.query, offset, has_more))
+        let (page, has_more) = page_of(outcome.results, offset, limit);
+        Ok(with_rerank_note(
+            format_results(&page, &p.query, offset, has_more),
+            outcome.rerank,
+        ))
     }
 
     fn search_blocking(&self, p: SearchInput) -> Result<String, String> {
@@ -513,6 +516,15 @@ fn format_results(
         ));
     }
     out
+}
+
+/// Append one note line when results are in fusion order because reranking
+/// failed or was unavailable. The note never carries paths or error detail.
+fn with_rerank_note(text: String, status: rqmd_core::RerankStatus) -> String {
+    match status.notice() {
+        Some(notice) => format!("{}\nNote: {notice}\n", text.trim_end()),
+        None => text,
+    }
 }
 
 /// Parse "file.md:100:40" → (path, Some(100), Some(40))
@@ -842,6 +854,24 @@ mod tests {
             format_results(&[], "q", 0, false),
             "No results found for: q"
         );
+    }
+
+    #[test]
+    fn rerank_note_is_one_extra_line_only_for_degraded_runs() {
+        use rqmd_core::RerankStatus;
+        let body =
+            "Found 1 result(s) for \"q\":\n\n[1] T #abc123\n  rqmd://col/a.md\n\n".to_string();
+        for status in [RerankStatus::Reranked, RerankStatus::NotRun] {
+            assert_eq!(with_rerank_note(body.clone(), status), body);
+        }
+        for status in [RerankStatus::Unsupported, RerankStatus::Failed] {
+            let out = with_rerank_note(body.clone(), status);
+            let note: Vec<&str> = out.lines().filter(|l| l.starts_with("Note: ")).collect();
+            assert_eq!(note.len(), 1, "{out}");
+            assert!(note[0].contains("not reranked"), "{out}");
+            assert!(!note[0].contains('/'), "note must not carry a path: {out}");
+            assert!(out.starts_with(body.trim_end()), "{out}");
+        }
     }
 
     #[test]
