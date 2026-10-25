@@ -2239,3 +2239,184 @@ fn reopened_store_never_reissues_a_vid_hard_deleted_by_eviction() {
         highest_vid_ever_issued
     );
 }
+
+// ── Collection rename / remove ────────────────────────────────────────────────
+//
+// Full-text entries are stored under "collection/path", so a rename has to
+// re-index the renamed collection's entries; the vectors are keyed by content
+// hash and need no work.
+
+fn fts_paths(store: &Store, query: &str, collection: Option<&str>) -> Vec<String> {
+    let mut paths: Vec<String> = store
+        .search_fts(query, 20, collection)
+        .unwrap()
+        .into_iter()
+        .map(|h| format!("{}/{}", h.collection, h.path))
+        .collect();
+    paths.sort();
+    paths
+}
+
+#[test]
+fn rename_collection_reindexes_only_the_renamed_collections_fts_entries() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    store
+        .index_document_fts_only("old", "x.md", "X", "zebra in old")
+        .unwrap();
+    store
+        .index_document_fts_only("other", "y.md", "Y", "zebra in other")
+        .unwrap();
+    store.flush().unwrap();
+    set_config(&store.db, "context:rqmd://old/", "root context").unwrap();
+    set_config(&store.db, "context:rqmd://old/sub/", "sub context").unwrap();
+    set_config(&store.db, "context:rqmd://other/", "other context").unwrap();
+
+    let summary = store.rename_collection("old", "new").unwrap();
+    assert_eq!(summary.documents, 1);
+    assert_eq!(summary.stale_removed, 0);
+
+    assert_eq!(fts_paths(&store, "zebra", Some("new")), vec!["new/x.md"]);
+    assert!(fts_paths(&store, "zebra", Some("old")).is_empty());
+    assert_eq!(
+        fts_paths(&store, "zebra", Some("other")),
+        vec!["other/y.md"]
+    );
+    assert!(
+        get_document_by_filepath(&store.db, "new", "x.md")
+            .unwrap()
+            .is_some()
+    );
+
+    assert_eq!(
+        get_config(&store.db, "context:rqmd://new/")
+            .unwrap()
+            .as_deref(),
+        Some("root context")
+    );
+    assert_eq!(
+        get_config(&store.db, "context:rqmd://new/sub/")
+            .unwrap()
+            .as_deref(),
+        Some("sub context")
+    );
+    assert!(
+        get_config(&store.db, "context:rqmd://old/")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        get_config(&store.db, "context:rqmd://old/sub/")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        get_config(&store.db, "context:rqmd://other/")
+            .unwrap()
+            .as_deref(),
+        Some("other context")
+    );
+
+    // Editing the file afterwards leaves exactly one entry for it.
+    store
+        .index_document_fts_only("new", "x.md", "X", "zebra in new, edited")
+        .unwrap();
+    store.flush().unwrap();
+    assert_eq!(
+        fts_paths(&store, "zebra", None),
+        vec!["new/x.md", "other/y.md"]
+    );
+}
+
+#[test]
+fn rename_collection_removes_entries_left_by_an_earlier_rename() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    store
+        .index_document_fts_only("a", "x.md", "X", "zebra first")
+        .unwrap();
+    store.flush().unwrap();
+
+    // Rows move, the full-text entry keeps the old name.
+    store
+        .db
+        .execute(
+            "UPDATE documents SET collection = 'b' WHERE collection = 'a'",
+            [],
+        )
+        .unwrap();
+    store
+        .index_document_fts_only("b", "x.md", "X", "zebra second")
+        .unwrap();
+    store.flush().unwrap();
+    assert_eq!(fts_paths(&store, "zebra", None), vec!["b/x.md", "b/x.md"]);
+
+    let summary = store.rename_collection("b", "c").unwrap();
+    assert_eq!(summary.documents, 1);
+    assert_eq!(summary.stale_removed, 1);
+    assert_eq!(fts_paths(&store, "zebra", None), vec!["c/x.md"]);
+}
+
+#[test]
+fn rename_collection_into_an_existing_name_changes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    store
+        .index_document_fts_only("a", "x.md", "X", "zebra in a")
+        .unwrap();
+    store
+        .index_document_fts_only("b", "x.md", "X", "zebra in b")
+        .unwrap();
+    store.flush().unwrap();
+    set_config(&store.db, "context:rqmd://a/", "a context").unwrap();
+
+    let err = store.rename_collection("a", "b").unwrap_err();
+    assert!(
+        format!("{err:#}").contains("already exists"),
+        "unexpected error: {err:#}"
+    );
+
+    assert_eq!(list_documents(&store.db, Some("a")).unwrap().len(), 1);
+    assert_eq!(list_documents(&store.db, Some("b")).unwrap().len(), 1);
+    assert_eq!(fts_paths(&store, "zebra", None), vec!["a/x.md", "b/x.md"]);
+    assert_eq!(
+        get_config(&store.db, "context:rqmd://a/")
+            .unwrap()
+            .as_deref(),
+        Some("a context")
+    );
+}
+
+#[test]
+fn purge_collection_deletes_that_collections_path_contexts_only() {
+    let dir = TempDir::new().unwrap();
+    let store = test_store(&dir);
+    for key in [
+        "context:rqmd://gone/",
+        "context:rqmd://gone/sub/",
+        "context:rqmd://gone2/",
+        "context:rqmd://kept/",
+        "context:/",
+    ] {
+        set_config(&store.db, key, "ctx").unwrap();
+    }
+
+    purge_collection(&store.db, "gone").unwrap();
+
+    assert!(
+        get_config(&store.db, "context:rqmd://gone/")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        get_config(&store.db, "context:rqmd://gone/sub/")
+            .unwrap()
+            .is_none()
+    );
+    for key in ["context:rqmd://gone2/", "context:rqmd://kept/", "context:/"] {
+        assert!(
+            get_config(&store.db, key).unwrap().is_some(),
+            "{key} was removed"
+        );
+    }
+}

@@ -97,6 +97,13 @@ Mask and ignore patterns are stored with the collection and apply on every
 subsequent `rqmd update` run — you only need to specify them once.
 `rqmd collection show <name>` lists the stored ignore patterns (or `(none)`).
 
+**Collection names**: a name must not be empty or contain `/` (a `/` would
+make `collection/path` ambiguous in `rqmd get` and `rqmd://` URIs). Both
+`collection add --name` and `collection rename` reject such names. Running
+`collection add` again for a name that already exists updates its path, mask,
+ignore, hidden, gitignore and size settings from the new flags, and keeps the
+update hook (`collection update-cmd`) and the include/exclude setting.
+
 ---
 
 ## Environment variables

@@ -1141,6 +1141,12 @@ pub fn purge_collection(conn: &Connection, name: &str) -> Result<Vec<String>> {
         "DELETE FROM store_collections WHERE name = ?1",
         params![name],
     )?;
+    // The contexts belong to the collection: left behind, they would attach to
+    // any later collection that reuses the name.
+    conn.execute(
+        "DELETE FROM store_config WHERE substr(key, 1, length(?1)) = ?1",
+        params![collection_context_key(name)],
+    )?;
 
     Ok(filepaths)
 }
@@ -1231,7 +1237,22 @@ pub fn orphaned_vector_hashes(conn: &Connection) -> Result<Vec<String>> {
     Ok(rows)
 }
 
+/// Rename a collection: its `store_collections` row, its `documents` rows and
+/// its path contexts (`context:rqmd://<old>/...` keys).
+///
+/// Runs several statements, so callers wrap it in a transaction;
+/// [`crate::Store::rename_collection`] does. Fails, changing nothing, when
+/// `new` is already used by a collection or by any document row.
 pub fn rename_collection(conn: &Connection, old: &str, new: &str) -> Result<()> {
+    let taken: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM store_collections WHERE name = ?1) \
+             OR EXISTS(SELECT 1 FROM documents WHERE collection = ?1)",
+        params![new],
+        |row| row.get(0),
+    )?;
+    if taken {
+        anyhow::bail!("collection '{new}' already exists");
+    }
     conn.execute(
         "UPDATE store_collections SET name=?2 WHERE name=?1",
         params![old, new],
@@ -1240,7 +1261,26 @@ pub fn rename_collection(conn: &Connection, old: &str, new: &str) -> Result<()> 
         "UPDATE documents SET collection=?2 WHERE collection=?1",
         params![old, new],
     )?;
+    // Prefix compared with substr, not LIKE, so `_` and `%` in a name are literal.
+    let old_prefix = collection_context_key(old);
+    let new_prefix = collection_context_key(new);
+    conn.execute(
+        "UPDATE OR REPLACE store_config SET key = ?2 || substr(key, length(?1) + 1) \
+         WHERE substr(key, 1, length(?1)) = ?1",
+        params![old_prefix, new_prefix],
+    )?;
     Ok(())
+}
+
+/// `"collection/path"` of every active document: the Tantivy filepaths that
+/// should exist.
+pub fn active_filepaths(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt =
+        conn.prepare("SELECT collection || '/' || path FROM documents WHERE active = 1")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    Ok(rows)
 }
 
 pub fn set_collection_include(conn: &Connection, name: &str, include: bool) -> Result<()> {

@@ -86,6 +86,8 @@ fn add(
         })
         .to_string();
 
+    validate_collection_name(&collection_name)?;
+
     let pattern = mask.unwrap_or("**/*.md").to_string();
     exclusions::validate_ignore_patterns(&ignore)
         .with_context(|| format!("collection '{collection_name}'"))?;
@@ -97,6 +99,16 @@ fn add(
     );
 
     let mut s = store::open_store_no_backend(index_dir, false)?;
+    // Re-adding a name keeps what `add` has no flag for: the update hook and the
+    // include-by-default setting. Walk settings come from this invocation.
+    let existing = db::list_collections(&s.db)?
+        .into_iter()
+        .find(|c| c.name == collection_name);
+    if existing.is_some() {
+        eprintln!(
+            "Updating existing collection '{collection_name}' (keeping its update hook and include setting)"
+        );
+    }
     let mut progress = fmt::Progress::new(fmt::ProgressMode::detect());
 
     let ignore_set = exclusions::build_ignore_set(&ignore);
@@ -109,8 +121,8 @@ fn add(
         path: abs_dir.to_string_lossy().to_string(),
         pattern: pattern.clone(),
         ignore,
-        include_by_default: true,
-        update_command: None,
+        include_by_default: existing.as_ref().is_none_or(|c| c.include_by_default),
+        update_command: existing.and_then(|c| c.update_command),
         allow_hidden: hidden,
         respect_gitignore,
         max_file_bytes,
@@ -272,8 +284,25 @@ fn remove(index_dir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// A collection name appears as `<collection>/<path>` in `rqmd get` and in
+/// `rqmd://` URIs, so it must be non-empty and free of `/`.
+fn validate_collection_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        bail!("invalid collection name '{name}': must not be empty");
+    }
+    if name.contains('/') {
+        bail!("invalid collection name '{name}': must not contain '/'");
+    }
+    Ok(())
+}
+
 fn rename(index_dir: &Path, old: &str, new: &str) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir, true)?;
+    validate_collection_name(new)?;
+    // Shares IndexLock with embed/update/remove: the rename rewrites the
+    // collection's full-text entries, which a concurrent writer must not touch.
+    let _lock = IndexLock::acquire(index_dir)?;
+
+    let mut s = store::open_store_no_backend(index_dir, false)?;
     let cols = db::list_collections(&s.db)?;
     if !cols.iter().any(|c| c.name == old) {
         bail!("collection '{old}' not found");
@@ -281,8 +310,22 @@ fn rename(index_dir: &Path, old: &str, new: &str) -> Result<()> {
     if cols.iter().any(|c| c.name == new) {
         bail!("collection '{new}' already exists");
     }
-    db::rename_collection(&s.db, old, new)?;
-    println!("Renamed '{old}' → '{new}'.");
+    let summary = s.rename_collection(old, new)?;
+    println!(
+        "Renamed '{old}' → '{new}' ({} document(s) re-indexed).",
+        summary.documents
+    );
+    if summary.stale_removed > 0 {
+        println!(
+            "Removed {} stale full-text entr{} left by an earlier rename.",
+            summary.stale_removed,
+            if summary.stale_removed == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        );
+    }
     Ok(())
 }
 

@@ -17,5 +17,5 @@ pub mod types;
 pub use chunking::{SnippetResult, extract_snippet, snap_char_boundary_backward};
 pub use deadline::{Deadline, TimedOut};
 pub use lock::{DEFAULT_STALE_AFTER, Holder, IndexLock, LockState, lock_state, remove_lock};
-pub use store::{IndexOutcome, PendingVectorMeta, Store, StoreConfig};
+pub use store::{IndexOutcome, PendingVectorMeta, RenameSummary, Store, StoreConfig};
 pub use types::{Collection, Document, QueryOutcome, RerankStatus, SearchResult};

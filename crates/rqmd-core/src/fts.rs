@@ -420,6 +420,25 @@ impl FtsIndex {
         Ok(())
     }
 
+    /// The stored `filepath` of every live document in the committed index.
+    /// Staged, uncommitted writes are not visible here.
+    pub fn indexed_filepaths(&self) -> Result<Vec<String>> {
+        let searcher = self.reader.searcher();
+        let mut paths = Vec::new();
+        for segment in searcher.segment_readers() {
+            let store = segment
+                .get_store_reader(1)
+                .context("tantivy store reader")?;
+            for doc in store.iter::<TantivyDocument>(segment.alive_bitset()) {
+                let doc = doc.context("read tantivy doc")?;
+                if let Some(path) = doc.get_first(self.schema.filepath).and_then(|v| v.as_str()) {
+                    paths.push(path.to_string());
+                }
+            }
+        }
+        Ok(paths)
+    }
+
     /// Build a query that matches only documents indexed under exactly this
     /// `filepath` string.
     ///
