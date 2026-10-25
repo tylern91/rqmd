@@ -128,6 +128,27 @@ impl Watch {
         );
     }
 
+    /// Passes finished so far: each prints one `Indexed:` summary line.
+    fn passes(&mut self) -> usize {
+        while let Ok(line) = self.lines.try_recv() {
+            self.seen.push(line);
+        }
+        self.seen
+            .iter()
+            .filter(|l| l.starts_with("Indexed:"))
+            .count()
+    }
+
+    /// Passes that added, updated or removed something.
+    fn changing_passes(&mut self) -> usize {
+        self.passes();
+        self.seen
+            .iter()
+            .filter(|l| l.starts_with("Indexed:"))
+            .filter(|l| !(l.starts_with("Indexed: 0 new, 0 updated,") && l.contains(", 0 removed")))
+            .count()
+    }
+
     fn exited(&mut self) -> Option<ExitStatus> {
         self.child.try_wait().ok().flatten()
     }
@@ -165,6 +186,11 @@ fn age(file: &Path) {
 /// updates: a fresh index needs its one-time full-text rebuild first, and watch
 /// stays paused until that has happened.
 fn setup(body: &str) -> (TempDir, Fixture) {
+    setup_with(body, &[])
+}
+
+/// [`setup`] with extra `collection add` arguments.
+fn setup_with(body: &str, add_args: &[&str]) -> (TempDir, Fixture) {
     let index_dir = TempDir::new().expect("tempdir");
     let fx = fixture_collection("c", body);
     age(&fx.path.join("doc.md"));
@@ -172,6 +198,7 @@ fn setup(body: &str) -> (TempDir, Fixture) {
         .args(["collection", "add"])
         .arg(&fx.path)
         .args(["--name", "c"])
+        .args(add_args)
         .assert()
         .success();
     for _ in 0..2 {
@@ -196,7 +223,11 @@ fn lock_dir(index_dir: &Path) -> PathBuf {
 /// Make the index look locked by a live process (this test process).
 fn hold_lock(index_dir: &Path) -> PathBuf {
     let dir = lock_dir(index_dir);
-    std::fs::create_dir(&dir).expect("create lock dir");
+    // A pass that has just printed its summary may still hold the lock.
+    assert!(
+        wait_until(LIMIT, || std::fs::create_dir(&dir).is_ok()),
+        "the lock stayed held"
+    );
     std::fs::write(dir.join("pid"), std::process::id().to_string()).expect("write lock pid");
     dir
 }
@@ -434,4 +465,150 @@ fn ac_11_watch_holds_the_lock_only_while_it_indexes() {
             .success();
         assert!(watch.exited().is_none());
     }
+}
+
+/// Write each `(relative path, body)` under `root`, creating folders as needed.
+fn write_tree(root: &Path, files: &[(&str, &str)]) {
+    for (rel, body) in files {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(path, body).expect("write");
+    }
+}
+
+/// Files that the default mask, the `drafts/**` ignore pattern, the hidden-file
+/// rule and the built-in folder list each leave out, with `included.md` last so
+/// that it is searchable only after a pass that has seen all of them.
+const EXCLUSION_TREE: &[(&str, &str)] = &[
+    ("notes.txt", "masktoken\n"),
+    ("drafts/ignored.md", "ignoretoken\n"),
+    (".hidden-note.md", "hiddentoken\n"),
+    (".dotdir/inner.md", "dotdirtoken\n"),
+    ("node_modules/pkg/readme.md", "builtintoken\n"),
+    ("included.md", "includedtoken\n"),
+];
+
+#[test]
+fn ac_12_a_burst_of_writes_to_one_file_costs_one_pass() {
+    let (index_dir, fx) = setup("alpha body\n");
+    let mut watch = Watch::start(index_dir.path(), &[]);
+    watch.ready_after_first_pass();
+    let before = watch.passes();
+    let before_changing = watch.changing_passes();
+
+    // While the lock is held no pass can start, so every write below lands
+    // between two checks however long the burst takes.
+    let lock = hold_lock(index_dir.path());
+    let doc = fx.path.join("doc.md");
+    std::fs::write(&doc, "burstzero first revision\n").expect("first write");
+    assert!(
+        watch.wait_for_line("waiting for the index lock", LIMIT),
+        "watch never noticed the change; output: {:?}",
+        watch.seen
+    );
+    for n in 1..=30 {
+        std::fs::write(
+            &doc,
+            format!("burst revision number {n} bursttransient{n}\n"),
+        )
+        .expect("burst write");
+    }
+    std::fs::write(&doc, "burstfinal is how it ends\n").expect("last write");
+    // Stamped long ago, so the pass that follows is the last one this burst costs.
+    age(&doc);
+    std::fs::remove_dir_all(&lock).expect("release lock");
+
+    assert!(
+        wait_until(LIMIT, || finds(index_dir.path(), "burstfinal", "doc.md")),
+        "the last revision never became searchable; output: {:?}",
+        watch.seen
+    );
+    assert!(
+        !wait_until(QUIET, || watch.passes() > before + 1),
+        "the burst caused more than one pass; output: {:?}",
+        watch.seen
+    );
+    assert_eq!(watch.passes(), before + 1, "output: {:?}", watch.seen);
+    assert_eq!(
+        watch.changing_passes(),
+        before_changing + 1,
+        "output: {:?}",
+        watch.seen
+    );
+    for stale in ["burstzero", "bursttransient30"] {
+        assert!(
+            !finds(index_dir.path(), stale, "doc.md"),
+            "{stale} is an intermediate revision and must not be indexed"
+        );
+    }
+}
+
+#[test]
+fn ac_13_excluded_files_are_never_indexed_but_an_included_one_is() {
+    let (index_dir, fx) = setup_with("alpha body\n", &["--ignore", "drafts/**"]);
+    let mut watch = Watch::start(index_dir.path(), &[]);
+    watch.ready_after_first_pass();
+
+    write_tree(&fx.path, EXCLUSION_TREE);
+
+    assert!(
+        wait_until(LIMIT, || finds(
+            index_dir.path(),
+            "includedtoken",
+            "included.md"
+        )),
+        "the included file never became searchable; output: {:?}",
+        watch.seen
+    );
+    let excluded = [
+        ("masktoken", "notes.txt"),
+        ("ignoretoken", "ignored.md"),
+        ("hiddentoken", ".hidden-note.md"),
+        ("dotdirtoken", "inner.md"),
+        ("builtintoken", "readme.md"),
+    ];
+    // The checks span several more passes, since fresh files are looked at
+    // again until their stamps settle.
+    assert!(
+        !wait_until(QUIET, || excluded.iter().any(|(term, file)| finds(
+            index_dir.path(),
+            term,
+            file
+        ))),
+        "an excluded file was indexed; output: {:?}",
+        watch.seen
+    );
+}
+
+#[test]
+fn ac_14_hidden_files_are_indexed_only_when_the_collection_allows_them() {
+    let (index_dir, fx) = setup_with("alpha body\n", &["--ignore", "drafts/**", "--hidden"]);
+    let mut watch = Watch::start(index_dir.path(), &[]);
+    watch.ready_after_first_pass();
+
+    write_tree(&fx.path, EXCLUSION_TREE);
+
+    for (term, file) in [
+        ("includedtoken", "included.md"),
+        ("hiddentoken", ".hidden-note.md"),
+        ("dotdirtoken", "inner.md"),
+    ] {
+        assert!(
+            wait_until(LIMIT, || finds(index_dir.path(), term, file)),
+            "{file} never became searchable; output: {:?}",
+            watch.seen
+        );
+    }
+    // Hidden files are the only exclusion `--hidden` lifts.
+    assert!(
+        !wait_until(QUIET, || [
+            ("masktoken", "notes.txt"),
+            ("ignoretoken", "ignored.md"),
+            ("builtintoken", "readme.md"),
+        ]
+        .iter()
+        .any(|(term, file)| finds(index_dir.path(), term, file))),
+        "a file excluded by the mask, an ignore pattern or the built-in list was indexed; output: {:?}",
+        watch.seen
+    );
 }
