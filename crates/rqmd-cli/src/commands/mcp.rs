@@ -25,6 +25,13 @@ pub fn run_mcp(
         );
     }
 
+    // Checked here so a bad value fails the launch itself, not a detached child.
+    let idle_exit = if http {
+        rqmd_mcp::idle_exit_from_env()?
+    } else {
+        None
+    };
+
     if is_daemon {
         return spawn_daemon(index_dir, host, port, allow_non_loopback);
     }
@@ -51,7 +58,7 @@ pub fn run_mcp(
     let index_dir_owned = index_dir.to_path_buf();
     let host_owned = host.to_string();
     let pid = std::process::id();
-    let result = rt.block_on(rqmd_mcp::run_http(server, host, port, || {
+    let result = rt.block_on(rqmd_mcp::run_http(server, host, port, idle_exit, || {
         daemon::write_pidfile(&index_dir_owned, pid, &host_owned, port)
     }));
     daemon::remove_pidfile(index_dir);

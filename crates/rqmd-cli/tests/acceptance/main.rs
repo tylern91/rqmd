@@ -3,6 +3,7 @@
 //! linked issue. Enforced by scripts/lint-acceptance-tests.sh, not at runtime.
 mod ast_languages;
 mod collection;
+mod daemon_idle_exit;
 mod embed_reuse;
 mod exclusion_visibility;
 mod graceful_interrupt;

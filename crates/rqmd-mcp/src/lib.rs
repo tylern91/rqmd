@@ -2,21 +2,25 @@ mod server;
 
 pub use server::RqmdServer;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use axum::{
     Json, Router,
+    body::{Body, Bytes, HttpBody},
     extract::{Request, State},
-    http::StatusCode,
+    http::{Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
 };
+use http_body::{Frame, SizeHint};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 use tower_http::limit::RequestBodyLimitLayer;
 
 type McpHttpService = StreamableHttpService<RqmdServer, LocalSessionManager>;
@@ -58,6 +62,136 @@ fn spawn_idle_eviction(server: RqmdServer) {
             }
         }
     });
+}
+
+/// Environment variable that makes the HTTP server exit after this many
+/// seconds without a request.
+pub const IDLE_EXIT_ENV: &str = "RQMD_MCP_IDLE_EXIT_SECS";
+
+/// Parse `RQMD_MCP_IDLE_EXIT_SECS`: unset means no idle exit, anything but a
+/// positive whole number of seconds is an error.
+pub fn parse_idle_exit(value: Option<&str>) -> Result<Option<Duration>> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(secs) if secs > 0 => Ok(Some(Duration::from_secs(secs))),
+        _ => bail!("{IDLE_EXIT_ENV} must be a positive whole number of seconds, got {raw:?}"),
+    }
+}
+
+/// Idle-exit setting from the process environment.
+pub fn idle_exit_from_env() -> Result<Option<Duration>> {
+    parse_idle_exit(std::env::var(IDLE_EXIT_ENV).ok().as_deref())
+}
+
+/// Requests in progress, and when a request last began or ended. One lock, so
+/// the idle check never pairs a zero count with a stale time.
+struct Activity {
+    state: Mutex<(usize, Instant)>,
+}
+
+/// Held while a request is being answered.
+struct Busy(Arc<Activity>);
+
+impl Activity {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new((0, Instant::now())),
+        }
+    }
+
+    fn begin(self: &Arc<Self>) -> Busy {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        *state = (state.0 + 1, Instant::now());
+        Busy(self.clone())
+    }
+
+    /// How long the server has had no request, or `None` while one is in progress.
+    fn idle_for(&self) -> Option<Duration> {
+        let (in_progress, last) = *self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (in_progress == 0).then(|| last.elapsed())
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        *state = (state.0.saturating_sub(1), Instant::now());
+    }
+}
+
+/// Resolves once the server has been idle for `ttl`.
+async fn idle_expired(activity: Arc<Activity>, ttl: Duration) {
+    loop {
+        match activity.idle_for() {
+            Some(idle) if idle >= ttl => return,
+            Some(idle) => tokio::time::sleep(ttl - idle).await,
+            None => tokio::time::sleep(ttl).await,
+        }
+    }
+}
+
+fn is_mcp_path(path: &str) -> bool {
+    path == "/mcp" || path.starts_with("/mcp/")
+}
+
+/// Count requests to `/mcp` for the idle timer. `/health` and rejected hosts
+/// never get here. A POST is answered over a response stream, so it stays in
+/// progress until that stream ends; a GET is the long-lived event stream and
+/// does not.
+async fn track_activity(
+    State(activity): State<Arc<Activity>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !is_mcp_path(req.uri().path()) {
+        return next.run(req).await;
+    }
+    let busy = activity.begin();
+    let held = req.method() == Method::POST;
+    let response = next.run(req).await;
+    if !held {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    Response::from_parts(
+        parts,
+        Body::new(Held {
+            body,
+            busy: Some(busy),
+        }),
+    )
+}
+
+/// Response body that keeps its request in progress until the body is finished or dropped.
+struct Held {
+    body: Body,
+    busy: Option<Busy>,
+}
+
+impl HttpBody for Held {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
+        let polled = Pin::new(&mut self.body).poll_frame(cx);
+        if matches!(polled, Poll::Ready(None | Some(Err(_)))) {
+            self.busy = None;
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
 }
 
 /// Run an MCP server over stdio (blocks until the client disconnects).
@@ -166,6 +300,7 @@ fn build_router(
     allowed_hosts: Vec<String>,
     pid: u32,
     index_dir: String,
+    activity: Arc<Activity>,
 ) -> Router {
     let allowed_hosts = Arc::new(allowed_hosts);
     Router::new()
@@ -178,6 +313,7 @@ fn build_router(
             }),
         )
         .nest_service("/mcp", mcp_service)
+        .layer(middleware::from_fn_with_state(activity, track_activity))
         .layer(RequestBodyLimitLayer::new(MAX_MCP_REQUEST_BODY_BYTES))
         .layer(middleware::from_fn_with_state(
             allowed_hosts,
@@ -230,6 +366,9 @@ fn http_server_config(allowed_hosts: &[String], port: u16) -> StreamableHttpServ
 /// Run an MCP server over Streamable HTTP on the given host/port (blocks
 /// until the server is shut down).
 ///
+/// `idle_exit` (see [`parse_idle_exit`]) stops the server once no request has
+/// arrived for that long.
+///
 /// `on_bound` fires once the listener has actually bound the port — the
 /// right moment for a caller to record this process as the daemon (e.g.
 /// write a pidfile), rather than doing so speculatively before the bind is
@@ -238,6 +377,7 @@ pub async fn run_http(
     server: RqmdServer,
     host: &str,
     port: u16,
+    idle_exit: Option<Duration>,
     on_bound: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     spawn_idle_eviction(server.clone());
@@ -254,10 +394,19 @@ pub async fn run_http(
 
     let listener = tokio::net::TcpListener::bind((bare_host(host), port)).await?;
     on_bound()?;
-    serve_http(listener, server, allowed_hosts, port, shutdown_signal()).await
+    serve_http(
+        listener,
+        server,
+        allowed_hosts,
+        port,
+        idle_exit,
+        shutdown_signal(),
+    )
+    .await
 }
 
-/// Serve on an already-bound listener until `shutdown` completes. Cancelling
+/// Serve on an already-bound listener until `shutdown` completes or, when
+/// `idle_exit` is set, no request has arrived for that long. Cancelling
 /// the transport's token then ends every open SSE stream, so graceful
 /// shutdown does not wait on a client that never disconnects.
 async fn serve_http(
@@ -265,6 +414,7 @@ async fn serve_http(
     server: RqmdServer,
     allowed_hosts: Vec<String>,
     port: u16,
+    idle_exit: Option<Duration>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let config = http_server_config(&allowed_hosts, port);
@@ -279,10 +429,27 @@ async fn serve_http(
         config,
     );
 
-    let router = build_router(service, allowed_hosts, pid, index_dir);
+    let activity = Arc::new(Activity::new());
+    let idle = {
+        let activity = activity.clone();
+        async move {
+            match idle_exit {
+                Some(ttl) => {
+                    idle_expired(activity, ttl).await;
+                    eprintln!("[rqmd-mcp] idle for {}s; shutting down", ttl.as_secs());
+                }
+                None => std::future::pending().await,
+            }
+        }
+    };
+
+    let router = build_router(service, allowed_hosts, pid, index_dir, activity);
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
-            shutdown.await;
+            tokio::select! {
+                _ = shutdown => {}
+                _ = idle => {}
+            }
             streams.cancel();
         })
         .await?;
@@ -317,8 +484,92 @@ mod tests {
             hosts.iter().map(|h| h.to_string()).collect(),
             std::process::id(),
             index_dir.to_string_lossy().to_string(),
+            Arc::new(Activity::new()),
         );
         (router, dir)
+    }
+
+    #[test]
+    fn idle_exit_is_off_unless_set_and_takes_positive_whole_seconds() {
+        assert_eq!(parse_idle_exit(None).unwrap(), None);
+        assert_eq!(
+            parse_idle_exit(Some("30")).unwrap(),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_idle_exit(Some(" 7 ")).unwrap(),
+            Some(Duration::from_secs(7))
+        );
+        for bad in ["0", "", "soon", "-1", "1.5", "10s"] {
+            let err = parse_idle_exit(Some(bad)).unwrap_err().to_string();
+            assert!(
+                err.contains(IDLE_EXIT_ENV) && err.contains("positive whole number"),
+                "{bad:?}: {err}"
+            );
+        }
+    }
+
+    /// A router that answers `/mcp` (POST and GET) and `/health` with a body
+    /// the test controls, behind the activity middleware.
+    fn activity_router(activity: Arc<Activity>) -> Router {
+        Router::new()
+            .route(
+                "/mcp",
+                axum::routing::post(|| async { "answered" }).get(|| async { "stream" }),
+            )
+            .route("/health", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(activity, track_activity))
+    }
+
+    async fn send(router: &Router, method: &str, path: &str) -> Response {
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        router.clone().oneshot(req).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn only_mcp_requests_count_as_activity() {
+        let activity = Arc::new(Activity::new());
+        let router = activity_router(activity.clone());
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        drop(send(&router, "GET", "/health").await);
+        assert!(activity.idle_for().unwrap() >= Duration::from_millis(60));
+
+        drop(send(&router, "GET", "/mcp").await);
+        assert!(activity.idle_for().unwrap() < Duration::from_millis(60));
+    }
+
+    #[tokio::test]
+    async fn a_post_stays_in_progress_until_its_response_is_finished() {
+        let activity = Arc::new(Activity::new());
+        let router = activity_router(activity.clone());
+
+        let resp = send(&router, "POST", "/mcp").await;
+        assert_eq!(activity.idle_for(), None, "response still being sent");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"answered");
+        assert!(activity.idle_for().is_some());
+
+        let dropped = send(&router, "POST", "/mcp").await;
+        assert_eq!(activity.idle_for(), None);
+        drop(dropped);
+        assert!(activity.idle_for().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_get_stream_is_not_counted_as_in_progress() {
+        let activity = Arc::new(Activity::new());
+        let router = activity_router(activity.clone());
+
+        let stream = send(&router, "GET", "/mcp").await;
+        assert!(activity.idle_for().is_some());
+        drop(stream);
     }
 
     #[tokio::test]

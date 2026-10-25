@@ -2,22 +2,7 @@
 
 ## [Unreleased]
 
-## [0.30.0] - 2026-10-25
-
 ### Added
-- `rqmd update` and `rqmd embed` now stop at the next safe point on `SIGINT`, `SIGTERM` or `SIGHUP`
-  instead of being killed mid-write. `update` finishes the file in hand and saves what it has
-  indexed; `embed` finishes the document in hand and checkpoints its vectors. Both print a resume
-  hint and exit `130`, `143` or `129`, and a rerun continues from there. A second signal exits
-  immediately. See [docs/CLI.md](docs/CLI.md#interrupting-update-and-embed).
-- `rqmd collection add` and `rqmd update` now name the folders the built-in exclusions
-  (`node_modules`, `vendor`, `dist`, `build`, `target`, `.cache`) left out, at the end of the summary
-  line, for example `left out 2 folder(s) by the built-in rule (build/, node_modules/)`. Paths are
-  relative to the collection root and at most five are named. Nothing is added when no folder was
-  left out. `rqmd collection show` now lists the collection's ignore patterns.
-- The MCP `status` tool now reports `Pending embed: N`, the number of documents that have no
-  current embedding, so a client can tell when semantic results lag behind the BM25 index. The
-  count is for the backend the server runs with and is labelled with it.
 - Source files in Go (`.go`), Rust (`.rs`), C# (`.cs`), Kotlin (`.kt`, `.kts`), Swift (`.swift`),
   HCL (`.tf`, `.tfvars`, `.hcl`) and SQL (`.sql`) are now chunked at declaration boundaries, like
   TypeScript, JavaScript, Java and Python already were. HCL chunks at top-level blocks and SQL at
@@ -51,6 +36,58 @@
   are only down-weighted, never dropped. Off by default, and without it results are unchanged. No
   index change: it reads the mtime `rqmd update` already records. See
   [docs/CLI.md](docs/CLI.md#recency).
+- `RQMD_MCP_IDLE_EXIT_SECS` makes `rqmd mcp --http` and `rqmd mcp --daemon` exit after that many
+  seconds with no request. It is off unless set; `0` or a value that is not a whole number is an
+  error before the server starts. Only requests to `/mcp` count: open event streams and health
+  checks, including `rqmd mcp status`, do not, and a request still being answered keeps the server
+  up. See [docs/MCP.md](docs/MCP.md#idle-exit).
+
+
+### Changed
+- `rqmd embed` now reuses a stored vector for any chunk whose text it already embedded under the
+  same model, backend (`llama` or `ort`) and context size, not only for the chunks of an edited
+  note. A chunk that appears in two documents is encoded once, even within one run, and the match
+  does not depend on the chunking settings. `content_vectors.vector_key` is added automatically,
+  in place, and `rqmd embed` fills it in for the vectors of the previous release as it starts,
+  from stored metadata only. No re-embed is needed and the embedding fingerprint is unchanged. A
+  vector written before `chunk_hash` existed has no key and is filled in when its document is
+  next embedded.
+- The first `rqmd embed` after upgrading re-embeds the files of the newly supported languages once,
+  because their chunks and embedding fingerprint change. A file of up to 3,600 bytes reuses its
+  stored vector instead of being encoded again. Files in languages that were already chunked keep
+  their fingerprint byte for byte and are not re-embedded. Nothing else in the index changes and no
+  rebuild is needed. The Cargo feature `ast-chunking` now turns on one feature per language
+  (`ast-typescript`, `ast-go`, and so on), and a build can enable a single one.
+- `rqmd vsearch` now shows the chunk of a file that matched the query, not the file's opening chunk.
+  Results, scores and their order are unchanged.
+
+
+### Fixed
+- The `--timeout` documentation said loading models is not charged against the deadline. The
+  models are downloaded before the clock starts, but each is loaded into memory inside the stage
+  that first needs it, so that load counts. The code comment in `rqmd query` said the same.
+- `rqmd status`, `rqmd doctor` and `rqmd embed` no longer treat a file whose extension is written in
+  capitals, such as `.PY`, as needing a vector it can never get. They matched the extension without
+  regard to case, while the chunker, which decides the fingerprint, matches it exactly, so such a
+  file stayed pending after it was embedded.
+
+
+## [0.30.0] - 2026-10-25
+
+### Added
+- `rqmd update` and `rqmd embed` now stop at the next safe point on `SIGINT`, `SIGTERM` or `SIGHUP`
+  instead of being killed mid-write. `update` finishes the file in hand and saves what it has
+  indexed; `embed` finishes the document in hand and checkpoints its vectors. Both print a resume
+  hint and exit `130`, `143` or `129`, and a rerun continues from there. A second signal exits
+  immediately. See [docs/CLI.md](docs/CLI.md#interrupting-update-and-embed).
+- `rqmd collection add` and `rqmd update` now name the folders the built-in exclusions
+  (`node_modules`, `vendor`, `dist`, `build`, `target`, `.cache`) left out, at the end of the summary
+  line, for example `left out 2 folder(s) by the built-in rule (build/, node_modules/)`. Paths are
+  relative to the collection root and at most five are named. Nothing is added when no folder was
+  left out. `rqmd collection show` now lists the collection's ignore patterns.
+- The MCP `status` tool now reports `Pending embed: N`, the number of documents that have no
+  current embedding, so a client can tell when semantic results lag behind the BM25 index. The
+  count is for the backend the server runs with and is labelled with it.
 
 ### Changed
 - `rqmd update` no longer walks into the folders the built-in exclusions leave out, nor into hidden
@@ -84,27 +121,8 @@
 - `rqmd collection rename` now waits for a running `embed` or `update`, as `collection remove`
   does, and prints the number of documents it re-indexed. The SQLite rows, the path contexts and
   the keyword index change together or not at all.
-- `rqmd embed` now reuses a stored vector for any chunk whose text it already embedded under the
-  same model, backend (`llama` or `ort`) and context size, not only for the chunks of an edited
-  note. A chunk that appears in two documents is encoded once, even within one run, and the match
-  does not depend on the chunking settings. `content_vectors.vector_key` is added automatically,
-  in place, and `rqmd embed` fills it in for the vectors of the previous release as it starts,
-  from stored metadata only. No re-embed is needed and the embedding fingerprint is unchanged. A
-  vector written before `chunk_hash` existed has no key and is filled in when its document is
-  next embedded.
-- The first `rqmd embed` after upgrading re-embeds the files of the newly supported languages once,
-  because their chunks and embedding fingerprint change. A file of up to 3,600 bytes reuses its
-  stored vector instead of being encoded again. Files in languages that were already chunked keep
-  their fingerprint byte for byte and are not re-embedded. Nothing else in the index changes and no
-  rebuild is needed. The Cargo feature `ast-chunking` now turns on one feature per language
-  (`ast-typescript`, `ast-go`, and so on), and a build can enable a single one.
-- `rqmd vsearch` now shows the chunk of a file that matched the query, not the file's opening chunk.
-  Results, scores and their order are unchanged.
 
 ### Fixed
-- The `--timeout` documentation said loading models is not charged against the deadline. The
-  models are downloaded before the clock starts, but each is loaded into memory inside the stage
-  that first needs it, so that load counts. The code comment in `rqmd query` said the same.
 - Output is plain text when it is not a terminal. Before, `status`, `update`, `embed`, `doctor` and
   the index warnings wrote ANSI escapes into piped and redirected output. One gate now decides every
   escape, per stream, so stdout and stderr are checked separately. `NO_COLOR` turns colour off on a
@@ -151,10 +169,6 @@
   scope is now the exact set of the collection's active documents, applied before the result
   cut, so the result is as full as the collection allows. Scores, ranking and the index format
   are unchanged.
-- `rqmd status`, `rqmd doctor` and `rqmd embed` no longer treat a file whose extension is written in
-  capitals, such as `.PY`, as needing a vector it can never get. They matched the extension without
-  regard to case, while the chunker, which decides the fingerprint, matches it exactly, so such a
-  file stayed pending after it was embedded.
 
 ## [0.29.0] - 2026-10-25
 
