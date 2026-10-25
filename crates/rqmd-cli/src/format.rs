@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -266,18 +267,27 @@ impl ProgressMode {
     }
 }
 
-/// One progress display: `show` repaints (or prints) a status line, `clear`
-/// wipes a redrawn line before the summary prints.
-pub struct Progress {
+/// One progress display: `show` and `stage` repaint (or print) a status line,
+/// `clear` wipes a redrawn line before the summary prints. Writes to stderr
+/// unless built with [`Progress::with_writer`].
+pub struct Progress<W: Write = io::Stderr> {
     mode: ProgressMode,
     last_step: Option<usize>,
+    out: W,
 }
 
 impl Progress {
     pub fn new(mode: ProgressMode) -> Self {
+        Self::with_writer(mode, io::stderr())
+    }
+}
+
+impl<W: Write> Progress<W> {
+    pub fn with_writer(mode: ProgressMode, out: W) -> Self {
         Self {
             mode,
             last_step: None,
+            out,
         }
     }
 
@@ -290,29 +300,43 @@ impl Progress {
         self.mode == ProgressMode::Lines
     }
 
+    fn redraw(&mut self, line: &str) {
+        let w = term_width().unwrap_or(80).saturating_sub(1);
+        let _ = write!(self.out, "\r{}", fit_to_width(line, w));
+    }
+
     /// Show `line` for step `done` of `total`. Redraw mode repaints every
     /// call; plain mode prints a line each time `done` crosses a tenth of
     /// `total`, so a large run does not flood the output.
     pub fn show(&mut self, line: &str, done: usize, total: usize) {
         match self.mode {
             ProgressMode::Off => {}
-            ProgressMode::Redraw => {
-                let w = term_width().unwrap_or(80).saturating_sub(1);
-                eprint!("\r{}", fit_to_width(line, w));
-            }
+            ProgressMode::Redraw => self.redraw(line),
             ProgressMode::Lines => {
                 let step = (done * 10).checked_div(total).unwrap_or(0);
                 if self.last_step != Some(step) {
                     self.last_step = Some(step);
-                    eprintln!("{line}");
+                    let _ = writeln!(self.out, "{line}");
                 }
             }
         }
     }
 
-    pub fn clear(&self) {
+    /// Show `line` as the next stage of a run. Redraw mode repaints; plain
+    /// mode always prints it as a line of its own.
+    pub fn stage(&mut self, line: &str) {
+        match self.mode {
+            ProgressMode::Off => {}
+            ProgressMode::Redraw => self.redraw(line),
+            ProgressMode::Lines => {
+                let _ = writeln!(self.out, "{line}");
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
         if self.mode == ProgressMode::Redraw {
-            eprint!("\r{}\r", " ".repeat(term_width().unwrap_or(80)));
+            let _ = write!(self.out, "\r{}\r", " ".repeat(term_width().unwrap_or(80)));
         }
     }
 }

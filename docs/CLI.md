@@ -150,6 +150,22 @@ stderr, is plain text. `NO_COLOR` (set to any value) turns styling off on a term
 | `TERM=dumb` | no colour | a plain line each time a tenth of the work is done, each ending in a newline |
 | not a terminal | no escapes | none |
 
+`rqmd query` reports its stages on stderr in the same way, never on stdout, in the order the query
+reaches them (a stage repeated back to back shows once). The line is wiped before the results print:
+
+| Label | Stage |
+|-------|-------|
+| `Searching keywords` | keyword (BM25) search |
+| `Loading model / embedding query` | embedding the query for vector search; includes loading the embedding model on first use |
+| `Loading model / expanding query` | query expansion; includes loading the generation model on first use |
+| `Loading model / reranking 0/N`, then `Reranking 4/N`, `Reranking 8/N`, ... | reranking N candidates, which are scored four at a time so the count is live |
+
+On a terminal the stages repaint one line. Under `TERM=dumb` each is a plain line ending in a
+newline, and reranking prints a line each time a tenth of the candidates is done. When stderr is
+not a terminal, `query` writes none of this, scores the candidates in one reranker call as before,
+and its output is unchanged. Ranking and scores do not depend on whether the stages are shown.
+`rqmd search` and `rqmd vsearch` have no stages to show.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -243,8 +259,9 @@ prints no warning. Running out of `--timeout` is a third cause, described under 
 ## Timeouts
 
 `rqmd query --timeout SECS` and `rqmd embed --timeout SECS` stop with exit `124` once the
-deadline has passed. The clock starts after the index is open, so opening the index and loading
-models are not charged, and it is checked between stages: before embedding the query, before
+deadline has passed. The clock starts after the index is open, so opening the index and downloading
+models are not charged (loading a model into memory happens inside the stage that first needs it,
+and is charged), and it is checked between stages: before embedding the query, before
 query expansion and each expanded sub-query, and before reranking for `query`; before each
 document for `embed`. A model call that is already running (one llama.cpp inference) cannot be
 interrupted, so a run can overrun by the length of its longest single call.

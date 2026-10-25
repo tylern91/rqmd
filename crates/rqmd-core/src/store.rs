@@ -24,7 +24,10 @@ use crate::{
     hnsw::VectorIndex,
     query::parse_query,
     rrf::{reciprocal_rank_fusion, rrf_weights},
-    types::{QueryOutcome, QueryType, RankedListMeta, RankedResult, RerankStatus, SearchResult},
+    types::{
+        QueryOutcome, QueryStage, QueryType, RankedListMeta, RankedResult, RerankStatus,
+        SearchResult,
+    },
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -35,6 +38,11 @@ use crate::{
 /// is capped at 100 — rerank builds one fresh `LlamaContext` per candidate,
 /// so its cost is linear in pool size.
 const RERANK_CANDIDATE_LIMIT: usize = 20;
+
+/// Candidates per reranker call while a query observer is set, so progress
+/// can be reported between calls. Scores do not depend on the slice size:
+/// the reranker scores each (query, candidate) pair on its own.
+const RERANK_PROGRESS_SLICE: usize = 4;
 
 /// Cap on how many of a source document's chunks `similar_to_hash` will search
 /// against the HNSW index. A very long document would otherwise pay one HNSW
@@ -132,6 +140,8 @@ pub struct Store {
     /// skip `hnsw.save()` — a rewrite of the full usearch file — on a pass
     /// that added no vectors.
     hnsw_dirty: bool,
+    /// Told which stage a hybrid query has reached; see [`Store::set_query_observer`].
+    query_observer: Option<Box<dyn FnMut(QueryStage) + Send>>,
 }
 
 pub struct StoreConfig {
@@ -276,6 +286,7 @@ impl Store {
             last_seen_hnsw_mtime,
             hnsw_dirty: false,
             staged_vectors: HashMap::new(),
+            query_observer: None,
         })
     }
 
@@ -1057,6 +1068,20 @@ impl Store {
         Ok(results)
     }
 
+    /// Report each stage of the hybrid queries that follow to `observer`, or
+    /// stop reporting with `None`. While one is set, reranking runs in calls of
+    /// a few candidates so `Reranking` can report progress; results and scores
+    /// are unchanged.
+    pub fn set_query_observer(&mut self, observer: Option<Box<dyn FnMut(QueryStage) + Send>>) {
+        self.query_observer = observer;
+    }
+
+    fn emit_stage(&mut self, stage: QueryStage) {
+        if let Some(observer) = self.query_observer.as_mut() {
+            observer(stage);
+        }
+    }
+
     /// Full hybrid search: BM25 + vector → optional HyDE expansion → RRF → chunk selection → rerank.
     ///
     /// `intent` provides optional context for expansion, reranking, and snippet selection.
@@ -1271,6 +1296,7 @@ impl Store {
                 };
                 match sub.qtype {
                     QueryType::Lex => {
+                        self.emit_stage(QueryStage::Searching);
                         let hits = self.fts_scoped(&sub.text, fetch_size, collections)?;
                         if !hits.is_empty() {
                             ranked_lists.push(fts_hits_to_ranked(&hits));
@@ -1281,6 +1307,7 @@ impl Store {
                         }
                     }
                     QueryType::Vec => {
+                        self.emit_stage(QueryStage::Embedding);
                         let emb = self
                             .backend
                             .embed_query(&sub.text)
@@ -1295,6 +1322,7 @@ impl Store {
                         }
                     }
                     QueryType::Hyde => {
+                        self.emit_stage(QueryStage::Embedding);
                         // HyDE embeds a hypothetical *document* the generation model wrote,
                         // not a query — it must go through the passage-side prompt so it
                         // lands in the same embedding subspace as the real document chunks
@@ -1323,6 +1351,7 @@ impl Store {
             let expand_text = parsed.expand_text.as_deref().unwrap_or(query);
 
             // Step 1: BM25 probe on the raw query.
+            self.emit_stage(QueryStage::Searching);
             let initial_fts = self.fts_scoped(expand_text, fetch_size, collections)?;
             let top_score = initial_fts.first().map(|r| r.2).unwrap_or(0.0);
             let second_score = initial_fts.get(1).map(|r| r.2).unwrap_or(0.0);
@@ -1340,6 +1369,7 @@ impl Store {
 
             // Step 2: Embed original query for vector search.
             deadline.check("embedding the query")?;
+            self.emit_stage(QueryStage::Embedding);
             let query_embedding = self
                 .backend
                 .embed_query(expand_text)
@@ -1363,6 +1393,7 @@ impl Store {
                     );
                 } else {
                     deadline.check("query expansion")?;
+                    self.emit_stage(QueryStage::Expanding);
                     let prompt = build_expansion_prompt(expand_text, effective_intent);
                     match self.backend.generate(&prompt) {
                         Ok(expansion) => {
@@ -1465,13 +1496,7 @@ impl Store {
             (None, RerankStatus::Unsupported)
         } else {
             // Use the intent-prepended rerank query for better cross-encoder scoring.
-            let ranked = match soft_deadline {
-                Some(deadline) => self
-                    .backend
-                    .rerank_until(rerank_query, &chunk_refs, &|| deadline.is_expired()),
-                None => self.backend.rerank(rerank_query, &chunk_refs).map(Some),
-            };
-            match ranked {
+            match self.rerank_candidates(rerank_query, &chunk_refs, soft_deadline) {
                 Ok(Some(scores))
                     if scores.len() == chunk_refs.len() && scores.iter().any(|s| s.is_finite()) =>
                 {
@@ -1495,6 +1520,42 @@ impl Store {
         };
 
         (best_chunks, rerank_scores, status)
+    }
+
+    /// Score `chunks` with the reranker: one backend call, or calls of
+    /// [`RERANK_PROGRESS_SLICE`] candidates while a query observer is set, with
+    /// `Reranking` reported before each. `Ok(None)` means `soft_deadline` passed
+    /// first; any slice that errors fails the whole rerank, as one call would.
+    fn rerank_candidates(
+        &mut self,
+        rerank_query: &str,
+        chunks: &[&str],
+        soft_deadline: Option<Deadline>,
+    ) -> Result<Option<Vec<f32>>> {
+        let total = chunks.len();
+        let slice = if self.query_observer.is_some() {
+            RERANK_PROGRESS_SLICE
+        } else {
+            total.max(1)
+        };
+        let mut scores = Vec::with_capacity(total);
+        for part in chunks.chunks(slice) {
+            self.emit_stage(QueryStage::Reranking {
+                done: scores.len(),
+                total,
+            });
+            let part_scores = match soft_deadline {
+                Some(deadline) => self
+                    .backend
+                    .rerank_until(rerank_query, part, &|| deadline.is_expired())?,
+                None => Some(self.backend.rerank(rerank_query, part)?),
+            };
+            match part_scores {
+                Some(part_scores) => scores.extend(part_scores),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(scores))
     }
 
     /// Step 7 of `hybrid_query_multi`: blend each candidate's rerank score
@@ -4004,5 +4065,226 @@ mod tests {
 
         assert_eq!(got.rerank, RerankStatus::NotRun);
         assert_eq!(calls(&rerank_calls), 0);
+    }
+
+    /// How a [`SliceStub`] reranker behaves on its `n`th call (1-based).
+    #[derive(Clone, Copy)]
+    enum SliceFault {
+        None,
+        FailOn(usize),
+        ExpireOn(usize),
+    }
+
+    /// Scores each candidate from its own text, and records how many
+    /// candidates each reranker call carried.
+    struct SliceStub {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+        fault: SliceFault,
+    }
+
+    impl rqmd_llm::InferenceBackend for SliceStub {
+        fn embed(&mut self, _text: &str) -> Result<Vec<f32>> {
+            Ok(vec![0.1; rqmd_llm::EMBED_DIM])
+        }
+        fn rerank(&mut self, _query: &str, docs: &[&str]) -> Result<Vec<f32>> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(docs.len());
+            if matches!(self.fault, SliceFault::FailOn(n) if n == calls.len()) {
+                bail!("rerank model failed");
+            }
+            Ok(docs.iter().map(|d| d.len() as f32 / 100.0).collect())
+        }
+        fn rerank_until(
+            &mut self,
+            query: &str,
+            docs: &[&str],
+            expired: &dyn Fn() -> bool,
+        ) -> Result<Option<Vec<f32>>> {
+            let next = self.calls.lock().unwrap().len() + 1;
+            if expired() || matches!(self.fault, SliceFault::ExpireOn(n) if n == next) {
+                return Ok(None);
+            }
+            self.rerank(query, docs).map(Some)
+        }
+        fn generate(&mut self, _prompt: &str) -> Result<String> {
+            Ok("lex: unrelatedterm\nvec: another phrasing\n".to_string())
+        }
+        fn embed_model_name(&self) -> &str {
+            "slice-stub"
+        }
+        fn rerank_model_name(&self) -> &str {
+            "slice-stub"
+        }
+        fn generate_model_name(&self) -> &str {
+            "slice-stub"
+        }
+    }
+
+    /// Nine candidates, so slices of four are 4 + 4 + 1.
+    fn slice_store(
+        dir: &std::path::Path,
+        fault: SliceFault,
+    ) -> (Store, std::sync::Arc<std::sync::Mutex<Vec<usize>>>) {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let config = StoreConfig {
+            db_path: dir.join("test.sqlite"),
+            tantivy_dir: dir.join("tantivy"),
+            hnsw_path: dir.join("hnsw.usearch"),
+            read_only: false,
+        };
+        let backend = SliceStub {
+            calls: calls.clone(),
+            fault,
+        };
+        let mut store = Store::open(config, Box::new(backend)).unwrap();
+        for i in 0..9 {
+            let body = format!("uniquerankterm {}", "filler ".repeat(i + 1));
+            store
+                .index_document("coll", &format!("d{i}.md"), "T", &body)
+                .unwrap();
+        }
+        store.flush().unwrap();
+        (store, calls)
+    }
+
+    /// Run `query` with a stage observer and return what it reported.
+    fn observed_outcome(
+        store: &mut Store,
+        query: &str,
+        no_expand: bool,
+        strict_timeout: bool,
+    ) -> (QueryOutcome, Vec<QueryStage>) {
+        let stages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = stages.clone();
+        store.set_query_observer(Some(Box::new(move |s| sink.lock().unwrap().push(s))));
+        let outcome = store
+            .hybrid_query_outcome(
+                query,
+                None,
+                10,
+                None,
+                false,
+                no_expand,
+                Deadline::none(),
+                strict_timeout,
+            )
+            .unwrap();
+        store.set_query_observer(None);
+        let stages = stages.lock().unwrap().clone();
+        (outcome, stages)
+    }
+
+    fn rerank_steps(done: &[usize], total: usize) -> Vec<QueryStage> {
+        done.iter()
+            .map(|&done| QueryStage::Reranking { done, total })
+            .collect()
+    }
+
+    /// An expand-mode query reports keyword search, query embedding,
+    /// expansion and then one reranking step per slice, in that order.
+    #[test]
+    fn query_observer_reports_stages_in_order() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, _) = slice_store(dir.path(), SliceFault::None);
+
+        let (outcome, stages) = observed_outcome(&mut store, "uniquerankterm", false, false);
+
+        assert_eq!(outcome.rerank, RerankStatus::Reranked);
+        let mut expected = vec![
+            QueryStage::Searching,
+            QueryStage::Embedding,
+            QueryStage::Expanding,
+        ];
+        expected.extend(rerank_steps(&[0, 4, 8], 9));
+        assert_eq!(stages, expected);
+    }
+
+    /// Without expansion the stage is not reported at all.
+    #[test]
+    fn query_observer_skips_expansion_when_disabled() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, _) = slice_store(dir.path(), SliceFault::None);
+
+        let (_, stages) = observed_outcome(&mut store, "uniquerankterm", true, false);
+
+        assert!(!stages.contains(&QueryStage::Expanding), "{stages:?}");
+        assert_eq!(&stages[..2], [QueryStage::Searching, QueryStage::Embedding]);
+    }
+
+    /// A query document reports each sub-query's kind as it runs.
+    #[test]
+    fn query_observer_reports_each_sub_query_of_a_query_document() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, _) = slice_store(dir.path(), SliceFault::None);
+
+        let (_, stages) = observed_outcome(
+            &mut store,
+            "lex: uniquerankterm\nvec: uniquerankterm\nhyde: uniquerankterm filler",
+            true,
+            false,
+        );
+
+        assert_eq!(
+            &stages[..3],
+            [
+                QueryStage::Searching,
+                QueryStage::Embedding,
+                QueryStage::Embedding
+            ]
+        );
+        assert_eq!(&stages[3..], rerank_steps(&[0, 4, 8], 9));
+    }
+
+    /// Reporting stages changes how the reranker is called, not what it
+    /// returns: same files, same order, same scores, bit for bit.
+    #[test]
+    fn query_observer_leaves_results_and_scores_unchanged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, calls) = slice_store(dir.path(), SliceFault::None);
+
+        let plain = run_outcome(&mut store, false);
+        assert_eq!(*calls.lock().unwrap(), [9], "one call without an observer");
+        calls.lock().unwrap().clear();
+        let (observed, _) = observed_outcome(&mut store, "uniquerankterm", true, false);
+        assert_eq!(*calls.lock().unwrap(), [4, 4, 1], "slices of four");
+
+        assert_eq!(plain.rerank, RerankStatus::Reranked);
+        assert_eq!(observed.rerank, RerankStatus::Reranked);
+        assert_eq!(files_and_scores(&observed), files_and_scores(&plain));
+        let bits = |o: &QueryOutcome| {
+            o.results
+                .iter()
+                .map(|r| r.score.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&observed), bits(&plain));
+    }
+
+    /// A slice that fails fails the whole rerank, exactly as one failing call
+    /// would: fusion scores, never a mix.
+    #[test]
+    fn a_failing_slice_leaves_the_results_in_fusion_order() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, _) = slice_store(dir.path(), SliceFault::FailOn(2));
+        let fusion = run_outcome(&mut store, true);
+
+        let (observed, _) = observed_outcome(&mut store, "uniquerankterm", true, false);
+
+        assert_eq!(observed.rerank, RerankStatus::Failed);
+        assert_eq!(files_and_scores(&observed), files_and_scores(&fusion));
+    }
+
+    /// A soft deadline that passes between slices ends the rerank as
+    /// `DeadlineExpired`, with fusion scores.
+    #[test]
+    fn a_deadline_between_slices_leaves_the_results_in_fusion_order() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, _) = slice_store(dir.path(), SliceFault::ExpireOn(2));
+        let fusion = run_outcome(&mut store, true);
+
+        let (observed, _) = observed_outcome(&mut store, "uniquerankterm", true, false);
+
+        assert_eq!(observed.rerank, RerankStatus::DeadlineExpired);
+        assert_eq!(files_and_scores(&observed), files_and_scores(&fusion));
     }
 }

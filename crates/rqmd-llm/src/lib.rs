@@ -207,7 +207,9 @@ pub trait InferenceBackend: Send {
     }
 
     /// Rerank: score (query, doc) pairs. Returns a scalar score per pair.
-    /// Higher = more relevant. Scores are NOT normalized across pairs.
+    /// Higher = more relevant. Scores are NOT normalized across pairs, and each
+    /// score depends only on its own pair, so a caller may split `docs` over
+    /// several calls.
     fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>>;
 
     /// [`Self::rerank`] that gives up with `Ok(None)` once `expired` returns
