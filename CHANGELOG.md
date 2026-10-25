@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-25
+
 ### Security
 - Update `rmcp` to 3.6.0 ([GHSA-4432-vg92-fqh6](https://github.com/modelcontextprotocol/rust-sdk/security/advisories/GHSA-4432-vg92-fqh6),
   high): the Streamable HTTP server transport, which `rqmd mcp --http` uses, let an unauthenticated
