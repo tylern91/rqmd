@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
-use rqmd_core::{SearchResult, extract_snippet, snap_char_boundary_backward};
+use rqmd_core::{SearchResult, extract_snippet, section_numbers, snap_char_boundary_backward};
 
 /// Output format shared by every `--format` flag in the CLI. Not every
 /// variant makes sense for every command — `print_document` rejects the
@@ -541,6 +541,7 @@ fn print_cli(results: &[SearchResult], show_full: bool, query: &str) {
         println!("No results found.");
         return;
     }
+    let sections = section_numbers(results);
     for (i, r) in results.iter().enumerate() {
         let snippet_info = extract_snippet(
             &r.body,
@@ -568,8 +569,16 @@ fn print_cli(results: &[SearchResult], show_full: bool, query: &str) {
         };
 
         let docid_str = dim(&format!(" #{}", r.docid));
-        // Line 1: path:line #docid
-        println!("{}{}{docid_str}", cyan(&r.file), dim(&line_info));
+        // A file listed more than once says which section this is, in words.
+        let section_str = sections[i]
+            .map(|(n, of)| dim(&format!(" (section {n} of {of})")))
+            .unwrap_or_default();
+        // Line 1: path:line #docid (section n of m)
+        println!(
+            "{}{}{docid_str}{section_str}",
+            cyan(&r.file),
+            dim(&line_info)
+        );
 
         // Line 2: Title (if present)
         if !r.title.is_empty() {
@@ -689,7 +698,8 @@ fn print_csv(results: &[SearchResult], show_full: bool, query: &str) {
 // Mirrors `outputResults` md branch in qmd.ts (lines 2297–2313).
 
 fn print_markdown(results: &[SearchResult], show_full: bool, query: &str) {
-    for r in results {
+    let sections = section_numbers(results);
+    for (r, section) in results.iter().zip(sections) {
         let heading = if r.title.is_empty() {
             &r.file
         } else {
@@ -708,13 +718,16 @@ fn print_markdown(results: &[SearchResult], show_full: bool, query: &str) {
             snippet_info.snippet.trim_end()
         };
         let docid_line = format!("**docid:** `#{}`\n", r.docid);
+        let section_line = section
+            .map(|(n, of)| format!("**section:** {n} of {of}\n"))
+            .unwrap_or_default();
         let ctx_line = r
             .context
             .as_deref()
             .map(|c| format!("**context:** {c}\n"))
             .unwrap_or_default();
         println!(
-            "---\n# {heading}\n**file:** `{}`\n{docid_line}{ctx_line}\n{content}\n",
+            "---\n# {heading}\n**file:** `{}`\n{docid_line}{section_line}{ctx_line}\n{content}\n",
             r.file
         );
     }
@@ -736,7 +749,8 @@ fn print_xml(results: &[SearchResult], show_full: bool, query: &str) {
         println!("<results></results>");
         return;
     }
-    for r in results {
+    let sections = section_numbers(results);
+    for (r, section) in results.iter().zip(sections) {
         let snippet_info = extract_snippet(
             &r.body,
             query,
@@ -749,6 +763,9 @@ fn print_xml(results: &[SearchResult], show_full: bool, query: &str) {
         } else {
             snippet_info.snippet.as_str()
         };
+        let section_attr = section
+            .map(|(n, of)| format!(" section=\"{n} of {of}\""))
+            .unwrap_or_default();
         let title_attr = if r.title.is_empty() {
             String::new()
         } else {
@@ -760,7 +777,7 @@ fn print_xml(results: &[SearchResult], show_full: bool, query: &str) {
             .map(|c| format!(" context=\"{}\"", xml_escape(c)))
             .unwrap_or_default();
         println!(
-            "<file docid=\"#{}\" name=\"{}\"{title_attr}{ctx_attr}>\n{}\n</file>\n",
+            "<file docid=\"#{}\" name=\"{}\"{section_attr}{title_attr}{ctx_attr}>\n{}\n</file>\n",
             xml_escape(&r.docid),
             xml_escape(&r.file),
             xml_escape(content),
@@ -772,7 +789,9 @@ fn print_xml(results: &[SearchResult], show_full: bool, query: &str) {
 // Mirrors `outputResults` files branch in qmd.ts (lines 2200–2211).
 
 fn print_files(results: &[SearchResult], roots: &HashMap<String, String>) {
-    for r in results {
+    let mut seen = std::collections::HashSet::new();
+    // A file with several sections is listed once.
+    for r in results.iter().filter(|r| seen.insert(r.file.as_str())) {
         match roots.get(&r.collection) {
             Some(root) => println!("{}", resolve_absolute_path(root, &r.path)),
             None => eprintln!(

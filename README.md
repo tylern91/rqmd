@@ -112,7 +112,7 @@ rqmd mcp --http --port 8181         # Streamable HTTP transport
 | `rqmd doctor` | Diagnose config, index, model, and device issues |
 
 Full command table, global flags, and query flags (`--intent`, `--format`,
-candidate-pool sizing): [docs/CLI.md](docs/CLI.md).
+`--per-file`, candidate-pool sizing): [docs/CLI.md](docs/CLI.md).
 
 ---
 

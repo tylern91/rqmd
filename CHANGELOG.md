@@ -40,6 +40,11 @@
   a terminal nothing is printed and the reranker is called once for all candidates as before, so
   stdout and piped output are unchanged. Ranking and scores are the same either way. See
   [docs/CLI.md](docs/CLI.md#colour-and-progress-output).
+- `rqmd query`, `rqmd search` and `rqmd vsearch` take `--per-file N`, and the MCP `query` and `search`
+  tools take `per_file`: up to `N` sections of each file instead of one, best first, capped at 5.
+  The default of 1 is one result per file as before. `-n` and `limit` count sections, and a file
+  listed more than once is labelled `section n of m`. See
+  [docs/CLI.md](docs/CLI.md#sections-per-file).
 
 ### Changed
 - `rqmd update` no longer walks into the folders the built-in exclusions leave out, nor into hidden
@@ -87,6 +92,8 @@
   their fingerprint byte for byte and are not re-embedded. Nothing else in the index changes and no
   rebuild is needed. The Cargo feature `ast-chunking` now turns on one feature per language
   (`ast-typescript`, `ast-go`, and so on), and a build can enable a single one.
+- `rqmd vsearch` now shows the chunk of a file that matched the query, not the file's opening chunk.
+  Results, scores and their order are unchanged.
 
 ### Fixed
 - The `--timeout` documentation said loading models is not charged against the deadline. The

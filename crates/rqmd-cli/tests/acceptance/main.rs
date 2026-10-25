@@ -10,6 +10,7 @@ mod helpers;
 mod hook_signals;
 mod index_rebuild;
 mod output_plain;
+mod per_file;
 mod query_timeout;
 mod security;
 mod status_cost;

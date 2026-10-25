@@ -991,20 +991,7 @@ pub fn backfill_vector_keys(
 /// (qmd#987 parity, rqmd#86: the body-joining variant this replaced could
 /// read nearly the whole index's bodies into memory on a widening vsearch).
 pub fn doc_for_vid_meta(conn: &Connection, vid: u64) -> Result<Option<Document>> {
-    conn.query_row(
-        r#"
-        SELECT d.id, d.collection, d.path, d.title, d.hash, d.active
-        FROM content_vectors cv
-        JOIN documents d ON d.hash = cv.hash AND d.active = 1
-        WHERE cv.vid = ?1
-        ORDER BY d.collection, d.path
-        LIMIT 1
-        "#,
-        params![vid as i64],
-        map_document,
-    )
-    .optional()
-    .context("doc_for_vid_meta")
+    Ok(doc_chunk_for_vid_in(conn, vid, None)?.map(|(doc, _)| doc))
 }
 
 /// Same as [`doc_for_vid_meta`], but when `collections` is non-empty the
@@ -1023,17 +1010,29 @@ pub fn doc_for_vid_meta_in(
     vid: u64,
     collections: Option<&[String]>,
 ) -> Result<Option<Document>> {
-    let cols = match collections.filter(|c| !c.is_empty()) {
-        None => return doc_for_vid_meta(conn, vid),
-        Some(cols) => cols,
+    Ok(doc_chunk_for_vid_in(conn, vid, collections)?.map(|(doc, _)| doc))
+}
+
+/// [`doc_for_vid_meta_in`] that also returns the stored start offset
+/// (`content_vectors.pos`) of the chunk the vector belongs to, so a caller can
+/// show the chunk that matched.
+pub fn doc_chunk_for_vid_in(
+    conn: &Connection,
+    vid: u64,
+    collections: Option<&[String]>,
+) -> Result<Option<(Document, usize)>> {
+    let cols = collections.filter(|c| !c.is_empty()).unwrap_or(&[]);
+    let scope = if cols.is_empty() {
+        String::new()
+    } else {
+        format!("AND d.collection IN ({})", vec!["?"; cols.len()].join(","))
     };
-    let placeholders = vec!["?"; cols.len()].join(",");
     let sql = format!(
         r#"
-        SELECT d.id, d.collection, d.path, d.title, d.hash, d.active
+        SELECT d.id, d.collection, d.path, d.title, d.hash, d.active, cv.pos
         FROM content_vectors cv
         JOIN documents d ON d.hash = cv.hash AND d.active = 1
-        WHERE cv.vid = ?1 AND d.collection IN ({placeholders})
+        WHERE cv.vid = ?1 {scope}
         ORDER BY d.collection, d.path
         LIMIT 1
         "#
@@ -1044,9 +1043,11 @@ pub fn doc_for_vid_meta_in(
     for c in cols {
         bind.push(c);
     }
-    conn.query_row(&sql, params_from_iter(bind), map_document)
-        .optional()
-        .context("doc_for_vid_meta_in")
+    conn.query_row(&sql, params_from_iter(bind), |row| {
+        Ok((map_document(row)?, row.get::<_, i64>(6)?.max(0) as usize))
+    })
+    .optional()
+    .context("doc_chunk_for_vid_in")
 }
 
 /// Return all vids for a content hash's chunks, ordered by `seq` (chunk order).

@@ -6,9 +6,9 @@
 
 | Command | Description |
 |---------|-------------|
-| `rqmd query <text> [--no-expand] [--timeout SECS [--timeout-strict]]` | Hybrid search: BM25 + vector + rerank + LLM query expansion. `--timeout` gives up after that many seconds (exit 124), or returns the results unreranked if only reranking is left; `--timeout-strict` always exits 124; see [Timeouts](#timeouts) |
-| `rqmd search <text>` | BM25 keyword search only |
-| `rqmd vsearch <text>` | Vector similarity only |
+| `rqmd query <text> [--no-expand] [--per-file N] [--timeout SECS [--timeout-strict]]` | Hybrid search: BM25 + vector + rerank + LLM query expansion. `--timeout` gives up after that many seconds (exit 124), or returns the results unreranked if only reranking is left; `--timeout-strict` always exits 124; see [Timeouts](#timeouts) |
+| `rqmd search <text> [--per-file N]` | BM25 keyword search only |
+| `rqmd vsearch <text> [--per-file N]` | Vector similarity only; each result shows the chunk that matched |
 | `rqmd similar <path\|#docid>` | Find documents most similar to an already-indexed one |
 | `rqmd get <path\|#docid>` | Retrieve document by path or content hash |
 | `rqmd multi-get <glob>` | Retrieve multiple documents |
@@ -76,6 +76,7 @@ apart this way and are not filtered.
 |------|---------|-------------|
 | `--intent <text>` | *(none)* | Background context to steer expansion and reranking |
 | `-n <num>` | `10` | Number of results to return |
+| `--per-file <N>` | `1` | Sections of one file to return, best first, up to 5; see [Sections per file](#sections-per-file) |
 | `-c/--collection <name>` | *(all)* | Scope to a collection (repeatable, OR-matched) |
 | `--no-expand` | off | Skip LLM query expansion; search the query text as-is (env: `RQMD_NO_EXPAND`) |
 | `--no-rerank` | off | Skip cross-encoder reranking (expansion still runs) |
@@ -136,6 +137,36 @@ rqmd query -c docs "deployment pipeline"
 
 Full grammar (typed lines, lex phrase/negation operators, MCP `searches` array):
 [SYNTAX.md](SYNTAX.md).
+
+## Sections per file
+
+By default a file is one result. `--per-file N`, accepted by `query`, `search`
+and `vsearch`, returns up to `N` sections (chunks) of each file instead, so a
+long note that answers a question in several places shows each place. `N` is
+capped at 5 and `0` counts as 1; the default of 1 changes nothing.
+
+- `-n` counts sections, not files: `-n 10 --per-file 3` can list as few as four
+  files. `query` still ranks files first and only then picks sections, so it
+  considers the same candidate files as without the flag.
+- Sections are ordered like other results: by score, then by ascending
+  `collection/path`. Sections of one file with equal scores are listed best
+  match first, the later one first when they match equally.
+- `query` and `search` choose sections by the words of the query: the best one
+  as before, and further ones only if they hold one of the words in text the
+  sections before them do not already show, so a word in the stretch two
+  neighbouring chunks share counts once. A file with fewer matching sections
+  than `N` yields fewer results. `query`
+  scores each section with the reranker, so `N` extra sections cost up to `N`
+  times the reranking of one; the extras are added only while one rerank pass
+  stays within the 100-chunk pool ceiling, best-ranked files first.
+- `vsearch` returns the `N` chunks of a file whose vectors are nearest the
+  query. It always shows the chunk that matched, not the file's opening
+  chunk, whatever `N` is.
+- `search` with `--per-file 1` shows the file's opening chunk, as before.
+- A file listed more than once is labelled `(section 2 of 3)` in `cli` output,
+  `**section:** 2 of 3` in `md` and `section="2 of 3"` in `xml`, in words
+  rather than colour. `json` and `csv` repeat the file with a different `line`
+  and snippet, and `files` lists each file once.
 
 ## Colour and progress output
 

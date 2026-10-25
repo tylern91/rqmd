@@ -137,6 +137,7 @@ Exact input fields per tool, as accepted by the JSON-RPC tool call
 | | `collections` | `string[]`, optional | Scope to these collections |
 | | `limit` | `number`, optional | Default 10 |
 | | `offset` | `number`, optional | Results to skip, for the next page. Default 0, capped at 1000 |
+| | `per_file` | `number`, optional | Sections of one file to return, best first. Default 1, capped at 5 (see below) |
 | | `rerank` | `boolean`, optional | Default `true` |
 | | `expand` | `boolean`, optional | Default `true` |
 | | `strict_timeout` | `boolean`, optional | Default `false`: a tool timeout that passes before reranking returns the results in fusion order with a note. `true`: it returns a `timed out` error instead |
@@ -144,6 +145,7 @@ Exact input fields per tool, as accepted by the JSON-RPC tool call
 | | `collections` | `string[]`, optional | Scope to these collections |
 | | `limit` | `number`, optional | Default 10 |
 | | `offset` | `number`, optional | Results to skip, for the next page. Default 0, capped at 1000 |
+| | `per_file` | `number`, optional | Sections of one file to return, best first. Default 1, capped at 5 (see below) |
 | `get` | `file` | `string` (required) | Path or `#docid` |
 | | `from_line` | `number`, optional | Start line for partial retrieval |
 | | `max_lines` | `number`, optional | Cap on lines returned (default 2000) |
@@ -161,6 +163,14 @@ is ranked over a slightly larger pool and a result near a page boundary can
 shift by a position.
 Results with exactly the same score are ordered by ascending `collection/path`,
 so a tie at a page boundary falls the same way on every request.
+
+`per_file` makes `query` and `search` return up to that many sections of one
+file, each as its own result with its own snippet, labelled `section n of m`
+when a file appears more than once. The server caps it at 5 whatever the client
+sends, and `0` counts as 1. `limit` and `offset` count sections, so a page can
+hold fewer files. Omitted, it is 1: one result per file, as before. Sections
+are chosen as for the CLI's `--per-file`; see
+[Sections per file](CLI.md#sections-per-file).
 
 `get` and `multi_get` also cap each document body at 256 KiB, and `multi_get`
 caps the whole response at 4 MiB. A response cut short by a cap ends with a
