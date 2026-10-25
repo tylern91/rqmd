@@ -2666,6 +2666,7 @@ version = "0.30.0"
 dependencies = [
  "anyhow",
  "axum",
+ "http-body",
  "once_cell",
  "reqwest",
  "rmcp",

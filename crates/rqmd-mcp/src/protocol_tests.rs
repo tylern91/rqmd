@@ -171,6 +171,7 @@ impl HttpDaemon {
             allowed_hosts,
             std::process::id(),
             index_dir.to_string_lossy().to_string(),
+            Arc::new(Activity::new()),
         );
         tokio::spawn(async move { axum::serve(listener, router).await });
         Self {
@@ -324,9 +325,16 @@ async fn shutdown_completes_while_a_client_holds_a_stream_open() {
     let port = listener.local_addr().unwrap().port();
     let allowed_hosts = vec!["localhost".to_string(), "127.0.0.1".to_string()];
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let serving = tokio::spawn(serve_http(listener, server, allowed_hosts, port, async {
-        let _ = stopped.await;
-    }));
+    let serving = tokio::spawn(serve_http(
+        listener,
+        server,
+        allowed_hosts,
+        port,
+        None,
+        async {
+            let _ = stopped.await;
+        },
+    ));
 
     let http = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/mcp");
@@ -380,4 +388,141 @@ async fn shutdown_completes_while_a_client_holds_a_stream_open() {
         stream.chunk().await.unwrap().is_none(),
         "the stream outlived the server"
     );
+}
+
+/// A server on a free port that exits by itself after `idle` without requests.
+struct IdleServer {
+    port: u16,
+    serving: tokio::task::JoinHandle<Result<()>>,
+    _dir: tempfile::TempDir,
+}
+
+impl IdleServer {
+    async fn start(idle: Duration) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let server = RqmdServer::new(dir.path().to_path_buf()).unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let allowed_hosts = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+        let serving = tokio::spawn(serve_http(
+            listener,
+            server,
+            allowed_hosts,
+            port,
+            Some(idle),
+            std::future::pending(),
+        ));
+        Self {
+            port,
+            serving,
+            _dir: dir,
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://127.0.0.1:{}{path}", self.port)
+    }
+
+    /// Wait up to `limit` for the server to stop on its own.
+    async fn exited_within(&mut self, limit: Duration) -> bool {
+        match tokio::time::timeout(limit, &mut self.serving).await {
+            Ok(joined) => {
+                joined.unwrap().unwrap();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_idle_server_exits_after_the_idle_period() {
+    let mut server = IdleServer::start(Duration::from_secs(1)).await;
+    let started = Instant::now();
+    assert!(
+        server.exited_within(Duration::from_secs(10)).await,
+        "the server was still running 10s after a 1s idle period"
+    );
+    assert!(started.elapsed() >= Duration::from_millis(900));
+}
+
+#[tokio::test]
+async fn requests_to_mcp_postpone_the_exit() {
+    let mut server = IdleServer::start(Duration::from_secs(2)).await;
+    let http = reqwest::Client::new();
+    for _ in 0..8 {
+        http.post(server.url("/mcp"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            !server.exited_within(Duration::from_millis(500)).await,
+            "the server left while it was receiving requests"
+        );
+    }
+    assert!(server.exited_within(Duration::from_secs(10)).await);
+}
+
+#[tokio::test]
+async fn health_checks_do_not_postpone_the_exit() {
+    let mut server = IdleServer::start(Duration::from_secs(1)).await;
+    let http = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        for path in ["/health", "/health/daemon"] {
+            let _ = http.get(server.url(path)).send().await;
+        }
+        if server.exited_within(Duration::from_millis(100)).await {
+            return;
+        }
+    }
+    panic!("health checks kept the server alive");
+}
+
+#[tokio::test]
+async fn an_open_event_stream_does_not_postpone_the_exit() {
+    let mut server = IdleServer::start(Duration::from_secs(1)).await;
+    let http = reqwest::Client::new();
+    let init = http
+        .post(server.url("/mcp"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .body(initialize_request(1).to_string())
+        .send()
+        .await
+        .unwrap();
+    let session = init.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    init.text().await.unwrap();
+    http.post(server.url("/mcp"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("Mcp-Session-Id", &session)
+        .header("MCP-Protocol-Version", "2025-06-18")
+        .body(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string())
+        .send()
+        .await
+        .unwrap();
+    let mut stream = http
+        .get(server.url("/mcp"))
+        .header("Accept", "text/event-stream")
+        .header("Mcp-Session-Id", &session)
+        .header("MCP-Protocol-Version", "2025-06-18")
+        .send()
+        .await
+        .unwrap();
+    assert!(stream.chunk().await.unwrap().is_some());
+
+    assert!(
+        server.exited_within(Duration::from_secs(10)).await,
+        "an open event stream kept the server alive"
+    );
+    assert!(stream.chunk().await.unwrap().is_none());
 }

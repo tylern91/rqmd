@@ -55,6 +55,9 @@ global — it only applies to the `mcp` subcommand, alongside a non-loopback
 `--host`. See [MCP.md](MCP.md#binding-beyond-localhost) and
 [SECURITY.md](../SECURITY.md) for what it gates.
 
+With `--http` or `--daemon`, `$RQMD_MCP_IDLE_EXIT_SECS` (a positive whole number of seconds)
+makes the server exit after that long without a request. See [MCP.md](MCP.md#idle-exit).
+
 ---
 
 ## Query syntax and expansion

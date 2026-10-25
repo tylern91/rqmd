@@ -51,6 +51,11 @@
   are only down-weighted, never dropped. Off by default, and without it results are unchanged. No
   index change: it reads the mtime `rqmd update` already records. See
   [docs/CLI.md](docs/CLI.md#recency).
+- `RQMD_MCP_IDLE_EXIT_SECS` makes `rqmd mcp --http` and `rqmd mcp --daemon` exit after that many
+  seconds with no request. It is off unless set; `0` or a value that is not a whole number is an
+  error before the server starts. Only requests to `/mcp` count: open event streams and health
+  checks, including `rqmd mcp status`, do not, and a request still being answered keeps the server
+  up. See [docs/MCP.md](docs/MCP.md#idle-exit).
 
 ### Changed
 - `rqmd update` no longer walks into the folders the built-in exclusions leave out, nor into hidden

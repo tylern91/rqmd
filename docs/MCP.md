@@ -60,6 +60,23 @@ connected client that holds a `GET /mcp` stream open no longer delays `rqmd mcp 
 Tool calls answer over the same kind of stream, so a call that has not returned yet is
 cut off as well and the client gets no result for it.
 
+## Idle exit
+
+Set `RQMD_MCP_IDLE_EXIT_SECS` to a positive whole number of seconds and `rqmd mcp --http` (or
+`--daemon`) exits once it has gone that long without a request. It is off unless set. `0` or a
+value that is not a whole number is an error, reported before the server starts (for `--daemon`,
+before it is launched).
+
+Only requests to `/mcp` count as activity. A client that keeps an event stream (`GET /mcp`) open
+without calling anything does not keep the server up, and neither do `/health` or
+`/health/daemon` requests, so `rqmd mcp status` can be run at any time without postponing the exit.
+A request that is still being answered, such as a long `query`, keeps the server up until its
+response has been sent; the idle period starts again after that.
+
+When the period passes, the server writes `[rqmd-mcp] idle for <N>s; shutting down` to its log,
+ends open event streams as it does on SIGTERM, removes its pidfile and exits with status 0. A
+client that connects afterwards gets connection refused until the daemon is started again.
+
 ## Binding beyond localhost
 
 `--host` (default `127.0.0.1`, env `RQMD_MCP_HOST`) controls the bind
