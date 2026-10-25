@@ -12,6 +12,13 @@
 - The "embeddings are stale" warning now says to run `rqmd embed`, which re-embeds every document
   whose vectors are stale. It no longer asks for `rqmd embed --rebuild`, which clears every vector
   first.
+- Editing a note, running `rqmd update` and then `rqmd embed` now reuses the unchanged chunks'
+  vectors. Before, `update` dropped the edited note's old vectors straight away, so `embed` had
+  nothing to copy and encoded every chunk again. `update` now keeps the vectors of the version an
+  edit replaced until `embed` has embedded the new one, and `embed` removes them as its last step.
+  Until then `rqmd doctor` does not count them as orphaned, and `rqmd embed --cleanup` leaves them
+  alone. `documents.prev_hash` is added automatically, in place; no re-embed is needed and the
+  embedding fingerprint is unchanged.
 
 ## [0.29.0] - 2026-10-25
 

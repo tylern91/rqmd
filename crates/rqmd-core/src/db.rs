@@ -132,6 +132,10 @@ fn init_schema(conn: &Connection) -> Result<()> {
     // before the column existed keep NULL and are filled in the next time their
     // document is embedded; NULL never matches a lookup.
     ensure_column(conn, "content_vectors", "chunk_hash", "chunk_hash TEXT")?;
+    // `prev_hash` is the hash an edit just superseded, kept so `rqmd embed` can
+    // copy that version's unchanged chunk vectors before the orphan sweep drops
+    // them. NULL means nothing is pending; see `ORPHANED_VECTOR_PREDICATE`.
+    ensure_column(conn, "documents", "prev_hash", "prev_hash TEXT")?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_content_vectors_chunk_hash \
          ON content_vectors(chunk_hash)",
@@ -240,6 +244,12 @@ fn map_document(row: &rusqlite::Row) -> rusqlite::Result<Document> {
 /// own id. Every caller re-indexing an existing (collection, path) hit that
 /// exact sequence, so the id fed into Tantivy's `doc_id` field was wrong on
 /// every content update.
+///
+/// An edit that supersedes a hash with vectors records it in `prev_hash`, so
+/// the vectors survive until the new text is embedded and can donate their
+/// unchanged chunks. Nothing is recorded when the new text already has
+/// vectors or is empty (neither needs a donor); a hash with no vectors keeps
+/// whatever `prev_hash` the row already carried.
 pub fn upsert_document(
     conn: &Connection,
     collection: &str,
@@ -254,6 +264,15 @@ pub fn upsert_document(
         VALUES (?1, ?2, ?3, ?4, ?5, ?5, 1)
         ON CONFLICT(collection, path) DO UPDATE SET
             title       = excluded.title,
+            prev_hash   = CASE
+                WHEN documents.hash = excluded.hash THEN documents.prev_hash
+                WHEN EXISTS (SELECT 1 FROM content_vectors WHERE hash = excluded.hash)
+                    OR COALESCE((SELECT length(doc) FROM content WHERE hash = excluded.hash), 0) = 0
+                    THEN NULL
+                WHEN EXISTS (SELECT 1 FROM content_vectors WHERE hash = documents.hash)
+                    THEN documents.hash
+                ELSE documents.prev_hash
+            END,
             hash        = excluded.hash,
             modified_at = excluded.modified_at,
             active      = 1
@@ -263,6 +282,16 @@ pub fn upsert_document(
         |row| row.get(0),
     )
     .context("upsert document")
+}
+
+/// Drop the pending-donor marker of every document on `hash` once that hash
+/// has its own vectors (or never will).
+pub fn clear_prev_hash(conn: &Connection, hash: &str) -> Result<usize> {
+    conn.execute(
+        "UPDATE documents SET prev_hash = NULL WHERE hash = ?1 AND prev_hash IS NOT NULL",
+        params![hash],
+    )
+    .context("clear prev_hash")
 }
 
 /// The `(size, mtime_ns)` each active document in `collection` was last
@@ -1160,7 +1189,12 @@ pub fn rebuildable_vids_for_collection(conn: &Connection, collection: &str) -> R
     Ok(rows.into_iter().map(|v| v as u64).collect())
 }
 
-const ORPHANED_VECTOR_PREDICATE: &str = "hash NOT IN (SELECT hash FROM documents WHERE active = 1)";
+/// A hash is orphaned when no active document uses it and no active document
+/// still waiting for its own vectors names it as `prev_hash` (the donor of
+/// chunk vectors for that document's embed).
+const ORPHANED_VECTOR_PREDICATE: &str = "hash NOT IN (SELECT hash FROM documents WHERE active = 1) \
+     AND hash NOT IN (SELECT prev_hash FROM documents WHERE active = 1 AND prev_hash IS NOT NULL \
+         AND hash NOT IN (SELECT hash FROM content_vectors))";
 
 /// Count `content_vectors` rows whose hash has no active document referencing
 /// it — orphaned by [`deactivate_missing_documents`]'s soft-delete prune.
@@ -1462,6 +1496,78 @@ mod tests {
         assert_eq!(
             orphaned_vector_hashes(&conn).unwrap(),
             vec!["orphan_hash".to_string()]
+        );
+    }
+
+    fn prev_hash_of(conn: &Connection, path: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT prev_hash FROM documents WHERE path = ?1",
+            params![path],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_edit_records_the_embedded_hash_it_supersedes_and_the_sweep_spares_it() {
+        let conn = test_conn();
+        let now = "2026-01-01T00:00:00Z";
+        for (hash, body) in [("h1", "one"), ("h2", "two"), ("h3", "three")] {
+            upsert_content(&conn, hash, body, now).unwrap();
+        }
+        upsert_document(&conn, "c", "a.md", "A", "h1", now).unwrap();
+        upsert_vector_meta(&conn, "h1", 0, 0, "m", "fp", 1, 1, now).unwrap();
+        assert_eq!(prev_hash_of(&conn, "a.md"), None);
+
+        upsert_document(&conn, "c", "a.md", "A", "h2", now).unwrap();
+        assert_eq!(prev_hash_of(&conn, "a.md").as_deref(), Some("h1"));
+        assert_eq!(count_orphaned_vectors(&conn).unwrap(), 0);
+
+        // h2 has no vectors, so h1 stays the donor through a second edit.
+        upsert_document(&conn, "c", "a.md", "A", "h3", now).unwrap();
+        assert_eq!(prev_hash_of(&conn, "a.md").as_deref(), Some("h1"));
+        assert_eq!(count_orphaned_vectors(&conn).unwrap(), 0);
+
+        // Once the successor has vectors the donor is an orphan again.
+        upsert_vector_meta(&conn, "h3", 0, 0, "m", "fp", 1, 2, now).unwrap();
+        assert_eq!(
+            orphaned_vector_hashes(&conn).unwrap(),
+            vec!["h1".to_string()]
+        );
+        assert_eq!(clear_prev_hash(&conn, "h3").unwrap(), 1);
+        assert_eq!(prev_hash_of(&conn, "a.md"), None);
+    }
+
+    #[test]
+    fn a_donor_is_not_spared_for_an_inactive_document_or_an_edit_that_needs_none() {
+        let conn = test_conn();
+        let now = "2026-01-01T00:00:00Z";
+        for (hash, body) in [("h1", "one"), ("h2", "two"), ("hv", "carried"), ("he", "")] {
+            upsert_content(&conn, hash, body, now).unwrap();
+        }
+        upsert_vector_meta(&conn, "h1", 0, 0, "m", "fp", 1, 1, now).unwrap();
+        upsert_vector_meta(&conn, "hv", 0, 0, "m", "fp", 1, 2, now).unwrap();
+
+        // The successor text already has vectors: nothing to donate to.
+        upsert_document(&conn, "c", "a.md", "A", "h1", now).unwrap();
+        upsert_document(&conn, "c", "a.md", "A", "hv", now).unwrap();
+        assert_eq!(prev_hash_of(&conn, "a.md"), None);
+
+        // The successor is empty: it is never embedded.
+        upsert_document(&conn, "c", "b.md", "B", "hv", now).unwrap();
+        upsert_document(&conn, "c", "b.md", "B", "he", now).unwrap();
+        assert_eq!(prev_hash_of(&conn, "b.md"), None);
+
+        // A donor named only by a soft-deleted document is an orphan.
+        upsert_document(&conn, "c", "d.md", "D", "h1", now).unwrap();
+        upsert_document(&conn, "c", "d.md", "D", "h2", now).unwrap();
+        assert_eq!(prev_hash_of(&conn, "d.md").as_deref(), Some("h1"));
+        conn.execute("UPDATE documents SET active = 0 WHERE path = 'd.md'", [])
+            .unwrap();
+        assert!(
+            orphaned_vector_hashes(&conn)
+                .unwrap()
+                .contains(&"h1".to_string())
         );
     }
 
