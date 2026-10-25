@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+- Changing or removing a file no longer drops the keyword-search entry of a different file whose path
+  contains it. `rqmd update` and `rqmd collection remove` matched an entry by a token phrase over its
+  path, so `docs/readme.md` (file `readme.md` in collection `docs`) also matched `proj/docs/readme.md`
+  (file `docs/readme.md` in collection `proj`), and the second file stopped appearing in
+  `rqmd search` until its content changed. An entry is now deleted only when its stored path is
+  exactly the one being replaced or removed. No rebuild is needed: existing indexes work as they are,
+  and an entry already lost returns the next time `rqmd update` re-indexes that file.
+
 ## [0.31.0] - 2026-10-25
 
 ### Added

@@ -55,6 +55,15 @@ that built it (`fts_tokenizer_version`). After an upgrade that changes it, a ful
 `rqmd update` rebuilds the Tantivy index once from the stored document text; `rqmd doctor` and
 search warn until then.
 
+### Replacing and removing full-text entries
+
+An entry is stored under its `collection/path`, and the path is a tokenized field, so a lookup by
+path is a phrase match: `docs/readme.md` also matches inside `proj/docs/readme.md`. A delete runs
+one such lookup, keeps the candidates whose stored path is exactly the one being replaced or
+removed (plus entries staged under it in the same batch), and deletes those by their document id.
+`update`, `collection remove`, `collection rename` and re-indexing a changed document all go through
+this one path. It needs no schema change and no rebuild.
+
 ### Smart chunking
 
 Documents longer than the chunk size are split at content-aware break
