@@ -145,6 +145,12 @@ poll 3 "$(run_json "$RUST" completed success)" "$(run_json "$SEC" completed succ
 CASE_TIMEOUT=30 CASE_INTERVAL=0 check "running then success" 0 'Rust CI.*success' "$SHA"
 calls_is "running then success: polled 3 times" 3
 
+# 3b. A running run (empty conclusion) still shows its URL on the [wait] line.
+new_scenario
+printf '[{"databaseId":1,"workflowName":"Rust CI","status":"in_progress","conclusion":"","createdAt":"2026-10-25T10:00:00Z","headSha":"%s","url":"https://example.invalid/runs/42"},%s]\n' \
+  "$SHA" "$(run_json "$SEC" completed success)" > "$work/gh/1.json"
+CASE_TIMEOUT=0 check "running run keeps its URL" 1 '^\[wait\] Rust CI: in_progress \(https://example\.invalid/runs/42\)$' "$SHA"
+
 # 4. Timeout: a run that never finishes fails after the deadline.
 new_scenario
 poll 1 "$(run_json "$RUST" in_progress '')" "$(run_json "$SEC" completed success)"

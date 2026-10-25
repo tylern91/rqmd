@@ -100,13 +100,18 @@ trap 'rm -f "$errfile"' EXIT
 # newest_run <json> <workflow>: prints "<status>\t<conclusion>\t<url>" for the
 # newest run of the workflow on the commit, or "missing" when there is none.
 # @tsv escapes tabs and newlines, so a hostile field cannot split the line.
+# An empty field becomes "-": `read` treats tab as whitespace and would merge
+# two tabs, shifting the URL of a running run (empty conclusion) into the
+# conclusion slot.
 newest_run() {
   printf '%s' "$1" | jq -r --arg wf "$2" --arg sha "$sha" '
     [.[] | select(.workflowName == $wf and .headSha == $sha)]
     | sort_by(.createdAt)
     | last
     | if . == null then "missing"
-      else [.status // "", .conclusion // "", .url // ""] | @tsv end'
+      else [.status, .conclusion, .url]
+        | map(if . == null or . == "" then "-" else tostring end)
+        | @tsv end'
 }
 
 # word <value>: a status or conclusion word, or "unknown" if it is not one.
