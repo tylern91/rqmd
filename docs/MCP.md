@@ -57,7 +57,8 @@ silently colliding with the existing listener.
 
 On SIGTERM or Ctrl-C the server ends every open event stream before it exits, so a
 connected client that holds a `GET /mcp` stream open no longer delays `rqmd mcp stop`.
-Requests already in flight finish first.
+Tool calls answer over the same kind of stream, so a call that has not returned yet is
+cut off as well and the client gets no result for it.
 
 ## Binding beyond localhost
 
