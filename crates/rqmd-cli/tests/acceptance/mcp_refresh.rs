@@ -499,5 +499,6 @@ fn ac_11_the_refresh_flags_conflict() {
     rqmd(index_dir.path())
         .args(["mcp", "--allow-refresh", "--no-refresh"])
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
 }
