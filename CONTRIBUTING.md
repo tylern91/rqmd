@@ -227,6 +227,32 @@ bot-authored PRs' workflow runs promptly**, or re-run the missed release via
 `workflow_dispatch` before merging anything else — otherwise the guard blocks
 the next release until the mismatch is resolved.
 
+### Releases wait for green CI
+
+The `main` ruleset has no required status checks, so `release.yml` checks CI
+itself. Just before it creates the tag it runs
+`bash scripts/require-green-ci.sh <sha> <last tag>` on the commit it is about
+to tag, for both the merge-triggered and the `workflow_dispatch` release:
+
+- `Security Scan` must have concluded `success` on that exact commit.
+- `Rust CI` must have too, unless every commit since the last tag leaves out
+  the paths that `scripts/ci-rust-changed.sh` lists (a docs-only range). When
+  the range cannot be computed, `Rust CI` is required.
+- The script polls `gh run list --commit <sha>` every 20 seconds for up to 15
+  minutes, because a merge starts the release and the push-to-`main` CI at the
+  same moment. It fails at once on `failure`, `cancelled` or any other
+  non-success conclusion, and at the deadline when a run is still going or
+  never appeared. A re-run of a cancelled run is waited for; a newer run of
+  the same workflow replaces an older one.
+- A failed release is retried by fixing CI (or re-running the failed workflow
+  on that commit) and then dispatching `release.yml` again.
+- A dry run (`dry_run` input, or `<!-- release-dry-run -->` in the PR body)
+  checks once without waiting and only warns, so it still previews the notes.
+
+The workflow token needs `actions: read` for this (`release.yml` declares it).
+The script's tests run offline with a fake `gh`:
+`bash scripts/tests/require-green-ci.test.sh`.
+
 ## Semver labels
 
 Apply exactly one on your PR: `patch`, `minor`, or `skip-release`.
