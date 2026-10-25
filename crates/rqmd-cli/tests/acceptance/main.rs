@@ -11,6 +11,7 @@ mod graceful_interrupt;
 mod helpers;
 mod hook_signals;
 mod index_rebuild;
+mod mcp_refresh;
 mod output_plain;
 mod per_file;
 mod query_timeout;

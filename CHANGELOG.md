@@ -11,6 +11,18 @@
   exactly the one being replaced or removed. No rebuild is needed: existing indexes work as they are,
   and an entry already lost returns the next time `rqmd update` re-indexes that file.
 
+### Added
+- The MCP `search` and `query` tools take `refresh: true`: before searching they run the incremental
+  full-text pass `rqmd update` does, for the requested collections (all when none are named), so a
+  file edited since the last update is found at once. The pass indexes for keyword search only, so
+  vectors lag and `Pending embed` rises until `rqmd embed`. It never runs update hooks, is bounded
+  by `RQMD_MCP_TOOL_TIMEOUT_SECS`, and holds the index lock for the pass only. While another process
+  holds the lock, or the full-text index still needs its rebuild, the search still returns its
+  results with a one-line `Note:`. Omitted or `false`, a call is unchanged. An implicit
+  project-local `.rqmd/` index is not refreshed unless the server is started with `--allow-refresh`
+  (`--no-refresh` turns the option off for any index). See
+  [docs/MCP.md](docs/MCP.md#refreshing-before-a-search).
+
 ## [0.31.0] - 2026-10-25
 
 ### Added

@@ -58,6 +58,14 @@ pub fn hooks_allowed(source: IndexSource, run_hooks_flag: bool) -> bool {
     }
 }
 
+/// Whether the MCP `refresh` option may re-index an index resolved from
+/// `source`. A refresh walks every path the index's collections name, so a
+/// project-local `.rqmd/` from someone else's repo is refreshed only when the
+/// caller opts in with `--allow-refresh`.
+pub fn refresh_allowed(source: IndexSource, allow_refresh_flag: bool) -> bool {
+    hooks_allowed(source, allow_refresh_flag)
+}
+
 /// `read_only` opens the HNSW index as a memory-mapped view instead of
 /// loading it fully into RAM. Pass `true` for query-only callers (search,
 /// get, status); `false` for callers that index (embed, update, collection
@@ -224,6 +232,14 @@ mod tests {
     fn hooks_allowed_trusts_explicit_and_global_without_the_flag() {
         assert!(hooks_allowed(IndexSource::Explicit, false));
         assert!(hooks_allowed(IndexSource::Global, false));
+    }
+
+    #[test]
+    fn refresh_allowed_follows_the_hook_trust_rule() {
+        assert!(refresh_allowed(IndexSource::Explicit, false));
+        assert!(refresh_allowed(IndexSource::Global, false));
+        assert!(!refresh_allowed(IndexSource::ProjectLocal, false));
+        assert!(refresh_allowed(IndexSource::ProjectLocal, true));
     }
 
     #[test]

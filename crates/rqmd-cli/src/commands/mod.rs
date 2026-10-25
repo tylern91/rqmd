@@ -6,6 +6,7 @@ pub mod get;
 pub mod index;
 pub mod mcp;
 pub mod query;
+pub mod refresh;
 pub mod similar;
 pub mod unlock;
 pub mod watch;

@@ -22,7 +22,7 @@
 | `rqmd doctor` | Diagnose config, index, model, and device issues |
 | `rqmd bench [-n N]` | Embed throughput benchmark (default: 5 rounds) |
 | `rqmd eval [--mode bm25\|vec\|hybrid] [--verbose]` | Search quality eval against synthetic fixtures |
-| `rqmd mcp [--http] [--port N] [--host HOST] [--allow-non-loopback] [--daemon]` | Start MCP server |
+| `rqmd mcp [--http] [--port N] [--host HOST] [--allow-non-loopback] [--daemon] [--allow-refresh \| --no-refresh]` | Start MCP server. `--allow-refresh` lets `refresh: true` re-index an implicit project-local `.rqmd/` index; `--no-refresh` turns the option off for any index. See [Refreshing before a search](MCP.md#refreshing-before-a-search) |
 | `rqmd mcp status` | Show MCP daemon status (pid, health, uptime) |
 | `rqmd mcp stop` | Stop the running MCP daemon |
 | `rqmd collection add <path> [--mask PATTERN] [--ignore PATTERN] [--hidden] [--respect-gitignore] [--max-file-bytes BYTES]` | Add a directory as a collection. The name must not be empty or contain `/`. Re-adding an existing name keeps its update hook and include/exclude setting; the mask, ignore, hidden, gitignore and size settings come from the new flags. A malformed `--mask` or `--ignore` glob fails the command before anything is stored. The summary names the folders the [built-in exclusions](CONFIGURATION.md#excluding-files) left out |

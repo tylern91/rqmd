@@ -143,6 +143,13 @@
             "null"
           ]
         },
+        "refresh": {
+          "description": "Set to true to bring the full-text index up to date with the collection files before\nsearching: the same incremental pass as `rqmd update`, for the requested collections (all\nwhen none are given), bounded by the tool timeout. It never runs a collection's update\ncommand and never creates embeddings, so an edited file is found by keyword search at once\nwhile vector results and Pending embed lag until `rqmd embed`. If another process holds the\nindex lock, the full-text index needs a rebuild or the timeout passes, the search still runs\nand a note says the results may be behind. Default: false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "rerank": {
           "description": "Set to false to skip LLM reranking (faster, lower quality). Default: true.",
           "type": [
@@ -213,6 +220,13 @@
         "query": {
           "description": "BM25 keyword query. Supports \"quoted phrases\" and -negation.",
           "type": "string"
+        },
+        "refresh": {
+          "description": "Set to true to bring the full-text index up to date with the collection files before\nsearching: the same incremental pass as `rqmd update`, for the requested collections (all\nwhen none are given), bounded by the tool timeout. It never runs a collection's update\ncommand and never creates embeddings, so an edited file is found at once while Pending\nembed rises until `rqmd embed`. If another process holds the index lock, the full-text\nindex needs a rebuild or the timeout passes, the search still runs and a note says the\nresults may be behind. Default: false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "required": [

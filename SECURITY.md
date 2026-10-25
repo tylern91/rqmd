@@ -62,3 +62,8 @@ matters:
   that repo's author, not you.
 
 If you do trust the repo, `--run-hooks` opts back in for that invocation.
+
+The same rule gates the MCP `refresh: true` option, which walks every path an
+index's collections name: it is answered with a note for an implicit
+project-local `.rqmd/` unless `rqmd mcp --allow-refresh` is passed, and a refresh
+never runs a hook for any index.

@@ -231,6 +231,15 @@ enum Commands {
         /// Run as a background daemon (implies --http); daemonize and exit
         #[arg(long)]
         daemon: bool,
+        /// Let `refresh: true` re-index a project-local `.rqmd/` index picked up
+        /// implicitly. Without it only an explicit `--index-dir` or the global
+        /// index is refreshed, because a project-local index can belong to a
+        /// repo someone else authored.
+        #[arg(long, conflicts_with = "no_refresh")]
+        allow_refresh: bool,
+        /// Answer `refresh: true` with a note instead of re-indexing, for any index.
+        #[arg(long)]
+        no_refresh: bool,
         #[command(subcommand)]
         action: Option<McpAction>,
     },
@@ -495,6 +504,8 @@ fn run() -> Result<()> {
             host,
             allow_non_loopback,
             daemon,
+            allow_refresh,
+            no_refresh,
             action,
         } => match action {
             Some(McpAction::Status) => commands::mcp::run_mcp_status(&index_dir),
@@ -506,6 +517,7 @@ fn run() -> Result<()> {
                 port,
                 daemon,
                 allow_non_loopback,
+                !no_refresh && store::refresh_allowed(index_source, allow_refresh),
             ),
         },
     }
