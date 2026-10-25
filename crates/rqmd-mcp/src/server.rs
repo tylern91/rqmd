@@ -16,8 +16,8 @@ use rmcp::{
 };
 
 use rqmd_core::{
-    Deadline, Document, SearchOptions, Store, StoreConfig, clamp_per_file, db, resolve,
-    section_numbers, snap_char_boundary_backward, store as core_store,
+    Deadline, Document, Recency, SearchOptions, Store, StoreConfig, clamp_per_file, db,
+    parse_half_life, resolve, section_numbers, snap_char_boundary_backward, store as core_store,
 };
 use rqmd_llm::{BackendKind, create_backend, no_backend};
 
@@ -62,7 +62,17 @@ fn clamp_offset(offset: Option<usize>) -> usize {
 fn search_options(per_file: Option<usize>) -> SearchOptions {
     SearchOptions {
         per_file: clamp_per_file(per_file.unwrap_or(1)),
+        ..SearchOptions::default()
     }
+}
+
+/// The recency weighting for a client-supplied half-life such as `30d`, or
+/// none when omitted. A value `parse_half_life` refuses is an error.
+fn recency_of(recency: Option<&str>) -> Result<Option<Recency>, String> {
+    recency
+        .map(|spec| parse_half_life(spec).map(Recency::new))
+        .transpose()
+        .map_err(|e| format!("Error: {e}"))
 }
 
 /// Number of ranked results to fetch so that the page `offset..offset+limit`
@@ -296,6 +306,11 @@ pub struct QueryInput {
     /// reranking finishes, instead of returning the results in fusion order with a
     /// note. Default: false.
     pub strict_timeout: Option<bool>,
+    /// Rank newer files higher: a half-life such as "30d", "2w" or "12h" (whole number, at
+    /// most 3650d). A file's score is multiplied by a factor that falls with the age of the
+    /// file (its mtime), halving the excess over 50% every half-life. Older files are never
+    /// dropped. Omit for no age weighting.
+    pub recency: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -403,6 +418,7 @@ impl RqmdServer {
         let offset = clamp_offset(p.offset);
         let cols = p.collections.as_deref();
         let intent = p.intent.as_deref();
+        let recency = recency_of(p.recency.as_deref())?;
         let mut store = self
             .ml()
             .map_err(|e| format!("Error loading inference backend: {e:#}"))?;
@@ -416,14 +432,21 @@ impl RqmdServer {
                 no_expand,
                 Deadline::after(self.tool_timeout),
                 p.strict_timeout.unwrap_or(false),
-                &search_options(p.per_file),
+                &SearchOptions {
+                    recency,
+                    ..search_options(p.per_file)
+                },
             )
             .map_err(|e| format!("Error running query: {e:#}"))?;
         let (page, has_more) = page_of(outcome.results, offset, limit);
-        Ok(with_rerank_note(
+        let text = with_rerank_note(
             format_results(&page, &p.query, offset, has_more),
             outcome.rerank,
-        ))
+        );
+        Ok(match recency {
+            Some(recency) => format!("{}\nNote: {}\n", text.trim_end(), recency.notice()),
+            None => text,
+        })
     }
 
     fn search_blocking(&self, p: SearchInput) -> Result<String, String> {
@@ -1296,6 +1319,7 @@ mod tests {
             rerank: None,
             expand: None,
             strict_timeout: None,
+            recency: None,
         }
     }
 
@@ -1369,6 +1393,56 @@ mod tests {
         let note: Vec<&str> = out.lines().filter(|l| l.starts_with("Note: ")).collect();
         assert_eq!(note.len(), 1, "{out}");
         assert!(note[0].contains("not reranked"), "{out}");
+    }
+
+    #[test]
+    fn recency_is_off_when_omitted_and_parsed_when_given() {
+        assert_eq!(recency_of(None), Ok(None));
+        let on = recency_of(Some("2w")).unwrap().expect("recency");
+        assert_eq!(on.half_life, Duration::from_secs(14 * 86_400));
+        assert_eq!(on.floor, rqmd_core::DEFAULT_RECENCY_FLOOR);
+        for bad in ["", "0d", "-1d", "30", "3651d", "1.5h"] {
+            let err = recency_of(Some(bad)).unwrap_err();
+            assert!(err.starts_with("Error: invalid half-life"), "{err}");
+            assert!(err.contains("30d, 2w or 12h"), "{err}");
+        }
+    }
+
+    #[test]
+    fn query_with_a_bad_recency_errors_before_loading_a_model() {
+        let (_dir, server) = pool_server(1);
+
+        let err = server
+            .query_blocking(QueryInput {
+                recency: Some("soon".to_string()),
+                ..matching_query(None)
+            })
+            .unwrap_err();
+
+        assert!(err.contains("invalid half-life"), "{err}");
+        assert!(!err.contains("inference backend"), "{err}");
+    }
+
+    #[test]
+    fn query_with_recency_says_so_in_one_note_and_without_it_says_nothing() {
+        let (_dir, server) = server_with_slow_embed_store(Duration::from_millis(50));
+
+        let weighted = server
+            .query_blocking(QueryInput {
+                recency: Some("30d".to_string()),
+                ..matching_query(None)
+            })
+            .unwrap();
+        let plain = server.query_blocking(matching_query(None)).unwrap();
+
+        let notes = |out: &str| {
+            out.lines()
+                .filter(|l| l.contains("weighted by file age"))
+                .count()
+        };
+        assert_eq!(notes(&weighted), 1, "{weighted}");
+        assert!(weighted.contains("half-life 30d"), "{weighted}");
+        assert_eq!(notes(&plain), 0, "{plain}");
     }
 
     #[test]
@@ -1490,6 +1564,7 @@ mod tests {
                 "offset",
                 "per_file",
                 "query",
+                "recency",
                 "rerank",
                 "strict_timeout",
             ],

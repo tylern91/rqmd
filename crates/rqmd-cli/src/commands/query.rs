@@ -1,6 +1,6 @@
 use anyhow::Result;
 use rqmd_core::{
-    Deadline, QueryOutcome, QueryStage, RerankStatus, SearchOptions, SearchResult, Store,
+    Deadline, QueryOutcome, QueryStage, Recency, RerankStatus, SearchOptions, SearchResult, Store,
 };
 use std::io::Write;
 use std::path::Path;
@@ -54,6 +54,8 @@ pub struct QueryOptions<'a> {
     /// Fail with exit 124 when `timeout` passes before reranking, instead of
     /// returning the results in fusion order.
     pub timeout_strict: bool,
+    /// Weight scores by file age.
+    pub recency: Option<Recency>,
 }
 
 /// Stderr line for a query whose results were not reranked although reranking
@@ -132,6 +134,7 @@ fn query_with_progress<W: Write + Send + 'static>(
         opts.timeout_strict,
         &SearchOptions {
             per_file: opts.per_file,
+            recency: opts.recency,
         },
     );
     s.set_query_observer(None);
@@ -144,6 +147,9 @@ fn query_with_progress<W: Write + Send + 'static>(
 
 pub fn run_query(index_dir: &Path, query: &str, opts: QueryOptions) -> Result<()> {
     run_search_command(index_dir, query, opts.fmt, opts.full, true, |s| {
+        if let Some(recency) = &opts.recency {
+            eprintln!("rqmd: {}", recency.notice());
+        }
         let progress = Progress::new(ProgressMode::detect());
         let outcome = query_with_progress(s, query, &opts, progress)?;
         if let Some(line) = rerank_warning(outcome.rerank, opts.timeout) {
@@ -163,7 +169,15 @@ pub fn run_search(
     full: bool,
 ) -> Result<()> {
     run_search_command(index_dir, query, fmt, full, false, |s| {
-        s.search_fts_multi_with(query, num, collections, &SearchOptions { per_file })
+        s.search_fts_multi_with(
+            query,
+            num,
+            collections,
+            &SearchOptions {
+                per_file,
+                ..SearchOptions::default()
+            },
+        )
     })
 }
 
@@ -177,7 +191,15 @@ pub fn run_vsearch(
     full: bool,
 ) -> Result<()> {
     run_search_command(index_dir, query, fmt, full, true, |s| {
-        s.search_vec_multi_with(query, num, collections, &SearchOptions { per_file })
+        s.search_vec_multi_with(
+            query,
+            num,
+            collections,
+            &SearchOptions {
+                per_file,
+                ..SearchOptions::default()
+            },
+        )
     })
 }
 
@@ -294,6 +316,7 @@ mod tests {
             no_expand: true,
             timeout: None,
             timeout_strict: false,
+            recency: None,
         }
     }
 

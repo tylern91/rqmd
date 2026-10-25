@@ -136,6 +136,13 @@
           "description": "Search query. Supports plain text (auto-expanded via generation model),\n`expand: text`, or a multi-line typed document with `lex:`, `vec:`,\n`hyde:`, and optional `intent:` lines per the rqmd query syntax.",
           "type": "string"
         },
+        "recency": {
+          "description": "Rank newer files higher: a half-life such as \"30d\", \"2w\" or \"12h\" (whole number, at\nmost 3650d). A file's score is multiplied by a factor that falls with the age of the\nfile (its mtime), halving the excess over 50% every half-life. Older files are never\ndropped. Omit for no age weighting.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "rerank": {
           "description": "Set to false to skip LLM reranking (faster, lower quality). Default: true.",
           "type": [

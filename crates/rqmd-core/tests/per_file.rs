@@ -111,7 +111,10 @@ fn index(store: &mut Store, collection: &str, path: &str, body: &str) {
 }
 
 fn opts(per_file: usize) -> SearchOptions {
-    SearchOptions { per_file }
+    SearchOptions {
+        per_file,
+        ..SearchOptions::default()
+    }
 }
 
 fn sections_of(results: &[SearchResult], file: &str) -> Vec<(usize, f32)> {

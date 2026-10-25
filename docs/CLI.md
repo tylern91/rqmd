@@ -6,7 +6,7 @@
 
 | Command | Description |
 |---------|-------------|
-| `rqmd query <text> [--no-expand] [--per-file N] [--timeout SECS [--timeout-strict]]` | Hybrid search: BM25 + vector + rerank + LLM query expansion. `--timeout` gives up after that many seconds (exit 124), or returns the results unreranked if only reranking is left; `--timeout-strict` always exits 124; see [Timeouts](#timeouts) |
+| `rqmd query <text> [--no-expand] [--per-file N] [--recency HALF_LIFE] [--timeout SECS [--timeout-strict]]` | Hybrid search: BM25 + vector + rerank + LLM query expansion. `--timeout` gives up after that many seconds (exit 124), or returns the results unreranked if only reranking is left; `--timeout-strict` always exits 124; see [Timeouts](#timeouts) |
 | `rqmd search <text> [--per-file N]` | BM25 keyword search only |
 | `rqmd vsearch <text> [--per-file N]` | Vector similarity only; each result shows the chunk that matched |
 | `rqmd similar <path\|#docid>` | Find documents most similar to an already-indexed one |
@@ -78,6 +78,7 @@ apart this way and are not filtered.
 | `-n <num>` | `10` | Number of results to return |
 | `--per-file <N>` | `1` | Sections of one file to return, best first, up to 5; see [Sections per file](#sections-per-file) |
 | `-c/--collection <name>` | *(all)* | Scope to a collection (repeatable, OR-matched) |
+| `--recency <half-life>` | off | Rank newer files higher, for example `30d`, `2w` or `12h`; `query` only, see [Recency](#recency) |
 | `--no-expand` | off | Skip LLM query expansion; search the query text as-is (env: `RQMD_NO_EXPAND`) |
 | `--no-rerank` | off | Skip cross-encoder reranking (expansion still runs) |
 | `--full` | off | Return full document bodies instead of snippets |
@@ -167,6 +168,41 @@ capped at 5 and `0` counts as 1; the default of 1 changes nothing.
   `**section:** 2 of 3` in `md` and `section="2 of 3"` in `xml`, in words
   rather than colour. `json` and `csv` repeat the file with a different `line`
   and snippet, and `files` lists each file once.
+
+## Recency
+
+`rqmd query --recency <half-life>` ranks newer files higher. Each result's final
+score is multiplied by a factor of the age of its file, taken from the file's
+modification time (mtime) as `rqmd update` last recorded it:
+
+```
+factor = floor + (1 - floor) * 0.5 ^ (age / half-life)       floor = 0.5
+```
+
+A file modified just now keeps its whole score. The part of the score above the
+floor halves every half-life, so with `--recency 30d` a file keeps 75% at 30
+days, about 56% at 90 days and never less than 50%. Files are only down-weighted,
+never removed from the results.
+
+- The half-life is a whole number of days, weeks or hours (`30d`, `2w`, `12h`),
+  above zero and at most `3650d`. Anything else is a usage error (exit 2) that
+  shows the accepted form.
+- Without the flag nothing changes: the same results, scores and order as
+  before, whatever the file times are.
+- Recency reweights the files `query` already found, so a strongly relevant old
+  file stays in the list. It does not pull in files the query did not match, and
+  `-n` is still the number of results.
+- A file with no recorded mtime (not yet re-scanned by `rqmd update` since the
+  mtime was first recorded, or modified within two seconds of being indexed)
+  counts as new, as does an mtime in the future. Only the file's time is used,
+  not dates inside the document. Tools that reset file times, such as a fresh
+  `git clone` or a sync that does not preserve them, make every file look new.
+- Equal scores are still ordered by ascending `collection/path`. With
+  `--per-file`, every section of a file gets the file's factor.
+- `rqmd query` prints one line to stderr, for example `rqmd: results are
+  weighted by file age: half-life 30d, no file below 50% of its score`. stdout
+  and `--format` output are unchanged apart from the scores and their order.
+- `search` and `vsearch` do not take the flag.
 
 ## Colour and progress output
 

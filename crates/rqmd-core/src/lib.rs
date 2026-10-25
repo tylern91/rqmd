@@ -19,6 +19,7 @@ pub use deadline::{Deadline, TimedOut};
 pub use lock::{DEFAULT_STALE_AFTER, Holder, IndexLock, LockState, lock_state, remove_lock};
 pub use store::{IndexOutcome, PendingVectorMeta, RenameSummary, Store, StoreConfig};
 pub use types::{
-    Collection, Document, MAX_PER_FILE, QueryOutcome, QueryStage, RerankStatus, SearchOptions,
-    SearchResult, clamp_per_file, section_numbers,
+    Collection, DEFAULT_RECENCY_FLOOR, Document, MAX_HALF_LIFE, MAX_PER_FILE, QueryOutcome,
+    QueryStage, Recency, RerankStatus, SearchOptions, SearchResult, clamp_per_file,
+    parse_half_life, section_numbers,
 };
