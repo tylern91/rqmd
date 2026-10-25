@@ -24,10 +24,10 @@
 | `rqmd mcp [--http] [--port N] [--host HOST] [--allow-non-loopback] [--daemon]` | Start MCP server |
 | `rqmd mcp status` | Show MCP daemon status (pid, health, uptime) |
 | `rqmd mcp stop` | Stop the running MCP daemon |
-| `rqmd collection add <path> [--mask PATTERN] [--ignore PATTERN] [--hidden] [--respect-gitignore] [--max-file-bytes BYTES]` | Add a directory as a collection. A malformed `--mask` or `--ignore` glob fails the command before anything is stored. The summary names the folders the [built-in exclusions](CONFIGURATION.md#excluding-files) left out |
+| `rqmd collection add <path> [--mask PATTERN] [--ignore PATTERN] [--hidden] [--respect-gitignore] [--max-file-bytes BYTES]` | Add a directory as a collection. The name must not be empty or contain `/`. Re-adding an existing name keeps its update hook and include/exclude setting; the mask, ignore, hidden, gitignore and size settings come from the new flags. A malformed `--mask` or `--ignore` glob fails the command before anything is stored. The summary names the folders the [built-in exclusions](CONFIGURATION.md#excluding-files) left out |
 | `rqmd collection list` | List all collections |
-| `rqmd collection remove <name>` | Remove a collection |
-| `rqmd collection rename <old> <new>` | Rename a collection |
+| `rqmd collection remove <name>` | Remove a collection, its documents and its path contexts |
+| `rqmd collection rename <old> <new>` | Rename a collection. The new name follows the same rules as `collection add`. Its documents are re-indexed for keyword search under the new name (no re-embed) and its path contexts move with it; full-text entries left under a name no collection uses (left by a rename made with an earlier release) are removed in the same pass. Waits for a running `embed` or `update`, like `collection remove` |
 | `rqmd collection show <name>` | Show collection details, including its ignore patterns |
 | `rqmd collection update-cmd <name> [cmd]` | Set/clear pre-update hook |
 | `rqmd collection include/exclude <name>` | Toggle from default queries |

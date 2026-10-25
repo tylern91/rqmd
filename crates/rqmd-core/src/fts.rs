@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tantivy::{
     Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, TantivyError, Term,
-    collector::TopDocs,
+    collector::{DocSetCollector, TopDocs},
     directory::error::LockError,
     doc,
     query::{BooleanQuery, ConstScoreQuery, PhraseQuery, Query, QueryParser, TermQuery},
@@ -315,7 +315,9 @@ impl FtsIndex {
         self.insert_document(filepath, title, body, frontmatter, doc_id)
     }
 
-    fn insert_document(
+    /// Add an entry without first deleting `filepath`. For a caller that has
+    /// already staged the deletes for every path it writes.
+    pub fn insert_document(
         &mut self,
         filepath: &str,
         title: &str,
@@ -418,6 +420,44 @@ impl FtsIndex {
             w.delete_query(query).context("delete tantivy doc")?;
         }
         Ok(())
+    }
+
+    /// The stored `filepath` of every live document in the committed index.
+    /// Staged, uncommitted writes are not visible here.
+    pub fn indexed_filepaths(&self) -> Result<Vec<String>> {
+        let searcher = self.reader.searcher();
+        let mut paths = Vec::new();
+        for segment in searcher.segment_readers() {
+            let store = segment
+                .get_store_reader(1)
+                .context("tantivy store reader")?;
+            for doc in store.iter::<TantivyDocument>(segment.alive_bitset()) {
+                let doc = doc.context("read tantivy doc")?;
+                if let Some(path) = doc.get_first(self.schema.filepath).and_then(|v| v.as_str()) {
+                    paths.push(path.to_string());
+                }
+            }
+        }
+        Ok(paths)
+    }
+
+    /// The stored `filepath` of every committed entry that
+    /// [`FtsIndex::delete_by_filepath`] would remove for `filepath`. The match
+    /// is a token phrase, so a longer path that contains this one
+    /// (`proj/docs/a.md` for `docs/a.md`) is included.
+    pub fn filepaths_matched_by(&self, filepath: &str) -> Result<Vec<String>> {
+        let Some(query) = self.exact_filepath_query(filepath)? else {
+            return Ok(Vec::new());
+        };
+        let searcher = self.reader.searcher();
+        let mut paths = Vec::new();
+        for addr in searcher.search(query.as_ref(), &DocSetCollector)? {
+            let doc: TantivyDocument = searcher.doc(addr).context("read tantivy doc")?;
+            if let Some(path) = doc.get_first(self.schema.filepath).and_then(|v| v.as_str()) {
+                paths.push(path.to_string());
+            }
+        }
+        Ok(paths)
     }
 
     /// Build a query that matches only documents indexed under exactly this

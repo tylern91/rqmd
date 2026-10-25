@@ -39,6 +39,16 @@
   reranking failed (exit `124`, a `timed out` error). Pass `--timeout-strict` (CLI, requires `--timeout`) or `strict_timeout: true`
   (MCP, a new optional `query` input field) to keep the old failure for a deadline that passes
   before reranking. A deadline that passes before the first results exist still exits `124`.
+- `rqmd collection add --name` and `rqmd collection rename` reject an empty name and a name that
+  contains `/`, with the reason in the error. A `/` made `rqmd get <collection>/<path>` split the
+  path in the wrong place.
+- `rqmd collection add` for a name that already exists keeps the collection's update hook and its
+  include/exclude setting; it used to reset both. The mask, ignore, hidden, gitignore and size
+  settings still come from the new flags, and the command says that it is updating an existing
+  collection.
+- `rqmd collection rename` now waits for a running `embed` or `update`, as `collection remove`
+  does, and prints the number of documents it re-indexed. The SQLite rows, the path contexts and
+  the keyword index change together or not at all.
 
 ### Fixed
 - Output is plain text when it is not a terminal. Before, `status`, `update`, `embed`, `doctor` and
@@ -73,6 +83,15 @@
   line on stderr while the MCP result ends with one `Note:` line. Neither line carries a path or
   the error text; `RUST_LOG=warn` shows the error. Stdout, JSON output and the MCP tool schema are
   unchanged.
+- After `rqmd collection rename`, keyword search scoped to the new name (`-c new`) found nothing
+  and `-c old` still matched, and a later edit to a document listed it twice in unscoped results.
+  The rename now re-indexes only that collection's keyword entries; vectors are keyed by content
+  hash, so nothing is re-embedded and the index format is unchanged. Entries that an earlier
+  rename left under a name no collection uses are removed in the same pass.
+- `rqmd collection rename` now moves the collection's path contexts to the new name. They stayed
+  under the old name and stopped applying.
+- `rqmd collection remove` now deletes the collection's path contexts. They survived the removal
+  and attached themselves to any later collection with the same name.
 
 ## [0.29.0] - 2026-10-25
 
