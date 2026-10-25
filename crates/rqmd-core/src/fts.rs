@@ -4,11 +4,13 @@
 //! Results are joined back to rusqlite by `filepath` = "collection/path".
 
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tantivy::{
     Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, TantivyError, Term,
-    collector::{DocSetCollector, TopDocs},
+    collector::{DocSetCollector, FilterCollector, TopDocs},
     directory::error::LockError,
     doc,
     query::{BooleanQuery, ConstScoreQuery, PhraseQuery, Query, QueryParser, TermQuery},
@@ -535,6 +537,21 @@ impl FtsIndex {
         limit: usize,
         collections: Option<&[String]>,
     ) -> Result<Vec<(String, i64, f32)>> {
+        self.search_fts_scoped(query_text, limit, collections, None)
+    }
+
+    /// Like `search_fts_multi`, but with the exact set of document ids that are
+    /// in scope. The id set is applied while collecting, on the `doc_id` fast
+    /// field, so the top-`limit` cut only ever counts in-scope documents and
+    /// needs neither the tokenized path pushdown nor an overscan. `allowed:
+    /// None` keeps the pushdown-and-overscan path of `search_fts_multi`.
+    pub fn search_fts_scoped(
+        &self,
+        query_text: &str,
+        limit: usize,
+        collections: Option<&[String]>,
+        allowed: Option<&Arc<HashSet<i64>>>,
+    ) -> Result<Vec<(String, i64, f32)>> {
         // `TopDocs::with_limit` asserts `limit != 0` and panics otherwise. A
         // panic here unwinds through the caller's `Mutex<Store>` guard (the
         // MCP server holds one per tool call) and poisons it, wedging every
@@ -571,7 +588,10 @@ impl FtsIndex {
         // could also match "other/my-notes.md") — that's fine, the post-filter
         // is still the final guarantee. Wrapped in a ConstScoreQuery so filtering
         // never perturbs BM25 ranking.
-        if let Some(cols) = collections.filter(|c| !c.is_empty()) {
+        if let Some(cols) = collections
+            .filter(|c| !c.is_empty())
+            .filter(|_| allowed.is_none())
+        {
             let mut clause_groups: Vec<Box<dyn Query>> = Vec::new();
             for c in cols {
                 if let Some(clause) = self.collection_pushdown_clause(c)? {
@@ -598,7 +618,7 @@ impl FtsIndex {
         // overscan since every candidate already counts.
         const FETCH_OVERSCAN_FACTOR: usize = 20;
         const FETCH_OVERSCAN_CAP: usize = 5000;
-        let scoped = collections.is_some_and(|c| !c.is_empty());
+        let scoped = allowed.is_none() && collections.is_some_and(|c| !c.is_empty());
         let fetch_limit = if scoped {
             // `Ord::clamp` panics if its min bound exceeds its max bound, which
             // `limit` alone would do here once `limit > FETCH_OVERSCAN_CAP` — a
@@ -616,9 +636,19 @@ impl FtsIndex {
         };
 
         let collector = TopDocs::with_limit(fetch_limit).order_by_score();
-        let top_docs = searcher
-            .search(&query, &collector)
-            .context("tantivy search")?;
+        let top_docs = match allowed {
+            Some(ids) => {
+                let ids = Arc::clone(ids);
+                let filtered = FilterCollector::new(
+                    "doc_id".to_string(),
+                    move |id: i64| ids.contains(&id),
+                    collector,
+                );
+                searcher.search(&query, &filtered)
+            }
+            None => searcher.search(&query, &collector),
+        }
+        .context("tantivy search")?;
 
         let mut results = Vec::new();
         for (score, addr) in top_docs {

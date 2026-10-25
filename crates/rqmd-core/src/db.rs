@@ -1283,6 +1283,27 @@ pub fn active_filepaths(conn: &Connection) -> Result<HashSet<String>> {
     Ok(rows)
 }
 
+/// Row ids of the active documents in any of `collections`: the `doc_id` values
+/// a scoped keyword search may return.
+pub fn active_document_ids_in_collections(
+    conn: &Connection,
+    collections: &[String],
+) -> Result<HashSet<i64>> {
+    if collections.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let placeholders = vec!["?"; collections.len()].join(",");
+    let sql =
+        format!("SELECT id FROM documents WHERE active = 1 AND collection IN ({placeholders})");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params_from_iter(collections.iter()), |row| {
+            row.get::<_, i64>(0)
+        })?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    Ok(rows)
+}
+
 pub fn set_collection_include(conn: &Connection, name: &str, include: bool) -> Result<()> {
     conn.execute(
         "UPDATE store_collections SET include_by_default=?2 WHERE name=?1",

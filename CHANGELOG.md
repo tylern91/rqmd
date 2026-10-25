@@ -92,6 +92,11 @@
   under the old name and stopped applying.
 - `rqmd collection remove` now deletes the collection's path contexts. They survived the removal
   and attached themselves to any later collection with the same name.
+- Keyword search scoped to a collection (`-c`, MCP `collections`) came back short or empty when
+  many files of other collections, under a directory named like the scope, scored higher. The
+  scope is now the exact set of the collection's active documents, applied before the result
+  cut, so the result is as full as the collection allows. Scores, ranking and the index format
+  are unchanged.
 
 ## [0.29.0] - 2026-10-25
 
