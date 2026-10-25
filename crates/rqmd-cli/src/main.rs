@@ -48,10 +48,25 @@ struct SearchScopeArgs {
     /// Sections of one file to return, best first (1 to 5; default 1)
     #[arg(long, default_value_t = 1, value_name = "N")]
     per_file: usize,
+    /// Rank newer files higher: a file's score is multiplied by a factor that falls with the
+    /// age of the file (its mtime) and halves its excess over 50% every HALF_LIFE, such as
+    /// 30d, 2w or 12h. Older files are never dropped. Off unless given.
+    #[arg(long, value_name = "HALF_LIFE", value_parser = rqmd_core::parse_half_life)]
+    recency: Option<std::time::Duration>,
     #[arg(long, value_enum, default_value = "cli")]
     format: format::Format,
     #[arg(long)]
     full: bool,
+}
+
+impl SearchScopeArgs {
+    /// The library options these flags select.
+    fn search_options(&self) -> rqmd_core::SearchOptions {
+        rqmd_core::SearchOptions {
+            per_file: self.per_file,
+            recency: self.recency.map(rqmd_core::Recency::new),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -79,11 +94,6 @@ enum Commands {
         /// returning the results in fusion order.
         #[arg(long, requires = "timeout")]
         timeout_strict: bool,
-        /// Rank newer files higher: a file's score is multiplied by a factor that falls with the
-        /// age of the file (its mtime) and halves its excess over 50% every HALF_LIFE, such as
-        /// 30d, 2w or 12h. Older files are never dropped. Off unless given.
-        #[arg(long, value_name = "HALF_LIFE", value_parser = rqmd_core::parse_half_life)]
-        recency: Option<std::time::Duration>,
     },
     /// Full-text keyword search (BM25 only, no LLM)
     Search {
@@ -397,7 +407,6 @@ fn run() -> Result<()> {
             no_expand,
             timeout,
             timeout_strict,
-            recency,
         } => commands::query::run_query(
             &index_dir,
             &query,
@@ -412,7 +421,7 @@ fn run() -> Result<()> {
                 no_expand,
                 timeout: timeout.map(std::time::Duration::from_secs),
                 timeout_strict,
-                recency: recency.map(rqmd_core::Recency::new),
+                recency: scope.recency.map(rqmd_core::Recency::new),
             },
         ),
         Commands::Search { query, scope } => commands::query::run_search(
@@ -420,7 +429,7 @@ fn run() -> Result<()> {
             &query,
             collections_filter(&scope.collection),
             scope.num,
-            scope.per_file,
+            scope.search_options(),
             scope.format,
             scope.full,
         ),
@@ -429,7 +438,7 @@ fn run() -> Result<()> {
             &query,
             collections_filter(&scope.collection),
             scope.num,
-            scope.per_file,
+            scope.search_options(),
             scope.format,
             scope.full,
         ),

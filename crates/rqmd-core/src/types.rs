@@ -235,8 +235,8 @@ pub struct SearchOptions {
     /// Sections returned per file, clamped to `1..=MAX_PER_FILE` when used. The
     /// default of 1 is one result per file.
     pub per_file: usize,
-    /// Weight scores by file age. Used by the hybrid query only; `None`, the
-    /// default, leaves scores and order untouched.
+    /// Weight scores by file age. `None`, the default, leaves scores and order
+    /// untouched.
     pub recency: Option<Recency>,
 }
 

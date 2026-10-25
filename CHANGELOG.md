@@ -22,6 +22,13 @@
   project-local `.rqmd/` index is not refreshed unless the server is started with `--allow-refresh`
   (`--no-refresh` turns the option off for any index). See
   [docs/MCP.md](docs/MCP.md#refreshing-before-a-search).
+- `rqmd search --recency <half-life>`, `rqmd vsearch --recency <half-life>` and the MCP `search`
+  field `recency` rank newer files higher, with the same factor, floor and half-life forms as
+  `query`. Because these searches cut their matches to the limit first, they now gather the best
+  4 x limit files (at most 200), weight them by age and re-sort before keeping the limit, so a
+  recent file just below the plain cut can appear. Without the flag results are unchanged. No
+  index change: it reads the mtime `rqmd update` already records. See
+  [docs/CLI.md](docs/CLI.md#recency).
 
 ## [0.31.0] - 2026-10-25
 

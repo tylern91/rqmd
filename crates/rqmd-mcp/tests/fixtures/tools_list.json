@@ -221,6 +221,13 @@
           "description": "BM25 keyword query. Supports \"quoted phrases\" and -negation.",
           "type": "string"
         },
+        "recency": {
+          "description": "Rank newer files higher: a half-life such as \"30d\", \"2w\" or \"12h\" (whole number, at\nmost 3650d). A file's score is multiplied by a factor that falls with the age of the\nfile (its mtime), halving the excess over 50% every half-life. Older files are never\ndropped. Omit for no age weighting.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "refresh": {
           "description": "Set to true to bring the full-text index up to date with the collection files before\nsearching: the same incremental pass as `rqmd update`, for the requested collections (all\nwhen none are given), bounded by the tool timeout. It never runs a collection's update\ncommand and never creates embeddings, so an edited file is found at once while Pending\nembed rises until `rqmd embed`. If another process holds the index lock, the full-text\nindex needs a rebuild or the timeout passes, the search still runs and a note says the\nresults may be behind. Default: false.",
           "type": [

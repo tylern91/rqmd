@@ -159,25 +159,25 @@ pub fn run_query(index_dir: &Path, query: &str, opts: QueryOptions) -> Result<()
     })
 }
 
+/// Say on stderr that results are weighted by file age, as `query` does.
+fn announce_recency(options: &SearchOptions) {
+    if let Some(recency) = &options.recency {
+        eprintln!("rqmd: {}", recency.notice());
+    }
+}
+
 pub fn run_search(
     index_dir: &Path,
     query: &str,
     collections: Option<&[String]>,
     num: usize,
-    per_file: usize,
+    options: SearchOptions,
     fmt: Format,
     full: bool,
 ) -> Result<()> {
     run_search_command(index_dir, query, fmt, full, false, |s| {
-        s.search_fts_multi_with(
-            query,
-            num,
-            collections,
-            &SearchOptions {
-                per_file,
-                ..SearchOptions::default()
-            },
-        )
+        announce_recency(&options);
+        s.search_fts_multi_with(query, num, collections, &options)
     })
 }
 
@@ -186,20 +186,13 @@ pub fn run_vsearch(
     query: &str,
     collections: Option<&[String]>,
     num: usize,
-    per_file: usize,
+    options: SearchOptions,
     fmt: Format,
     full: bool,
 ) -> Result<()> {
     run_search_command(index_dir, query, fmt, full, true, |s| {
-        s.search_vec_multi_with(
-            query,
-            num,
-            collections,
-            &SearchOptions {
-                per_file,
-                ..SearchOptions::default()
-            },
-        )
+        announce_recency(&options);
+        s.search_vec_multi_with(query, num, collections, &options)
     })
 }
 
