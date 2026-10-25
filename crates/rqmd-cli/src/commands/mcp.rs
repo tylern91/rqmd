@@ -3,6 +3,7 @@ use rqmd_mcp::RqmdServer;
 use std::path::Path;
 use std::time::Duration;
 
+use super::refresh;
 use crate::daemon;
 
 #[allow(clippy::too_many_arguments)]
@@ -38,8 +39,9 @@ pub fn run_mcp(
 
     if !http {
         eprintln!("Initialising RQMD MCP server...");
-        let server =
-            RqmdServer::new(index_dir.to_path_buf()).context("failed to create RQMD server")?;
+        let server = RqmdServer::new(index_dir.to_path_buf())
+            .context("failed to create RQMD server")?
+            .with_refresher(refresh::refresher());
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -49,8 +51,9 @@ pub fn run_mcp(
     daemon::check_port_free(host, port).context("cannot start MCP server")?;
 
     eprintln!("Initialising RQMD MCP server...");
-    let server =
-        RqmdServer::new(index_dir.to_path_buf()).context("failed to create RQMD server")?;
+    let server = RqmdServer::new(index_dir.to_path_buf())
+        .context("failed to create RQMD server")?
+        .with_refresher(refresh::refresher());
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

@@ -1,5 +1,7 @@
+mod refresh;
 mod server;
 
+pub use refresh::{RefreshOutcome, Refresher};
 pub use server::RqmdServer;
 
 use anyhow::{Result, bail};

@@ -148,7 +148,7 @@ re-embedded once, and a chunk whose text is unchanged (every file of up to
 
 ### Security boundaries
 
-Three boundaries worth knowing before pointing rqmd at content you don't
+Four boundaries worth knowing before pointing rqmd at content you don't
 fully trust:
 
 - **Update-hook trust.** A collection's `update_command` hook only runs
@@ -166,6 +166,16 @@ fully trust:
   `limit` to a fixed cap (1000) rather than trusting it unbounded, so a
   malformed or adversarial MCP client request can't force an unbounded
   allocation or a scoped-search overscan past its safety ceiling.
+- **MCP refresh.** `refresh: true` on `search` and `query` runs the same
+  incremental full-text pass as `rqmd update` (same walk, masks, size cap and
+  symlink containment) for the collections the client names, which are only
+  matched against the registered collection list and never used as paths. It
+  never runs a collection's `update_command`, never embeds, takes the index lock
+  for the pass only and skips itself while another process holds it or the
+  full-text index awaits its rebuild. The pass lives in `rqmd-cli`
+  (`commands/refresh.rs`) and is handed to the server as a callback, because
+  `rqmd-mcp` cannot depend on the CLI crate. See
+  [Refreshing before a search](MCP.md#refreshing-before-a-search).
 
 ---
 

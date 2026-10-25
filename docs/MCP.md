@@ -13,7 +13,10 @@ rqmd includes a built-in MCP server exposing its search index as tools for Claud
 | `status` | Index health and collection summary |
 
 All five tools are lookups and declare `readOnlyHint: true` in their tool annotations, so a client
-can treat them as read-only (for example, run them in plan mode without a prompt). `openWorldHint`
+can treat them as read-only (for example, run them in plan mode without a prompt). The one
+exception to a pure lookup is the opt-in `refresh: true` on `search` and `query`, which updates the
+full-text index before searching (see [Refreshing before a search](#refreshing-before-a-search));
+the index is a cache derived from the collection files, and a refresh never writes to the files. `openWorldHint`
 is left unset on every tool: `query` may download its models on first use, so a closed-world claim
 would be false for it. `destructiveHint` and `idempotentHint` are not set, because both are
 meaningful only for tools that are not read-only.
@@ -129,7 +132,8 @@ A `query` call is also bounded by `RQMD_MCP_TOOL_TIMEOUT_SECS` (default 120): on
 holds the model store, it returns a `timed out after …` error as soon as the deadline has
 passed at the next stage boundary (before expansion, each expanded sub-query, or embedding the
 query). A model call already running is not interrupted, so a call can overrun by one stage. The
-other tools are single index lookups and have no such bound.
+other tools are single index lookups and have no such bound. A refresh pass has its own bound of the
+same length (see [Refreshing before a search](#refreshing-before-a-search)).
 
 Once `query` has its fused results, the deadline no longer makes it fail: if it passes before
 reranking starts, or while candidates are being reranked, `query` returns the results in fusion
@@ -156,6 +160,7 @@ Exact input fields per tool, as accepted by the JSON-RPC tool call
 | | `offset` | `number`, optional | Results to skip, for the next page. Default 0, capped at 1000 |
 | | `per_file` | `number`, optional | Sections of one file to return, best first. Default 1, capped at 5 (see below) |
 | | `recency` | `string`, optional | Half-life such as `30d`, `2w` or `12h`: rank newer files higher (see below). Default: off |
+| | `refresh` | `boolean`, optional | `true`: bring the full-text index up to date with the files before searching (see [Refreshing before a search](#refreshing-before-a-search)). Default `false` |
 | | `rerank` | `boolean`, optional | Default `true` |
 | | `expand` | `boolean`, optional | Default `true` |
 | | `strict_timeout` | `boolean`, optional | Default `false`: a tool timeout that passes before reranking returns the results in fusion order with a note. `true`: it returns a `timed out` error instead |
@@ -164,6 +169,7 @@ Exact input fields per tool, as accepted by the JSON-RPC tool call
 | | `limit` | `number`, optional | Default 10 |
 | | `offset` | `number`, optional | Results to skip, for the next page. Default 0, capped at 1000 |
 | | `per_file` | `number`, optional | Sections of one file to return, best first. Default 1, capped at 5 (see below) |
+| | `refresh` | `boolean`, optional | `true`: bring the full-text index up to date with the files before searching (see [Refreshing before a search](#refreshing-before-a-search)). Default `false` |
 | `get` | `file` | `string` (required) | Path or `#docid` |
 | | `from_line` | `number`, optional | Start line for partial retrieval |
 | | `max_lines` | `number`, optional | Cap on lines returned (default 2000) |
@@ -204,3 +210,37 @@ caps the whole response at 4 MiB. A response cut short by a cap ends with a
 `[truncated: …]` note (or, for `multi_get`, an `Output budget` note naming how
 many documents were omitted); use `from_line`/`max_lines` on `get` to page
 through the rest.
+
+## Refreshing before a search
+
+The index is only as current as the last `rqmd update` or `rqmd watch` pass, so a file edited since
+then is not found. Pass `refresh: true` to `search` or `query` and the server first runs the same
+incremental full-text pass as `rqmd update` for the collections the call names (all of them when it
+names none), then searches. A name that matches no collection is skipped. Omitted or `false`, the
+call does what it always did, and its reply is unchanged.
+
+The pass is `rqmd update`'s own: the collection's mask, ignore patterns, hidden-file and
+`.gitignore` rules, size limit and symlink containment decide which files count, new files are
+added, edited files replaced and deleted files removed. It differs in what it leaves out:
+
+- **Keyword search only.** It never loads a model and never embeds. A new or edited file is found
+  by `search`, and by the keyword part of `query`, at once, while vector results do not include it
+  and `Pending embed` in `status` rises until `rqmd embed` runs. Vectors that a deleted file leaves
+  behind are reached by no query and are swept by the next `rqmd update` or `rqmd watch` pass.
+- **Hooks never run.** A collection's `update_command` is not run by a refresh, whatever the
+  index's origin: a search tool is not what the hook was set up for.
+- **Bounded.** The pass stops between files once `RQMD_MCP_TOOL_TIMEOUT_SECS` (default 120) has
+  passed since it began, keeps what it indexed and prunes nothing. A `query` then has its full
+  timeout for itself. The directory walk of one collection is not interrupted.
+- **The lock is held for the pass only.** If another process holds the index lock, or the full-text
+  index still needs its one-time rebuild (which only `rqmd update` performs, so a refresh does not
+  take the lock then), the pass does not run and the search does not fail: it returns the results
+  the index holds, ending with one `Note:` line that says the refresh was skipped and why. A pass
+  that stopped at the timeout, failed, or runs in a server with no refresher ends with a note too.
+  The note names no path and does not repeat an error; the server's log has it.
+- **Nothing is written to stdout** except protocol messages, so it is safe over stdio.
+
+A refresh rewrites the index, never the collection files. Because `rqmd mcp` has no authentication
+(see [Binding beyond localhost](#binding-beyond-localhost)), a client that can reach a non-loopback
+server can also ask it for refresh passes, which cost a directory walk and index writes; they are
+serialized by the index lock and bounded by the tool timeout.

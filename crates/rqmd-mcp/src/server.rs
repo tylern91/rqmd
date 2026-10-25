@@ -21,6 +21,8 @@ use rqmd_core::{
 };
 use rqmd_llm::{BackendKind, create_backend, no_backend};
 
+use crate::refresh::{FAILED_NOTICE, Refresher, UNAVAILABLE_NOTICE};
+
 /// Hard cap on documents returned by a single `multi_get` call. Without this,
 /// an unauthenticated caller could pass a bare `*` glob with no collection
 /// filter and pull the entire corpus in one request — this bounds that to a
@@ -188,8 +190,11 @@ pub struct RqmdServer {
     fts_pool: Arc<FtsPool>,
     /// ML store for hybrid query (lazily initialised on first `query` call).
     ml_store: Arc<once_cell::sync::OnceCell<Arc<std::sync::Mutex<Store>>>>,
-    /// Ceiling on one `query` call once it holds the model store.
+    /// Ceiling on one `query` call once it holds the model store, and on one
+    /// refresh pass.
     tool_timeout: Duration,
+    /// Runs the pass behind `refresh: true`; absent in a server built as a library.
+    refresher: Option<Refresher>,
 }
 
 impl RqmdServer {
@@ -206,12 +211,20 @@ impl RqmdServer {
             fts_pool: Arc::new(fts_pool),
             ml_store: Arc::new(once_cell::sync::OnceCell::new()),
             tool_timeout: tool_timeout_from_env(),
+            refresher: None,
         })
     }
 
     /// Override the `query` ceiling (default `RQMD_MCP_TOOL_TIMEOUT_SECS`, else 120 s).
     pub fn with_tool_timeout(mut self, timeout: Duration) -> Self {
         self.tool_timeout = timeout;
+        self
+    }
+
+    /// Let `search` and `query` honour `refresh: true` by running `refresher`
+    /// before the search. Without one the option only adds a note to the reply.
+    pub fn with_refresher(mut self, refresher: Refresher) -> Self {
+        self.refresher = Some(refresher);
         self
     }
 
@@ -245,6 +258,25 @@ impl RqmdServer {
             .map_err(|e| anyhow::anyhow!("ml store lock poisoned: {e}"))?;
         guard.reload_if_stale().context("reload ml store")?;
         Ok(guard)
+    }
+
+    /// Run the refresh pass when the caller asked for one. Returns the note to
+    /// append when the results may lag the files, `None` when the pass
+    /// completed or was not requested. A pass that cannot run never fails the search.
+    fn refresh_note(&self, refresh: Option<bool>, cols: Option<&[String]>) -> Option<&'static str> {
+        if !refresh.unwrap_or(false) {
+            return None;
+        }
+        let Some(refresher) = &self.refresher else {
+            return Some(UNAVAILABLE_NOTICE);
+        };
+        match refresher(&self.index_dir, cols, Deadline::after(self.tool_timeout)) {
+            Ok(outcome) => outcome.notice(),
+            Err(e) => {
+                eprintln!("[rqmd-mcp] refresh failed: {e:#}");
+                Some(FAILED_NOTICE)
+            }
+        }
     }
 
     fn fts(&self) -> anyhow::Result<MutexGuard<'_, Store>> {
@@ -311,6 +343,14 @@ pub struct QueryInput {
     /// file (its mtime), halving the excess over 50% every half-life. Older files are never
     /// dropped. Omit for no age weighting.
     pub recency: Option<String>,
+    /// Set to true to bring the full-text index up to date with the collection files before
+    /// searching: the same incremental pass as `rqmd update`, for the requested collections (all
+    /// when none are given), bounded by the tool timeout. It never runs a collection's update
+    /// command and never creates embeddings, so an edited file is found by keyword search at once
+    /// while vector results and Pending embed lag until `rqmd embed`. If another process holds the
+    /// index lock, the full-text index needs a rebuild or the timeout passes, the search still runs
+    /// and a note says the results may be behind. Default: false.
+    pub refresh: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -326,6 +366,14 @@ pub struct SearchInput {
     /// Maximum sections of one file to return, best first (default: 1, maximum: 5). A file can then appear more
     /// than once, each time with a different snippet; limit and offset count sections.
     pub per_file: Option<usize>,
+    /// Set to true to bring the full-text index up to date with the collection files before
+    /// searching: the same incremental pass as `rqmd update`, for the requested collections (all
+    /// when none are given), bounded by the tool timeout. It never runs a collection's update
+    /// command and never creates embeddings, so an edited file is found at once while Pending
+    /// embed rises until `rqmd embed`. If another process holds the index lock, the full-text
+    /// index needs a rebuild or the timeout passes, the search still runs and a note says the
+    /// results may be behind. Default: false.
+    pub refresh: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -419,6 +467,7 @@ impl RqmdServer {
         let cols = p.collections.as_deref();
         let intent = p.intent.as_deref();
         let recency = recency_of(p.recency.as_deref())?;
+        let refresh_note = self.refresh_note(p.refresh, cols);
         let mut store = self
             .ml()
             .map_err(|e| format!("Error loading inference backend: {e:#}"))?;
@@ -443,16 +492,18 @@ impl RqmdServer {
             format_results(&page, &p.query, offset, has_more),
             outcome.rerank,
         );
-        Ok(match recency {
+        let text = match recency {
             Some(recency) => format!("{}\nNote: {}\n", text.trim_end(), recency.notice()),
             None => text,
-        })
+        };
+        Ok(with_refresh_note(text, refresh_note))
     }
 
     fn search_blocking(&self, p: SearchInput) -> Result<String, String> {
         let limit = clamp_limit(p.limit, 10);
         let offset = clamp_offset(p.offset);
         let cols = p.collections.as_deref();
+        let refresh_note = self.refresh_note(p.refresh, cols);
         let store = self
             .fts()
             .map_err(|e| format!("Error opening store: {e:#}"))?;
@@ -465,7 +516,10 @@ impl RqmdServer {
             )
             .map_err(|e| format!("Error running search: {e:#}"))?;
         let (page, has_more) = page_of(results, offset, limit);
-        Ok(format_results(&page, &p.query, offset, has_more))
+        Ok(with_refresh_note(
+            format_results(&page, &p.query, offset, has_more),
+            refresh_note,
+        ))
     }
 
     fn get_blocking(&self, p: GetInput) -> Result<String, String> {
@@ -576,6 +630,14 @@ fn format_results(
 fn with_rerank_note(text: String, status: rqmd_core::RerankStatus) -> String {
     match status.notice() {
         Some(notice) => format!("{}\nNote: {notice}\n", text.trim_end()),
+        None => text,
+    }
+}
+
+/// Append one note line when a refresh could not bring the index up to date.
+fn with_refresh_note(text: String, note: Option<&str>) -> String {
+    match note {
+        Some(note) => format!("{}\nNote: {note}\n", text.trim_end()),
         None => text,
     }
 }
@@ -849,6 +911,7 @@ fn build_status(store: &Store) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::refresh::RefreshOutcome;
 
     fn doc(id: i64) -> Document {
         Document {
@@ -954,6 +1017,7 @@ mod tests {
             limit: Some(50),
             offset: None,
             per_file,
+            refresh: None,
         }
     }
 
@@ -1320,6 +1384,7 @@ mod tests {
             expand: None,
             strict_timeout: None,
             recency: None,
+            refresh: None,
         }
     }
 
@@ -1565,6 +1630,7 @@ mod tests {
                 "per_file",
                 "query",
                 "recency",
+                "refresh",
                 "rerank",
                 "strict_timeout",
             ],
@@ -1573,7 +1639,14 @@ mod tests {
         (
             "search",
             "BM25 keyword search. Fast, no model required. Supports \"quoted phrases\" and -negation. Use for known terms or exact phrases.",
-            &["collections", "limit", "offset", "per_file", "query"],
+            &[
+                "collections",
+                "limit",
+                "offset",
+                "per_file",
+                "query",
+                "refresh",
+            ],
             &["query"],
         ),
         (
@@ -1632,6 +1705,158 @@ mod tests {
         }
     }
 
+    // ── refresh ──────────────────────────────────────────────────────────────
+
+    /// The collections each call of a recording refresher was given.
+    type Calls = Arc<Mutex<Vec<Option<Vec<String>>>>>;
+
+    /// A refresher that records how often it ran and for which collections,
+    /// then reports `outcome`.
+    fn recording_refresher(outcome: anyhow::Result<RefreshOutcome>) -> (Refresher, Calls) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let outcome = Mutex::new(Some(outcome));
+        let refresher: Refresher = Arc::new(move |_dir, cols, _deadline| {
+            seen.lock().unwrap().push(cols.map(<[String]>::to_vec));
+            match outcome.lock().unwrap().take() {
+                Some(outcome) => outcome,
+                None => Ok(RefreshOutcome::Refreshed),
+            }
+        });
+        (refresher, calls)
+    }
+
+    fn hello_search(refresh: Option<bool>) -> SearchInput {
+        SearchInput {
+            query: "hello".to_string(),
+            collections: None,
+            limit: None,
+            offset: None,
+            per_file: None,
+            refresh,
+        }
+    }
+
+    #[test]
+    fn refresh_off_never_runs_the_pass_and_changes_nothing() {
+        let (_dir, server) = pool_server(1);
+        let plain = server.search_blocking(hello_search(None)).unwrap();
+        let (refresher, calls) = recording_refresher(Ok(RefreshOutcome::Locked));
+        let server = server.with_refresher(refresher);
+
+        let omitted = server.search_blocking(hello_search(None)).unwrap();
+        let off = server.search_blocking(hello_search(Some(false))).unwrap();
+
+        assert_eq!(omitted, plain);
+        assert_eq!(off, plain);
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn refresh_on_runs_the_pass_for_the_requested_collections_before_searching() {
+        // Built without a pool handle writing first: a handle that has written
+        // keeps the full-text writer, which the pass below needs.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index_dir = dir.path().join("index");
+        std::fs::create_dir_all(&index_dir).expect("index dir");
+        {
+            let mut store = Store::open(make_config(&index_dir), no_backend()).expect("store");
+            store
+                .index_document_fts_only("col", "doc1.md", "Doc 1", "hello world")
+                .expect("index doc");
+            store.flush().expect("commit");
+        }
+        let server = RqmdServer::with_fts_readers(index_dir, 1).expect("server");
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let seen = ran.clone();
+        // The pass writes through its own store, as the real one does.
+        let refresher: Refresher = Arc::new(move |path, cols, deadline| {
+            seen.lock().unwrap().push(cols.map(<[String]>::to_vec));
+            assert!(deadline.check("refresh").is_ok());
+            let mut store = Store::open(make_config(path), no_backend())?;
+            store.index_document_fts_only("col", "fresh.md", "Fresh", "quaggaword arrives")?;
+            store.flush()?;
+            Ok(RefreshOutcome::Refreshed)
+        });
+        let server = server.with_refresher(refresher);
+        let ask = |refresh| SearchInput {
+            query: "quaggaword".to_string(),
+            collections: Some(vec!["col".to_string()]),
+            refresh,
+            ..hello_search(None)
+        };
+
+        let before = server.search_blocking(ask(None)).unwrap();
+        assert!(before.contains("No results found"), "{before}");
+        assert!(ran.lock().unwrap().is_empty());
+
+        let after = server.search_blocking(ask(Some(true))).unwrap();
+        assert!(after.contains("rqmd://col/fresh.md"), "{after}");
+        assert!(!after.contains("Note:"), "{after}");
+        assert_eq!(*ran.lock().unwrap(), vec![Some(vec!["col".to_string()])]);
+    }
+
+    #[test]
+    fn refresh_that_cannot_complete_gives_the_results_and_one_note() {
+        let cases: [(anyhow::Result<RefreshOutcome>, &str); 4] = [
+            (Ok(RefreshOutcome::Locked), "another process"),
+            (Ok(RefreshOutcome::RebuildPending), "needs a rebuild"),
+            (Ok(RefreshOutcome::TimedOut), "tool timeout"),
+            (Err(anyhow::anyhow!("disk on fire")), "refresh failed"),
+        ];
+        for (outcome, needle) in cases {
+            let (_dir, server) = pool_server(1);
+            let plain = server.search_blocking(hello_search(None)).unwrap();
+            let (refresher, _) = recording_refresher(outcome);
+            let server = server.with_refresher(refresher);
+
+            let text = server.search_blocking(hello_search(Some(true))).unwrap();
+
+            assert!(text.starts_with(plain.trim_end()), "{text}");
+            assert_eq!(text.matches("Note: refresh").count(), 1, "{text}");
+            assert!(text.contains(needle), "{needle}: {text}");
+            assert!(!text.contains("disk on fire"), "no error detail: {text}");
+        }
+    }
+
+    #[test]
+    fn refresh_without_a_refresher_still_searches_and_says_so() {
+        let (_dir, server) = pool_server(1);
+
+        let text = server.search_blocking(hello_search(Some(true))).unwrap();
+
+        assert!(text.contains("Doc 1"), "{text}");
+        assert!(text.contains("Note: refresh is not available"), "{text}");
+    }
+
+    #[test]
+    fn query_refreshes_after_validating_its_input() {
+        let (_dir, server) = server_with_slow_embed_store(Duration::from_secs(30));
+        let (refresher, calls) = recording_refresher(Ok(RefreshOutcome::Locked));
+        let server = server.with_refresher(refresher);
+
+        let bad = server.query_blocking(QueryInput {
+            recency: Some("soon".to_string()),
+            refresh: Some(true),
+            ..matching_query(None)
+        });
+        assert!(bad.unwrap_err().contains("Error"), "bad input is unchanged");
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "no pass for a bad request"
+        );
+
+        let text = server
+            .query_blocking(QueryInput {
+                refresh: Some(true),
+                rerank: Some(false),
+                ..matching_query(None)
+            })
+            .unwrap();
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(text.matches("Note: refresh skipped").count(), 1, "{text}");
+    }
+
     // The test holds the pool's only handle across awaits on purpose: that is
     // what parks the search call under test.
     #[allow(clippy::await_holding_lock)]
@@ -1649,6 +1874,7 @@ mod tests {
                     limit: None,
                     offset: None,
                     per_file: None,
+                    refresh: None,
                 }))
                 .await
         });

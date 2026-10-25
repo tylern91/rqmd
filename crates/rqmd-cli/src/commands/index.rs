@@ -909,6 +909,9 @@ fn run_update_with(
             &|| lock.heartbeat(),
             &signals::pending,
         )?;
+        if let Some(report) = &outcome.report {
+            println!("{report}");
+        }
         if let Some(signal) = outcome.interrupted {
             return Err(stopped_by_signal(signal));
         }
@@ -990,6 +993,10 @@ pub(super) struct CollectionOutcome {
     hook_failure: Option<String>,
     /// The signal that stopped this collection's update before it finished.
     pub(super) interrupted: Option<i32>,
+    /// The summary line for the caller to print, when the walk got far enough
+    /// to have one. Returned, not printed, so a caller whose stdout is a
+    /// protocol stream (the MCP server) can drop it.
+    pub(super) report: Option<String>,
 }
 
 /// Re-walk one collection's directory, run its update hook, re-index changed
@@ -1037,6 +1044,7 @@ pub(super) fn update_one_collection(
             clean: false,
             hook_failure: None,
             interrupted: None,
+            report: None,
         });
     }
 
@@ -1064,6 +1072,7 @@ pub(super) fn update_one_collection(
                         clean: false,
                         hook_failure: None,
                         interrupted: Some(signal),
+                        report: None,
                     });
                 }
             };
@@ -1084,6 +1093,7 @@ pub(super) fn update_one_collection(
                 clean: false,
                 hook_failure,
                 interrupted: None,
+                report: None,
             });
         }
     };
@@ -1233,13 +1243,13 @@ pub(super) fn update_one_collection(
     progress.clear();
 
     if stopped_by.is_some() {
-        println!(
-            "\nStopped after {processed} of {total} file(s): {new_count} new, {updated_count} updated, {unchanged_count} unchanged"
-        );
         return Ok(CollectionOutcome {
             clean: false,
             hook_failure,
             interrupted: stopped_by,
+            report: Some(format!(
+                "\nStopped after {processed} of {total} file(s): {new_count} new, {updated_count} updated, {unchanged_count} unchanged"
+            )),
         });
     }
 
@@ -1253,13 +1263,13 @@ pub(super) fn update_one_collection(
     let excluded_suffix = document::excluded_dirs_clause(&excluded_dirs)
         .map(|clause| format!(" · {clause}"))
         .unwrap_or_default();
-    println!(
-        "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, {removed_count} removed{skip_suffix}{excluded_suffix}"
-    );
     Ok(CollectionOutcome {
         clean,
         hook_failure,
         interrupted: None,
+        report: Some(format!(
+            "\nIndexed: {new_count} new, {updated_count} updated, {unchanged_count} unchanged, {removed_count} removed{skip_suffix}{excluded_suffix}"
+        )),
     })
 }
 

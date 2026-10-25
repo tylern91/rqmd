@@ -155,6 +155,9 @@ impl Watcher<'_> {
                 &|| lock.heartbeat(),
                 &signals::pending,
             )?;
+            if let Some(report) = &outcome.report {
+                println!("{report}");
+            }
             if let Some(signal) = outcome.interrupted {
                 return Err(Interrupted(signal).into());
             }
