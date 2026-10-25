@@ -51,6 +51,14 @@
 - `rqmd collection rename` now waits for a running `embed` or `update`, as `collection remove`
   does, and prints the number of documents it re-indexed. The SQLite rows, the path contexts and
   the keyword index change together or not at all.
+- `rqmd embed` now reuses a stored vector for any chunk whose text it already embedded under the
+  same model, backend (`llama` or `ort`) and context size, not only for the chunks of an edited
+  note. A chunk that appears in two documents is encoded once, even within one run, and the match
+  does not depend on the chunking settings. `content_vectors.vector_key` is added automatically,
+  in place, and `rqmd embed` fills it in for the vectors of the previous release as it starts,
+  from stored metadata only. No re-embed is needed and the embedding fingerprint is unchanged. A
+  vector written before `chunk_hash` existed has no key and is filled in when its document is
+  next embedded.
 
 ### Fixed
 - Output is plain text when it is not a terminal. Before, `status`, `update`, `embed`, `doctor` and

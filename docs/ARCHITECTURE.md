@@ -12,10 +12,16 @@ only touches BM25 and bookkeeping, so it stays usable without a model loaded.
 
 **Embedding** (`rqmd embed`): documents that don't have vectors yet (or, with
 `--rebuild`, every document) are split into chunks, each chunk is embedded,
-and the resulting vectors are added to the HNSW index. A chunk whose text is
-unchanged since an edit reuses the stored vector: `rqmd update` records the
-replaced hash in `documents.prev_hash` and spares its vectors from the orphan
-sweep until `rqmd embed` has embedded the new text, then `embed` sweeps them.
+and the resulting vectors are added to the HNSW index. A chunk whose text
+was already embedded reuses the stored vector instead of being encoded again.
+`content_vectors.vector_key` names what a vector was computed from (chunk
+text, model, backend kind, context size and passage prefix) and, unlike the
+embed fingerprint, ignores the chunking settings, so the same text matches
+across documents and across chunker changes. `rqmd embed` fills in the key
+for vectors an earlier release stored, from their recorded chunk hash, before
+it embeds anything. After an edit, `rqmd update` records the replaced hash in
+`documents.prev_hash` and spares its vectors from the orphan sweep until
+`rqmd embed` has embedded the new text, then `embed` sweeps them.
 `rqmd doctor` can
 detect when the chunking parameters or embed model have changed since the
 last embed run by comparing a stored fingerprint (below) against the current

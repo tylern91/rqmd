@@ -233,6 +233,18 @@ pub trait InferenceBackend: Send {
     fn rerank_model_name(&self) -> &str;
     fn generate_model_name(&self) -> &str;
 
+    /// Engine family that computes this backend's embeddings (`"llama"`,
+    /// `"ort"`). With the model name and [`Self::embed_context_size`] it decides
+    /// whether a stored vector can stand in for a fresh encode.
+    fn embed_backend_kind(&self) -> &str {
+        "unspecified"
+    }
+
+    /// Tokens of input the embedder keeps before it truncates.
+    fn embed_context_size(&self) -> usize {
+        0
+    }
+
     /// Drop any loaded model idle for at least `ttl`. Returns how many were released.
     /// Default no-op — backends with nothing to release (`NoBackend`, `OrtBackend`)
     /// don't need to implement this.
@@ -1202,6 +1214,14 @@ impl InferenceBackend for LlamaCppBackend {
 
     fn embed_model_name(&self) -> &str {
         &self.embed_model_name
+    }
+
+    fn embed_backend_kind(&self) -> &str {
+        "llama"
+    }
+
+    fn embed_context_size(&self) -> usize {
+        EMBED_CONTEXT_SIZE
     }
 
     fn rerank_model_name(&self) -> &str {
