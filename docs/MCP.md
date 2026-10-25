@@ -55,6 +55,10 @@ pid on record. Only an exact match counts as confirmed; an unreachable
 on a port that's already bound fails immediately with an error instead of
 silently colliding with the existing listener.
 
+On SIGTERM or Ctrl-C the server ends every open event stream before it exits, so a
+connected client that holds a `GET /mcp` stream open no longer delays `rqmd mcp stop`.
+Requests already in flight finish first.
+
 ## Binding beyond localhost
 
 `--host` (default `127.0.0.1`, env `RQMD_MCP_HOST`) controls the bind
