@@ -883,6 +883,7 @@ pub fn doc_for_vid_meta(conn: &Connection, vid: u64) -> Result<Option<Document>>
         FROM content_vectors cv
         JOIN documents d ON d.hash = cv.hash AND d.active = 1
         WHERE cv.vid = ?1
+        ORDER BY d.collection, d.path
         LIMIT 1
         "#,
         params![vid as i64],
@@ -919,6 +920,7 @@ pub fn doc_for_vid_meta_in(
         FROM content_vectors cv
         JOIN documents d ON d.hash = cv.hash AND d.active = 1
         WHERE cv.vid = ?1 AND d.collection IN ({placeholders})
+        ORDER BY d.collection, d.path
         LIMIT 1
         "#
     );
@@ -1702,5 +1704,27 @@ mod tests {
 
         // Unscoped (None) is unaffected — same as doc_for_vid_meta's plain LIMIT 1.
         assert!(doc_for_vid_meta_in(&conn, 7, None).unwrap().is_some());
+    }
+
+    /// A hash shared by two collections resolves to the same row whichever
+    /// collection was indexed first.
+    #[test]
+    fn doc_for_vid_meta_picks_the_same_row_in_any_insertion_order() {
+        let now = "2026-01-01T00:00:00Z";
+        for order in [["a", "b"], ["b", "a"]] {
+            let conn = test_conn();
+            upsert_content(&conn, "shared_hash", "shared body", now).unwrap();
+            for coll in order {
+                upsert_document(&conn, coll, "doc.md", "title", "shared_hash", now).unwrap();
+            }
+            upsert_vector_meta(&conn, "shared_hash", 0, 0, "m", "fp", 1, 7, now).unwrap();
+
+            let doc = doc_for_vid_meta(&conn, 7).unwrap().unwrap();
+            assert_eq!(doc.collection, "a", "insertion order {order:?}");
+
+            let both = vec!["a".to_string(), "b".to_string()];
+            let doc = doc_for_vid_meta_in(&conn, 7, Some(&both)).unwrap().unwrap();
+            assert_eq!(doc.collection, "a", "scoped, insertion order {order:?}");
+        }
     }
 }

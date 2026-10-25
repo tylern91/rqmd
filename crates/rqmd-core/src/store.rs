@@ -819,12 +819,15 @@ impl Store {
             k = (k * 2).min(total_vectors);
         }
 
-        let mut ranked: Vec<(f32, crate::types::Document)> = by_doc.into_values().collect();
-        ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut ranked: Vec<(f32, String, crate::types::Document)> = by_doc
+            .into_iter()
+            .map(|(filepath, (sim, doc))| (sim, filepath, doc))
+            .collect();
+        ranked.sort_by(|a, b| crate::rrf::score_desc_then_path(a.0, &a.1, b.0, &b.1));
         ranked.truncate(limit);
 
         let mut results = Vec::with_capacity(ranked.len());
-        for (sim, doc) in ranked {
+        for (sim, _, doc) in ranked {
             let body = db::get_document_raw(&self.db, doc.id)?.unwrap_or_default();
             results.push(self.result_from_doc(&doc, body, sim));
         }
@@ -892,12 +895,15 @@ impl Store {
             }
         }
 
-        let mut ranked: Vec<(f32, crate::types::Document)> = by_doc.into_values().collect();
-        ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut ranked: Vec<(f32, String, crate::types::Document)> = by_doc
+            .into_iter()
+            .map(|(filepath, (sim, doc))| (sim, filepath, doc))
+            .collect();
+        ranked.sort_by(|a, b| crate::rrf::score_desc_then_path(a.0, &a.1, b.0, &b.1));
         ranked.truncate(limit);
 
         let mut results = Vec::with_capacity(ranked.len());
-        for (sim, doc) in ranked {
+        for (sim, _, doc) in ranked {
             let body = db::get_document_raw(&self.db, doc.id)?.unwrap_or_default();
             results.push(self.result_from_doc(&doc, body, sim));
         }
@@ -1307,7 +1313,7 @@ impl Store {
             final_results.push(SearchResult {
                 file: format!("rqmd://{}", cand.filepath),
                 title: cand.title.clone(),
-                body: body.clone(),
+                body,
                 best_chunk: chunk_text,
                 best_chunk_pos: chunk_pos,
                 score,
@@ -1318,11 +1324,8 @@ impl Store {
             });
         }
 
-        final_results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        final_results
+            .sort_by(|a, b| crate::rrf::score_desc_then_path(a.score, &a.file, b.score, &b.file));
         final_results.truncate(limit);
         final_results
     }
@@ -2932,5 +2935,89 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has_column, 1);
+    }
+
+    fn tie_stub() -> StubBackend {
+        StubBackend {
+            name: "stub-org/stub-embed.onnx".to_string(),
+            caps: rqmd_llm::BackendCapabilities {
+                embed: true,
+                rerank: false,
+                generate: false,
+            },
+        }
+    }
+
+    /// The stub embeds every text to the same vector, so every document ties
+    /// on similarity. Result order must not depend on indexing order.
+    #[test]
+    fn vector_ties_order_by_path_in_any_insertion_order() {
+        let paths = ["m.md", "c.md", "x.md", "a.md"];
+        for round in 0..4 {
+            let dir = tempfile::TempDir::new().unwrap();
+            let mut store = open_stub_store(dir.path(), tie_stub());
+            let mut order = paths.to_vec();
+            order.rotate_left(round);
+            for p in &order {
+                store
+                    .index_document("coll", p, "T", &format!("body of {p}"))
+                    .unwrap();
+            }
+
+            let got: Vec<String> = store
+                .search_vec("anything", 10, Some("coll"))
+                .unwrap()
+                .into_iter()
+                .map(|r| r.path)
+                .collect();
+            assert_eq!(
+                got,
+                ["a.md", "c.md", "m.md", "x.md"],
+                "search_vec {order:?}"
+            );
+
+            let hash = content_hash("body of m.md");
+            let got: Vec<String> = store
+                .similar_to_hash(&hash, "coll", "m.md", 10)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.path)
+                .collect();
+            assert_eq!(got, ["a.md", "c.md", "x.md"], "similar {order:?}");
+        }
+    }
+
+    /// Candidates with equal final scores keep a path order whatever order
+    /// the fused list handed them over in.
+    #[test]
+    fn assemble_results_orders_equal_scores_by_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = open_stub_store(dir.path(), tie_stub());
+        let ids = ["m", "c", "x", "a"];
+        for round in 0..ids.len() {
+            let mut order = ids.to_vec();
+            order.rotate_left(round);
+            let candidates: Vec<(RankedResult, String, String)> = order
+                .iter()
+                .map(|id| {
+                    (
+                        RankedResult {
+                            filepath: format!("coll/{id}.md"),
+                            title: id.to_string(),
+                            backend_score: 0.5,
+                        },
+                        format!("{id}hash"),
+                        format!("body {id}"),
+                    )
+                })
+                .collect();
+            let chunks: Vec<(String, usize)> = order.iter().map(|_| (String::new(), 0)).collect();
+            let got: Vec<String> = store
+                .assemble_results(candidates, &chunks, None, 10)
+                .into_iter()
+                .map(|r| r.path)
+                .collect();
+            assert_eq!(got, ["a.md", "c.md", "m.md", "x.md"], "order {order:?}");
+        }
     }
 }
