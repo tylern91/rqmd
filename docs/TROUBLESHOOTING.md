@@ -63,4 +63,6 @@ filesystem. Only `index.sqlite` visibly drops in size; that's expected.
 **`--rebuild` is for a stale fingerprint, not for orphans.** It re-embeds
 everything under the current model/chunker and is the right tool when
 `doctor` reports a stale `embed_fingerprint`, not when it reports orphaned
-vectors.
+vectors. A plain `rqmd embed` also re-embeds every document whose vectors carry
+a stale fingerprint, which is what the "embeddings are stale" warning asks
+for; `--rebuild` additionally clears all vectors first.

@@ -95,7 +95,7 @@ fn add(
     );
 
     let mut s = store::open_store_no_backend(index_dir, false)?;
-    let is_tty = fmt::atty_stderr();
+    let mut progress = fmt::Progress::new(fmt::ProgressMode::detect());
 
     let ignore_set = exclusions::build_ignore_set(&ignore);
     let include_set = exclusions::build_include_set(&pattern)
@@ -132,15 +132,14 @@ fn add(
     };
 
     for (i, path) in candidates.iter().enumerate() {
-        if is_tty {
+        if progress.is_active() {
             let rel_preview = path
                 .strip_prefix(&abs_dir)
                 .unwrap_or(path)
                 .to_string_lossy()
                 .to_string();
             let line = format!("  Indexing {} ({})", rel_preview, i + 1);
-            let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
-            eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
+            progress.show(&line, i + 1, candidates.len());
         }
 
         let stat = document::stat_file(path);
@@ -177,9 +176,7 @@ fn add(
 
     s.flush()?;
     // Clear the progress line before printing the summary.
-    if is_tty {
-        eprint!("\r{}\r", " ".repeat(fmt::term_width().unwrap_or(80)));
-    }
+    progress.clear();
 
     let mut summary = format!("  Indexed {count} document(s)");
     if skips.total() > 0 {

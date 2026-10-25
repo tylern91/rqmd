@@ -51,18 +51,20 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
         .unwrap_or(None);
 
     // ── Header (qmd.ts:492 style, rqmd branding) ────────────────────────────────
-    println!("\x1b[1mRQMD Status (Rust engine)\x1b[0m\n");
+    let p = fmt::Paint::stdout();
+    println!("{}\n", p.bold("RQMD Status (Rust engine)"));
     println!("Index: {}", index_dir.display());
     println!("Size:  {}", fmt_bytes(total_index_size));
     println!();
 
     // ── Documents (qmd.ts:513-521) ───────────────────────────────────────────────
-    println!("\x1b[1mDocuments\x1b[0m");
+    println!("{}", p.bold("Documents"));
     println!("  Total:    {total_docs} files indexed");
     println!("  Vectors:  {total_vecs} embedded");
     if docs_needing_embed > 0 {
         println!(
-            "  \x1b[33mPending:  {docs_needing_embed} need embedding\x1b[0m (run 'rqmd embed')"
+            "  {} (run 'rqmd embed')",
+            p.yellow(format!("Pending:  {docs_needing_embed} need embedding"))
         );
     }
     if let Some(ref ts) = last_modified {
@@ -71,13 +73,16 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
     store::warn_if_raw_backfill_pending(&s);
 
     // ── AST Chunking (qmd.ts:539-563) ─────────────────────────────────────────────
-    println!("\n\x1b[1mAST Chunking\x1b[0m");
+    println!("\n{}", p.bold("AST Chunking"));
     if rqmd_core::chunking::ast_chunking_compiled() {
         let exts = rqmd_core::chunking::ast_chunking_extensions().join(", ");
-        println!("  Status:   \x1b[32menabled\x1b[0m");
+        println!("  Status:   {}", p.green("enabled"));
         println!("  Grammars: {exts}");
     } else {
-        println!("  Status:   \x1b[2mnot available\x1b[0m (build with --features ast-chunking)");
+        println!(
+            "  Status:   {} (build with --features ast-chunking)",
+            p.dim("not available")
+        );
     }
 
     // ── Collections (qmd.ts:565-586, per-collection multi-line blocks) ───────────
@@ -85,30 +90,30 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
     print_status_collections(&s.db, &cols)?;
 
     // ── Models (qmd.ts:606-617) — show repo (browsable) + exact downloaded file ──
-    println!("\n\x1b[1mModels\x1b[0m");
+    println!("\n{}", p.bold("Models"));
     println!(
         "  Embedding:   https://huggingface.co/{}",
         rqmd_llm::DEFAULT_EMBED_REPO
     );
     println!(
-        "               \x1b[2m└─ {}\x1b[0m",
-        rqmd_llm::DEFAULT_EMBED_FILE
+        "               {}",
+        p.dim(format!("└─ {}", rqmd_llm::DEFAULT_EMBED_FILE))
     );
     println!(
         "  Reranking:   https://huggingface.co/{}",
         rqmd_llm::DEFAULT_RERANK_REPO
     );
     println!(
-        "               \x1b[2m└─ {}\x1b[0m",
-        rqmd_llm::DEFAULT_RERANK_FILE
+        "               {}",
+        p.dim(format!("└─ {}", rqmd_llm::DEFAULT_RERANK_FILE))
     );
     println!(
         "  Generation:  https://huggingface.co/{}",
         rqmd_llm::DEFAULT_GENERATE_REPO
     );
     println!(
-        "               \x1b[2m└─ {}\x1b[0m",
-        rqmd_llm::DEFAULT_GENERATE_FILE
+        "               {}",
+        p.dim(format!("└─ {}", rqmd_llm::DEFAULT_GENERATE_FILE))
     );
 
     // ── Tips (qmd.ts:621-654) ────────────────────────────────────────────────────
@@ -120,14 +125,16 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
 /// Print the "Collections" and "Examples" blocks of `rqmd status`
 /// (qmd.ts:565-601).
 fn print_status_collections(conn: &Connection, cols: &[Collection]) -> Result<()> {
+    let p = fmt::Paint::stdout();
     if cols.is_empty() {
         println!(
-            "\n\x1b[2mNo collections. Run 'rqmd collection add .' to index markdown files.\x1b[0m"
+            "\n{}",
+            p.dim("No collections. Run 'rqmd collection add .' to index markdown files.")
         );
         return Ok(());
     }
 
-    println!("\n\x1b[1mCollections\x1b[0m");
+    println!("\n{}", p.bold("Collections"));
     for col in cols {
         let (count, last_mod) = db::collection_doc_stats(conn, &col.name).unwrap_or((0, None));
         let last_mod_str = last_mod
@@ -135,29 +142,33 @@ fn print_status_collections(conn: &Connection, cols: &[Collection]) -> Result<()
             .map(fmt::format_time_ago)
             .unwrap_or_else(|| "never".to_string());
         println!(
-            "  \x1b[36m{}\x1b[0m \x1b[2m(rqmd://{}/)\x1b[0m",
-            col.name, col.name
+            "  {} {}",
+            p.cyan(&col.name),
+            p.dim(format!("(rqmd://{}/)", col.name))
         );
-        println!("    \x1b[2mPattern:\x1b[0m  {}", col.pattern);
-        println!("    \x1b[2mFiles:\x1b[0m    {count} (updated {last_mod_str})");
+        println!("    {}  {}", p.dim("Pattern:"), col.pattern);
+        println!(
+            "    {}    {count} (updated {last_mod_str})",
+            p.dim("Files:")
+        );
         if let Ok(Some(ctx)) = db::get_context_for_collection(conn, &col.name) {
             let preview = truncate_context_preview(&ctx);
-            println!("    \x1b[2mContexts:\x1b[0m 1");
-            println!("      \x1b[2m/:\x1b[0m {preview}");
+            println!("    {} 1", p.dim("Contexts:"));
+            println!("      {} {preview}", p.dim("/:"));
         }
     }
 
     // ── Examples (qmd.ts:588-601, using rqmd command names) ─────────────────
-    println!("\n\x1b[1mExamples\x1b[0m");
-    println!("  \x1b[2m# List files in a collection\x1b[0m");
+    println!("\n{}", p.bold("Examples"));
+    println!("  {}", p.dim("# List files in a collection"));
     if let Some(first) = cols.first() {
         println!("  rqmd ls {}", first.name);
     }
-    println!("  \x1b[2m# Get a document\x1b[0m");
+    println!("  {}", p.dim("# Get a document"));
     if let Some(first) = cols.first() {
         println!("  rqmd get rqmd://{}/path/to/file.md", first.name);
     }
-    println!("  \x1b[2m# Search within a collection\x1b[0m");
+    println!("  {}", p.dim("# Search within a collection"));
     if let Some(first) = cols.first() {
         println!("  rqmd search \"query\" -c {}", first.name);
     }
@@ -166,6 +177,7 @@ fn print_status_collections(conn: &Connection, cols: &[Collection]) -> Result<()
 
 /// Build and print the "Tips" block of `rqmd status` (qmd.ts:621-654).
 fn print_status_tips(conn: &Connection, cols: &[Collection]) {
+    let p = fmt::Paint::stdout();
     let mut tips: Vec<String> = Vec::new();
 
     // Tip 1: collections missing context
@@ -189,10 +201,10 @@ fn print_status_tips(conn: &Connection, cols: &[Collection]) {
         tips.push(format!(
             "Add context to collections for clearer `rqmd get`/`rqmd search` output: {names}{more}"
         ));
-        tips.push(
-            "  \x1b[2mrqmd context add rqmd://<name>/ \"What this collection contains\"\x1b[0m"
-                .to_string(),
-        );
+        tips.push(format!(
+            "  {}",
+            p.dim("rqmd context add rqmd://<name>/ \"What this collection contains\"")
+        ));
     }
 
     // Tip 2: collections missing update_command (only when >1 collection)
@@ -212,15 +224,15 @@ fn print_status_tips(conn: &Connection, cols: &[Collection]) {
             tips.push(format!(
                 "Add update commands to keep collections fresh: {names}{more}"
             ));
-            tips.push(
-                "  \x1b[2mrqmd collection update-cmd <name> 'git pull --rebase --ff-only'\x1b[0m"
-                    .to_string(),
-            );
+            tips.push(format!(
+                "  {}",
+                p.dim("rqmd collection update-cmd <name> 'git pull --rebase --ff-only'")
+            ));
         }
     }
 
     if !tips.is_empty() {
-        println!("\n\x1b[1mTips\x1b[0m");
+        println!("\n{}", p.bold("Tips"));
         for tip in &tips {
             println!("  {tip}");
         }
@@ -300,13 +312,19 @@ fn render_embed_progress_line(
     chunks_so_far: usize,
     bytes_processed: usize,
     elapsed_secs: f64,
+    p: fmt::Paint,
+    plain: bool,
 ) -> String {
     let pct = if todo_total > 0 {
         (done as f64 / todo_total as f64) * 100.0
     } else {
         100.0
     };
-    let bar = fmt::render_progress_bar(pct, 30);
+    let bar = if plain {
+        String::new()
+    } else {
+        format!("{} ", p.cyan(fmt::render_progress_bar(pct, 30)))
+    };
     let pct_int = pct.round() as u64;
     let (throughput_str, eta_str) = if elapsed_secs > 2.0 && done > 0 {
         let bps = bytes_processed as f64 / elapsed_secs;
@@ -320,8 +338,11 @@ fn render_embed_progress_line(
         (".../s".to_string(), "...".to_string())
     };
     format!(
-        "\x1b[36m{bar}\x1b[0m \x1b[1m{pct_int:>3}% input\x1b[0m \
-         \x1b[2m{chunks_so_far} chunks · {done}/{todo_total} docs · {throughput_str} · ETA {eta_str}\x1b[0m"
+        "{bar}{} {}",
+        p.bold(format!("{pct_int:>3}% input")),
+        p.dim(format!(
+            "{chunks_so_far} chunks · {done}/{todo_total} docs · {throughput_str} · ETA {eta_str}"
+        ))
     )
 }
 
@@ -535,12 +556,15 @@ pub fn run_embed(
             }
         }
         eprintln!(
-            "\x1b[33mrqmd: rebuild mode — cleared {} vectors; re-embedding from scratch\x1b[0m",
-            if collection.is_some() {
-                "collection"
-            } else {
-                "all"
-            }
+            "{}",
+            fmt::Paint::stderr().yellow(format!(
+                "rqmd: rebuild mode — cleared {} vectors; re-embedding from scratch",
+                if collection.is_some() {
+                    "collection"
+                } else {
+                    "all"
+                }
+            ))
         );
     } else {
         // Fast path: nothing to do.
@@ -552,7 +576,10 @@ pub fn run_embed(
         )
         .unwrap_or(1);
         if needs_embed == 0 {
-            println!("\x1b[32m✓ All content hashes already have embeddings.\x1b[0m");
+            println!(
+                "{}",
+                fmt::Paint::stdout().green("✓ All content hashes already have embeddings.")
+            );
             return Ok(());
         }
     }
@@ -562,7 +589,8 @@ pub fn run_embed(
     // Stale-fingerprint advisory: --rebuild already cleared every vector row above,
     // so there is nothing to compare yet; only warn on the incremental path, where
     // a model/chunking change leaves existing vectors under the old fingerprint
-    // untouched (incremental embed only fills in hashes with zero vectors).
+    // until this run re-embeds them (`hash_needs_embed` selects every hash with no
+    // vector at the current fingerprint, not only hashes with no vectors at all).
     if !rebuild {
         store::warn_if_fingerprint_stale(&s);
     }
@@ -577,12 +605,15 @@ pub fn run_embed(
                 .unwrap_or(0);
         if hnsw_size < db_vec_count {
             eprintln!(
-                "\x1b[33mrqmd: warning: vector index out of sync ({hnsw_size} indexed \
-                 vs {db_vec_count} expected); run `rqmd embed --rebuild` to repair.\x1b[0m"
+                "{}",
+                fmt::Paint::stderr().yellow(format!(
+                    "rqmd: warning: vector index out of sync ({hnsw_size} indexed \
+                     vs {db_vec_count} expected); run `rqmd embed --rebuild` to repair."
+                ))
             );
         }
     }
-    let is_tty = fmt::atty_stderr();
+    let mut progress = fmt::Progress::new(fmt::ProgressMode::detect());
     let start = Instant::now();
 
     // Pending vector metadata is flushed every CHECKPOINT_INTERVAL docs.
@@ -630,16 +661,17 @@ pub fn run_embed(
         let todo: Vec<&Document> = todo_indices.iter().map(|i| &docs[*i]).collect();
         let flow = embed_docs(&mut s, &mut run, &todo, deadline, |done, bytes, chunks| {
             lock.heartbeat();
-            if is_tty {
+            if progress.is_active() {
                 let line = render_embed_progress_line(
                     done,
                     todo_total,
                     chunks,
                     bytes,
                     start.elapsed().as_secs_f64(),
+                    fmt::Paint::stderr(),
+                    progress.is_plain(),
                 );
-                let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
-                eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
+                progress.show(&line, done, todo_total);
             }
         })?;
         if flow != EmbedFlow::Continue {
@@ -648,14 +680,15 @@ pub fn run_embed(
         }
     }
 
-    // Final 100% bar before the summary line.
-    if is_tty && end != EmbedFlow::Continue {
-        eprint!("\r\x1b[2K");
-    } else if is_tty {
+    // Final 100% bar before the summary line. A plain terminal already got its
+    // 100% line when the last document finished.
+    if end != EmbedFlow::Continue {
+        progress.clear();
+    } else if progress.is_active() && !progress.is_plain() {
+        let p = fmt::Paint::stderr();
         let bar = fmt::render_progress_bar(100.0, 30);
-        let line = format!("\x1b[32m{bar}\x1b[0m \x1b[1m100% input\x1b[0m");
-        let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
-        eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
+        let line = format!("{} {}", p.green(bar), p.bold("100% input"));
+        progress.show(&line, 1, 1);
     }
 
     // Final checkpoint for any remaining pending rows.
@@ -663,9 +696,13 @@ pub fn run_embed(
 
     // Summary — matches qmd's "✓ Done!" line (qmd.ts:1938).
     let elapsed = fmt::format_eta(start.elapsed().as_secs_f64());
+    let p = fmt::Paint::stdout();
     println!(
-        "\n\x1b[32m✓ Done!\x1b[0m Embedded \x1b[1m{}\x1b[0m chunks from \x1b[1m{}\x1b[0m documents in \x1b[1m{elapsed}\x1b[0m",
-        run.new_chunks, run.new_docs
+        "\n{} Embedded {} chunks from {} documents in {}",
+        p.green("✓ Done!"),
+        p.bold(run.new_chunks),
+        p.bold(run.new_docs),
+        p.bold(&elapsed)
     );
     finish_embed(&run, &end)
 }
@@ -700,7 +737,8 @@ pub fn run_cleanup(index_dir: &Path) -> Result<()> {
     let after_db = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
 
     println!(
-        "\x1b[32m✓ Cleanup done.\x1b[0m Swept {swept_vectors} orphaned vector(s), {swept_content} unreferenced content row(s)."
+        "{} Swept {swept_vectors} orphaned vector(s), {swept_content} unreferenced content row(s).",
+        fmt::Paint::stdout().green("✓ Cleanup done.")
     );
     println!(
         "  hnsw.usearch: {} -> {}",
@@ -770,10 +808,14 @@ fn run_update_with(
     // writes and DB rows even though flush() now skips hnsw.save() when no
     // vector was added.
     let mut s = store::open_store_no_backend(index_dir, false)?;
-    let is_tty = fmt::atty_stderr();
+    let progress_mode = fmt::ProgressMode::detect();
+    let p = fmt::Paint::stdout();
 
     // Mirror qmd's "Updating N collection(s)..." header (qmd.ts:675).
-    println!("\x1b[1mUpdating {} collection(s)...\x1b[0m\n", cols.len());
+    println!(
+        "{}\n",
+        p.bold(format!("Updating {} collection(s)...", cols.len()))
+    );
 
     // Tracks whether every collection was fully walked and every file indexed
     // without error — the raw-split marker must only be set on a clean full
@@ -787,18 +829,17 @@ fn run_update_with(
     for (ci, col) in cols.iter().enumerate() {
         // Per-collection header: [i/n] name (pattern)
         println!(
-            "\x1b[36m[{}/{}]\x1b[0m \x1b[1m{}\x1b[0m \x1b[2m({})\x1b[0m",
-            ci + 1,
-            cols.len(),
-            col.name,
-            col.pattern
+            "{} {} {}",
+            p.cyan(format!("[{}/{}]", ci + 1, cols.len())),
+            p.bold(&col.name),
+            p.dim(format!("({})", col.pattern))
         );
 
         let outcome = update_one_collection(
             &mut s,
             col,
             UpdateRun {
-                is_tty,
+                progress_mode,
                 hooks_allowed,
                 full,
                 hook_config,
@@ -890,7 +931,7 @@ struct CollectionOutcome {
 /// Per-invocation settings shared by every collection in one `rqmd update`.
 #[derive(Clone, Copy)]
 struct UpdateRun {
-    is_tty: bool,
+    progress_mode: fmt::ProgressMode,
     hooks_allowed: bool,
     full: bool,
     hook_config: HookConfig,
@@ -903,11 +944,12 @@ fn update_one_collection(
     heartbeat: &dyn Fn(),
 ) -> Result<CollectionOutcome> {
     let UpdateRun {
-        is_tty,
+        progress_mode,
         hooks_allowed,
         full,
         hook_config,
     } = run;
+    let mut progress = fmt::Progress::new(progress_mode);
     let dir = Path::new(&col.path);
     if !dir.exists() {
         eprintln!("  WARN: directory not found: {}", dir.display());
@@ -928,7 +970,7 @@ fn update_one_collection(
                 "  WARN: skipping update hook (project-local index; pass --run-hooks to allow it): {cmd}"
             );
         } else {
-            println!("  \x1b[2m$ {cmd}\x1b[0m");
+            println!("  {}", fmt::Paint::stdout().dim(format!("$ {cmd}")));
             hook_failure = match hook::run_hook(cmd, dir, hook_config) {
                 HookOutcome::Succeeded => None,
                 HookOutcome::Failed(reason) => Some(reason),
@@ -1022,10 +1064,9 @@ fn update_one_collection(
         };
 
         processed += 1;
-        if is_tty {
+        if progress.is_active() {
             let line = format!("Indexing: {processed}/{total} {}", doc.rel_path);
-            let w = fmt::term_width().unwrap_or(80).saturating_sub(1);
-            eprint!("\r\x1b[2K{}", fmt::fit_to_width(&line, w));
+            progress.show(&line, processed, total);
         }
 
         match s.index_document_fts_only_with_raw(
@@ -1089,9 +1130,7 @@ fn update_one_collection(
 
     s.flush()?;
 
-    if is_tty {
-        eprint!("\r\x1b[2K");
-    }
+    progress.clear();
 
     // Summary line matching qmd's "Indexed: X new, Y updated..." (qmd.ts:735), extended
     // with an honest skip-reason breakdown instead of silently dropping unreadable files.
@@ -1224,7 +1263,8 @@ fn print_doctor_stale_fingerprint_check(conn: &Connection) {
     let ast = store::expected_ast_fingerprint();
     if breakdown.iter().any(|(fp, _)| fp != &base && fp != &ast) {
         println!(
-            "\n  \x1b[33m⚠ Stale embedding fingerprint(s) detected\x1b[0m — vectors were generated by a different model/chunking config than the one active now:"
+            "\n  {} — vectors were generated by a different model/chunking config than the one active now:",
+            fmt::Paint::stdout().yellow("⚠ Stale embedding fingerprint(s) detected")
         );
         for (fp, count) in &breakdown {
             let marker = if *fp == base || *fp == ast {
@@ -1248,7 +1288,8 @@ fn print_doctor_orphaned_vector_check(conn: &Connection) {
     let orphaned_vectors = db::count_orphaned_vectors(conn).unwrap_or(0);
     if orphaned_vectors > 0 {
         println!(
-            "\n  \x1b[33m⚠ {orphaned_vectors} orphaned vector(s)\x1b[0m — left behind by documents removed or renamed since their last embed. Unreachable in search but not yet freed from the HNSW file."
+            "\n  {} — left behind by documents removed or renamed since their last embed. Unreachable in search but not yet freed from the HNSW file.",
+            fmt::Paint::stdout().yellow(format!("⚠ {orphaned_vectors} orphaned vector(s)"))
         );
         println!("    Run 'rqmd embed --cleanup' to reclaim the space");
     }
@@ -1302,7 +1343,7 @@ mod tests {
     };
 
     const TEST_RUN: UpdateRun = UpdateRun {
-        is_tty: false,
+        progress_mode: fmt::ProgressMode::Off,
         hooks_allowed: true,
         full: false,
         hook_config: TEST_HOOKS,

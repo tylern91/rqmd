@@ -132,6 +132,19 @@ rqmd query -c docs "deployment pipeline"
 Full grammar (typed lines, lex phrase/negation operators, MCP `searches` array):
 [SYNTAX.md](SYNTAX.md).
 
+## Colour and progress output
+
+Escape sequences are written only to a terminal. Piped or redirected output, on stdout and on
+stderr, is plain text. `NO_COLOR` (set to any value) turns styling off on a terminal, and
+`TERM=dumb` turns it off and also stops live progress from redrawing a line in place.
+
+| Environment | stdout / stderr is a terminal | Progress (`update`, `embed`, `collection add`) |
+|-------------|-------------------------------|------------------------------------------------|
+| default | colour | one line redrawn in place |
+| `NO_COLOR` set | no colour | one line redrawn in place |
+| `TERM=dumb` | no colour | a plain line each time a tenth of the work is done, each ending in a newline |
+| not a terminal | no escapes | none |
+
 ## Exit codes
 
 | Code | Meaning |

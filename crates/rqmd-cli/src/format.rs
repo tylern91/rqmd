@@ -53,8 +53,80 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RESET: &str = "\x1b[0m";
 
-fn ansi_enabled() -> bool {
-    std::env::var("NO_COLOR").is_err() && atty_stdout()
+/// Whether the environment allows any ANSI styling: not when `NO_COLOR` is set
+/// or the terminal is `dumb`. The TTY check is separate, per stream.
+fn colors_permitted(no_color: bool, term: Option<&str>) -> bool {
+    !no_color && term != Some("dumb")
+}
+
+fn env_colors_permitted() -> bool {
+    colors_permitted(
+        std::env::var_os("NO_COLOR").is_some(),
+        std::env::var("TERM").ok().as_deref(),
+    )
+}
+
+/// The one gate for ANSI escapes written to stdout.
+pub(crate) fn ansi_enabled() -> bool {
+    env_colors_permitted() && atty_stdout()
+}
+
+/// The same gate for escapes written to stderr, which can be redirected
+/// independently of stdout.
+pub(crate) fn ansi_enabled_stderr() -> bool {
+    env_colors_permitted() && atty_stderr()
+}
+
+/// ANSI styling bound to one output stream: every method returns its input
+/// unchanged when the stream does not take escapes.
+#[derive(Clone, Copy)]
+pub(crate) struct Paint {
+    on: bool,
+}
+
+impl Paint {
+    pub(crate) fn stdout() -> Self {
+        Self { on: ansi_enabled() }
+    }
+
+    pub(crate) fn stderr() -> Self {
+        Self {
+            on: ansi_enabled_stderr(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn plain() -> Self {
+        Self { on: false }
+    }
+
+    fn wrap(self, code: &str, s: impl std::fmt::Display) -> String {
+        if self.on {
+            format!("{code}{s}{RESET}")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub(crate) fn bold(self, s: impl std::fmt::Display) -> String {
+        self.wrap(BOLD, s)
+    }
+
+    pub(crate) fn dim(self, s: impl std::fmt::Display) -> String {
+        self.wrap(DIM, s)
+    }
+
+    pub(crate) fn cyan(self, s: impl std::fmt::Display) -> String {
+        self.wrap(CYAN, s)
+    }
+
+    pub(crate) fn green(self, s: impl std::fmt::Display) -> String {
+        self.wrap(GREEN, s)
+    }
+
+    pub(crate) fn yellow(self, s: impl std::fmt::Display) -> String {
+        self.wrap(YELLOW, s)
+    }
 }
 
 /// Check if stdout is a TTY — used to gate colors and interactive progress.
@@ -131,12 +203,14 @@ pub fn term_width() -> Option<usize> {
 ///
 /// Truncates if longer, space-pads if shorter (so a shorter new line erases a
 /// longer previous one).  ANSI SGR escapes (`\x1b[…m`) are copied through and
-/// do NOT count toward width.  A trailing reset is appended so a mid-color
-/// truncation cannot bleed.  Char-based — no byte slicing, UTF-8 safe.
+/// do NOT count toward width.  When the input carried an escape, a trailing
+/// reset is appended so a mid-color truncation cannot bleed; a plain input
+/// stays plain.  Char-based — no byte slicing, UTF-8 safe.
 pub fn fit_to_width(s: &str, width: usize) -> String {
     let mut out = String::new();
     let mut visible = 0usize;
     let mut in_escape = false;
+    let mut styled = false;
     for c in s.chars() {
         if in_escape {
             out.push(c);
@@ -147,6 +221,7 @@ pub fn fit_to_width(s: &str, width: usize) -> String {
         }
         if c == '\x1b' {
             in_escape = true;
+            styled = true;
             out.push(c);
             continue;
         }
@@ -156,33 +231,100 @@ pub fn fit_to_width(s: &str, width: usize) -> String {
         out.push(c);
         visible += 1;
     }
-    out.push_str("\x1b[0m");
+    if styled {
+        out.push_str(RESET);
+    }
     if visible < width {
         out.push_str(&" ".repeat(width - visible));
     }
     out
 }
 
-fn b(s: &str) -> String {
-    if ansi_enabled() {
-        format!("{BOLD}{s}{RESET}")
-    } else {
-        s.to_string()
+/// How live progress reaches stderr.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProgressMode {
+    /// stderr is not a terminal: no progress output.
+    Off,
+    /// A terminal that can rewrite a line: redraw it in place.
+    Redraw,
+    /// A `dumb` terminal (screen readers, serial consoles): plain lines, each
+    /// ending in a newline, never a carriage-return redraw.
+    Lines,
+}
+
+impl ProgressMode {
+    pub fn detect() -> Self {
+        Self::from_terminal(atty_stderr(), std::env::var("TERM").ok().as_deref())
     }
+
+    fn from_terminal(stderr_is_tty: bool, term: Option<&str>) -> Self {
+        match (stderr_is_tty, term) {
+            (false, _) => Self::Off,
+            (true, Some("dumb")) => Self::Lines,
+            (true, _) => Self::Redraw,
+        }
+    }
+}
+
+/// One progress display: `show` repaints (or prints) a status line, `clear`
+/// wipes a redrawn line before the summary prints.
+pub struct Progress {
+    mode: ProgressMode,
+    last_step: Option<usize>,
+}
+
+impl Progress {
+    pub fn new(mode: ProgressMode) -> Self {
+        Self {
+            mode,
+            last_step: None,
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.mode != ProgressMode::Off
+    }
+
+    /// `true` when lines must stay free of glyph bars and cursor control.
+    pub fn is_plain(&self) -> bool {
+        self.mode == ProgressMode::Lines
+    }
+
+    /// Show `line` for step `done` of `total`. Redraw mode repaints every
+    /// call; plain mode prints a line each time `done` crosses a tenth of
+    /// `total`, so a large run does not flood the output.
+    pub fn show(&mut self, line: &str, done: usize, total: usize) {
+        match self.mode {
+            ProgressMode::Off => {}
+            ProgressMode::Redraw => {
+                let w = term_width().unwrap_or(80).saturating_sub(1);
+                eprint!("\r{}", fit_to_width(line, w));
+            }
+            ProgressMode::Lines => {
+                let step = (done * 10).checked_div(total).unwrap_or(0);
+                if self.last_step != Some(step) {
+                    self.last_step = Some(step);
+                    eprintln!("{line}");
+                }
+            }
+        }
+    }
+
+    pub fn clear(&self) {
+        if self.mode == ProgressMode::Redraw {
+            eprint!("\r{}\r", " ".repeat(term_width().unwrap_or(80)));
+        }
+    }
+}
+
+fn b(s: &str) -> String {
+    Paint::stdout().bold(s)
 }
 fn dim(s: &str) -> String {
-    if ansi_enabled() {
-        format!("{DIM}{s}{RESET}")
-    } else {
-        s.to_string()
-    }
+    Paint::stdout().dim(s)
 }
 fn cyan(s: &str) -> String {
-    if ansi_enabled() {
-        format!("{CYAN}{s}{RESET}")
-    } else {
-        s.to_string()
-    }
+    Paint::stdout().cyan(s)
 }
 // ── Score formatting (mirrors qmd's formatScore) ──────────────────────────────
 
@@ -743,18 +885,30 @@ mod tests {
     // ── fit_to_width ─────────────────────────────────────────────────────────
 
     #[test]
-    fn fit_to_width_pads_shorter_strings_after_the_reset_code() {
-        assert_eq!(fit_to_width("ab", 5), format!("ab{RESET}{}", " ".repeat(3)));
+    fn fit_to_width_pads_shorter_strings() {
+        assert_eq!(fit_to_width("ab", 5), "ab   ");
+    }
+
+    #[test]
+    fn fit_to_width_pads_a_styled_string_after_the_reset_code() {
+        assert_eq!(
+            fit_to_width(&format!("{BOLD}ab"), 5),
+            format!("{BOLD}ab{RESET}   ")
+        );
     }
 
     #[test]
     fn fit_to_width_leaves_an_exact_width_string_unpadded() {
-        assert_eq!(fit_to_width("abc", 3), format!("abc{RESET}"));
+        assert_eq!(fit_to_width("abc", 3), "abc");
     }
 
     #[test]
     fn fit_to_width_truncates_longer_strings() {
-        assert_eq!(fit_to_width("abcdef", 3), format!("abc{RESET}"));
+        assert_eq!(fit_to_width("abcdef", 3), "abc");
+        assert_eq!(
+            fit_to_width(&format!("{BOLD}abcdef"), 3),
+            format!("{BOLD}abc{RESET}")
+        );
     }
 
     #[test]
@@ -762,8 +916,41 @@ mod tests {
         // 'é' is 2 bytes in UTF-8 — width is a *character* count, so one
         // 'é' fills a width of 1, and a second one gets truncated rather
         // than the first being cut mid-byte.
-        assert_eq!(fit_to_width("é", 1), format!("é{RESET}"));
-        assert_eq!(fit_to_width("éé", 1), format!("é{RESET}"));
+        assert_eq!(fit_to_width("é", 1), "é");
+        assert_eq!(fit_to_width("éé", 1), "é");
+    }
+
+    // ── colour and progress policy ───────────────────────────────────────────
+
+    #[test]
+    fn colors_are_off_for_no_color_and_dumb_terminals() {
+        assert!(colors_permitted(false, Some("xterm-256color")));
+        assert!(colors_permitted(false, None));
+        assert!(!colors_permitted(true, Some("xterm-256color")));
+        assert!(!colors_permitted(false, Some("dumb")));
+    }
+
+    #[test]
+    fn paint_off_returns_text_unchanged() {
+        let p = Paint::plain();
+        assert_eq!(p.bold("x"), "x");
+        assert_eq!(p.yellow(12), "12");
+    }
+
+    #[test]
+    fn paint_on_wraps_in_an_escape_and_a_reset() {
+        let p = Paint { on: true };
+        assert_eq!(p.green("ok"), format!("{GREEN}ok{RESET}"));
+    }
+
+    #[test]
+    fn progress_mode_follows_stderr_tty_and_term() {
+        use ProgressMode::*;
+        assert_eq!(ProgressMode::from_terminal(false, Some("xterm")), Off);
+        assert_eq!(ProgressMode::from_terminal(false, Some("dumb")), Off);
+        assert_eq!(ProgressMode::from_terminal(true, Some("xterm")), Redraw);
+        assert_eq!(ProgressMode::from_terminal(true, None), Redraw);
+        assert_eq!(ProgressMode::from_terminal(true, Some("dumb")), Lines);
     }
 
     // ── format_eta ───────────────────────────────────────────────────────────
