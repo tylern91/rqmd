@@ -132,6 +132,13 @@ fn init_schema(conn: &Connection) -> Result<()> {
     // before the column existed keep NULL and are filled in the next time their
     // document is embedded; NULL never matches a lookup.
     ensure_column(conn, "content_vectors", "chunk_hash", "chunk_hash TEXT")?;
+    // `vector_key` names what a stored vector was computed from: the chunk text
+    // plus the model, backend kind, context size and passage prefix that
+    // shaped the embedding. Unlike `chunk_hash` it does not depend on the
+    // chunking settings, so a vector is reusable wherever the same chunk text
+    // turns up. Rows written before the column existed keep NULL until
+    // `rqmd embed` backfills them; NULL never matches a lookup.
+    ensure_column(conn, "content_vectors", "vector_key", "vector_key TEXT")?;
     // `prev_hash` is the hash an edit just superseded, kept so `rqmd embed` can
     // copy that version's unchanged chunk vectors before the orphan sweep drops
     // them. NULL means nothing is pending; see `ORPHANED_VECTOR_PREDICATE`.
@@ -142,6 +149,12 @@ fn init_schema(conn: &Connection) -> Result<()> {
         [],
     )
     .context("create chunk_hash index")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_content_vectors_vector_key \
+         ON content_vectors(vector_key)",
+        [],
+    )
+    .context("create vector_key index")?;
     Ok(())
 }
 
@@ -829,44 +842,83 @@ pub fn upsert_vector_meta(
     Ok(())
 }
 
-/// Record the text hash of the chunk stored at `(hash, seq)`. Separate from
-/// [`upsert_vector_meta`] so existing callers keep their signature; a no-op
-/// when the row does not exist.
-pub fn set_vector_chunk_hash(
+/// Record the text hash and reuse key of the chunk stored at `(hash, seq)`.
+/// Separate from [`upsert_vector_meta`] so existing callers keep their
+/// signature; a no-op when the row does not exist.
+pub fn set_vector_identity(
     conn: &Connection,
     hash: &str,
     seq: i64,
     chunk_hash: &str,
+    vector_key: &str,
 ) -> Result<()> {
     conn.execute(
-        "UPDATE content_vectors SET chunk_hash = ?3 WHERE hash = ?1 AND seq = ?2",
-        params![hash, seq, chunk_hash],
+        "UPDATE content_vectors SET chunk_hash = ?3, vector_key = ?4 \
+         WHERE hash = ?1 AND seq = ?2",
+        params![hash, seq, chunk_hash, vector_key],
     )?;
     Ok(())
 }
 
-/// For each of `chunk_hashes`, the vid of an existing vector embedded from
-/// identical chunk text under the same `model` and `fingerprint`. Rows with no
-/// recorded `chunk_hash` (written before the column existed) never match, and
-/// a hash with several matches yields the lowest vid, so the answer is stable.
-pub fn reusable_chunk_vids(
+/// For each of `vector_keys`, the vid of an existing vector with that key
+/// recorded under `model`. Rows with no `vector_key` never match, and a key
+/// with several matches yields the lowest vid, so the answer is stable.
+pub fn reusable_vector_vids(
     conn: &Connection,
-    chunk_hashes: &[String],
+    vector_keys: &[String],
     model: &str,
-    fingerprint: &str,
 ) -> Result<HashMap<String, u64>> {
     let mut found = HashMap::new();
     let mut stmt = conn.prepare(
         "SELECT MIN(vid) FROM content_vectors \
-         WHERE chunk_hash = ?1 AND model = ?2 AND embed_fingerprint = ?3 AND vid IS NOT NULL",
+         WHERE vector_key = ?1 AND model = ?2 AND vid IS NOT NULL",
     )?;
-    for ch in chunk_hashes {
-        let vid: Option<i64> = stmt.query_row(params![ch, model, fingerprint], |r| r.get(0))?;
+    for key in vector_keys {
+        let vid: Option<i64> = stmt.query_row(params![key, model], |r| r.get(0))?;
         if let Some(v) = vid {
-            found.insert(ch.clone(), v as u64);
+            found.insert(key.clone(), v as u64);
         }
     }
     Ok(found)
+}
+
+/// Set `vector_key` on every row embedded under `model` at one of
+/// `fingerprints` that has a `chunk_hash` but no key yet, using `key_for` to
+/// turn the chunk hash into the key. Reads and writes metadata only. Returns
+/// the number of rows filled.
+pub fn backfill_vector_keys(
+    conn: &Connection,
+    model: &str,
+    fingerprints: &[&str],
+    key_for: impl Fn(&str) -> String,
+) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT hash, seq, chunk_hash, embed_fingerprint FROM content_vectors \
+         WHERE vector_key IS NULL AND chunk_hash IS NOT NULL AND model = ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![model], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let tx = conn.unchecked_transaction()?;
+    let mut filled = 0;
+    {
+        let mut set =
+            tx.prepare("UPDATE content_vectors SET vector_key = ?3 WHERE hash = ?1 AND seq = ?2")?;
+        for (hash, seq, chunk_hash, fingerprint) in rows {
+            if fingerprints.contains(&fingerprint.as_str()) {
+                filled += set.execute(params![hash, seq, key_for(&chunk_hash)])?;
+            }
+        }
+    }
+    tx.commit().context("commit vector key backfill")?;
+    Ok(filled)
 }
 
 /// Look up (collection, path, title, hash) for a vector ID, without the

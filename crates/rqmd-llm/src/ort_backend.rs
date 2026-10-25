@@ -86,6 +86,7 @@ pub struct OrtBackend {
     /// True if model outputs a pooled `sentence_embedding` (skip mean-pool step).
     has_sentence_embedding: bool,
     model_name: String,
+    max_seq_len: usize,
 }
 
 impl OrtBackend {
@@ -182,6 +183,7 @@ impl OrtBackend {
             has_token_type_ids,
             has_sentence_embedding,
             model_name,
+            max_seq_len: config.max_seq_len,
         })
     }
 
@@ -318,6 +320,14 @@ impl InferenceBackend for OrtBackend {
 
     fn embed_model_name(&self) -> &str {
         &self.model_name
+    }
+
+    fn embed_backend_kind(&self) -> &str {
+        "ort"
+    }
+
+    fn embed_context_size(&self) -> usize {
+        self.max_seq_len
     }
 
     fn rerank_model_name(&self) -> &str {

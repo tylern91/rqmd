@@ -122,6 +122,10 @@ pub struct Store {
     /// means the file didn't exist at that point.
     last_seen_tantivy_meta_mtime: Option<SystemTime>,
     last_seen_hnsw_mtime: Option<SystemTime>,
+    /// Vectors added by `embed_document_chunks` whose rows `rqmd embed` has not
+    /// committed yet, by reuse key. Lets a later document in the same batch
+    /// reuse them; see [`Self::vectors_committed`].
+    staged_vectors: HashMap<String, u64>,
     /// Set whenever `hnsw.add`/`add_with_vid` stages an unsaved vector; reset
     /// once `flush()` saves it (or `reload_if_stale()` replaces `self.hnsw`
     /// with a fresh view that has no unsaved work of its own). Lets `flush()`
@@ -177,6 +181,8 @@ pub struct PendingVectorMeta {
     /// Hash of the chunk's text, stored so a later edit of the document can
     /// reuse this vector for chunks that did not change.
     pub chunk_hash: String,
+    /// Reuse key of the vector (see [`vector_key`]), stored beside `chunk_hash`.
+    pub vector_key: String,
 }
 
 /// Add every embedding to `index`, or none: if an add fails partway, the vids
@@ -269,6 +275,7 @@ impl Store {
             last_seen_tantivy_meta_mtime,
             last_seen_hnsw_mtime,
             hnsw_dirty: false,
+            staged_vectors: HashMap::new(),
         })
     }
 
@@ -357,8 +364,8 @@ impl Store {
         let embed_model = self.backend.embed_model_name().to_string();
         let fingerprint = embed_fingerprint(&embed_model, rel_path);
         let chunk_hashes: Vec<String> = chunks.iter().map(|c| chunk_text_hash(&c.text)).collect();
-        let embeddings =
-            self.embed_passages_reusing(&chunks, &chunk_hashes, &embed_model, &fingerprint)?;
+        let vector_keys: Vec<String> = chunk_hashes.iter().map(|h| self.vector_key(h)).collect();
+        let embeddings = self.embed_passages_reusing(&chunks, &vector_keys, &embed_model)?;
 
         for (seq, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
             let vid = self.hnsw.add(embedding).context("hnsw add")?;
@@ -375,8 +382,14 @@ impl Store {
                 &now,
             )
             .context("upsert vector meta")?;
-            db::set_vector_chunk_hash(&self.db, &hash, seq as i64, &chunk_hashes[seq])
-                .context("record chunk hash")?;
+            db::set_vector_identity(
+                &self.db,
+                &hash,
+                seq as i64,
+                &chunk_hashes[seq],
+                &vector_keys[seq],
+            )
+            .context("record chunk identity")?;
         }
 
         Ok(())
@@ -499,8 +512,8 @@ impl Store {
         let chunks = chunk_document_for_path(rel_path, body);
         let total = chunks.len();
         let chunk_hashes: Vec<String> = chunks.iter().map(|c| chunk_text_hash(&c.text)).collect();
-        let embeddings =
-            self.embed_passages_reusing(&chunks, &chunk_hashes, &embed_model, &fingerprint)?;
+        let vector_keys: Vec<String> = chunk_hashes.iter().map(|h| self.vector_key(h)).collect();
+        let embeddings = self.embed_passages_reusing(&chunks, &vector_keys, &embed_model)?;
         let now = rfc3339_now();
 
         let vids = add_all_or_rollback(
@@ -512,6 +525,9 @@ impl Store {
             },
         )?;
         self.hnsw_dirty = true;
+        for (key, vid) in vector_keys.iter().zip(&vids) {
+            self.staged_vectors.entry(key.clone()).or_insert(*vid);
+        }
 
         Ok(chunks
             .iter()
@@ -527,29 +543,30 @@ impl Store {
                 vid,
                 now: now.clone(),
                 chunk_hash: chunk_hashes[seq].clone(),
+                vector_key: vector_keys[seq].clone(),
             })
             .collect())
     }
 
-    /// One embedding per chunk, in order. A chunk whose text already has a
-    /// stored vector under the same model and fingerprint gets a copy of it;
-    /// only the remaining chunks are encoded. A reusable vector the index can
-    /// no longer return is treated as missing rather than as an error.
+    /// One embedding per chunk, in order. A chunk whose reuse key already has a
+    /// stored or staged vector gets a copy of it; only the remaining chunks are
+    /// encoded. A reusable vector the index can no longer return is treated as
+    /// missing rather than as an error.
     fn embed_passages_reusing(
         &mut self,
         chunks: &[crate::types::Chunk],
-        chunk_hashes: &[String],
+        vector_keys: &[String],
         model: &str,
-        fingerprint: &str,
     ) -> Result<Vec<Vec<f32>>> {
-        let reusable = db::reusable_chunk_vids(&self.db, chunk_hashes, model, fingerprint)
+        let stored = db::reusable_vector_vids(&self.db, vector_keys, model)
             .context("look up reusable chunk vectors")?;
-        let mut slots: Vec<Option<Vec<f32>>> = chunk_hashes
+        let mut slots: Vec<Option<Vec<f32>>> = vector_keys
             .iter()
-            .map(|h| {
-                reusable
-                    .get(h)
-                    .and_then(|vid| self.hnsw.get_vector(*vid).ok())
+            .map(|k| {
+                [self.staged_vectors.get(k), stored.get(k)]
+                    .into_iter()
+                    .flatten()
+                    .find_map(|vid| self.hnsw.get_vector(*vid).ok())
             })
             .collect();
         let missing: Vec<usize> = (0..slots.len()).filter(|i| slots[*i].is_none()).collect();
@@ -571,6 +588,42 @@ impl Store {
             }
         }
         Ok(slots.into_iter().flatten().collect())
+    }
+
+    /// [`vector_key`] for a chunk, under the configured backend.
+    fn vector_key(&self, chunk_hash: &str) -> String {
+        vector_key(
+            self.backend.embed_backend_kind(),
+            self.backend.embed_model_name(),
+            self.backend.embed_context_size(),
+            chunk_hash,
+        )
+    }
+
+    /// Give vectors an earlier release stored a `vector_key`, from their
+    /// recorded chunk hash and without encoding anything. Only vectors embedded
+    /// under the configured model at a fingerprint this build would produce
+    /// qualify, because that is what shows they were made with the current
+    /// passage prefix; anything else stays unkeyed and is never reused.
+    /// Returns the number of rows filled.
+    pub fn backfill_vector_keys(&mut self) -> Result<usize> {
+        let kind = self.backend.embed_backend_kind().to_string();
+        let model = self.backend.embed_model_name().to_string();
+        let context_size = self.backend.embed_context_size();
+        let fingerprints = [
+            embed_fingerprint(&model, ""),
+            embed_fingerprint(&model, "placeholder.py"),
+        ];
+        let fingerprints: Vec<&str> = fingerprints.iter().map(String::as_str).collect();
+        db::backfill_vector_keys(&self.db, &model, &fingerprints, |chunk_hash| {
+            vector_key(&kind, &model, context_size, chunk_hash)
+        })
+    }
+
+    /// The rows of every vector `embed_document_chunks` returned so far are now
+    /// in `content_vectors`, so lookups find them there.
+    pub fn vectors_committed(&mut self) {
+        self.staged_vectors.clear();
     }
 
     /// Number of vectors currently in the HNSW index (mirrors the usearch file's entry count).
@@ -1950,6 +2003,17 @@ fn chunk_text_hash(text: &str) -> String {
     hex::encode(&Sha256::digest(text.as_bytes())[..16])
 }
 
+/// What a stored vector was computed from, other than the chunking settings:
+/// the chunk text plus everything that shapes the embedding of that text. Two
+/// vectors with the same key are interchangeable.
+fn vector_key(backend_kind: &str, model: &str, context_size: usize, chunk_hash: &str) -> String {
+    let sig = format!(
+        "backend:{backend_kind}\nmodel:{model}\ncontext_size:{context_size}\npassage_prefix:{}\nchunk:{chunk_hash}",
+        rqmd_llm::EMBEDDINGGEMMA_PASSAGE_PREFIX
+    );
+    hex::encode(&Sha256::digest(sig.as_bytes())[..16])
+}
+
 /// Embedding fingerprint: 6-hex-char hash of model name + chunk constants, plus
 /// an AST-chunking marker when [`embed_fingerprint_applies_ast`] is true for
 /// `rel_path`. Used to detect stale embeddings after a model or chunking-config
@@ -2854,6 +2918,8 @@ mod tests {
     /// asked to encode, so a test can tell reused chunks from encoded ones.
     struct RecordingBackend {
         encoded: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        kind: &'static str,
+        context_size: usize,
     }
 
     impl rqmd_llm::InferenceBackend for RecordingBackend {
@@ -2880,6 +2946,12 @@ mod tests {
         fn embed_model_name(&self) -> &str {
             "recording-embed"
         }
+        fn embed_backend_kind(&self) -> &str {
+            self.kind
+        }
+        fn embed_context_size(&self) -> usize {
+            self.context_size
+        }
         fn rerank_model_name(&self) -> &str {
             "recording-rerank"
         }
@@ -2891,11 +2963,23 @@ mod tests {
     type EncodedLog = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
     fn recording_store(dir: &std::path::Path) -> (Store, EncodedLog) {
+        recording_store_as(dir, "recording", 2048)
+    }
+
+    /// Opens (or reopens) the store in `dir` with a backend that reports the
+    /// given engine kind and context size.
+    fn recording_store_as(
+        dir: &std::path::Path,
+        kind: &'static str,
+        context_size: usize,
+    ) -> (Store, EncodedLog) {
         let encoded = EncodedLog::default();
         let store = open_stub_store_with(
             dir,
             Box::new(RecordingBackend {
                 encoded: encoded.clone(),
+                kind,
+                context_size,
             }),
         );
         (store, encoded)
@@ -2947,8 +3031,10 @@ mod tests {
                 &m.now,
             )
             .unwrap();
-            db::set_vector_chunk_hash(&store.db, &m.hash, m.seq, &m.chunk_hash).unwrap();
+            db::set_vector_identity(&store.db, &m.hash, m.seq, &m.chunk_hash, &m.vector_key)
+                .unwrap();
         }
+        store.vectors_committed();
     }
 
     fn embed_and_persist(store: &mut Store, hash: &str, body: &str) -> Vec<PendingVectorMeta> {
@@ -3012,29 +3098,24 @@ mod tests {
     }
 
     #[test]
-    fn chunk_ac_3_a_vector_under_another_fingerprint_or_model_is_never_reused() {
-        for column in ["embed_fingerprint", "model"] {
-            let dir = tempfile::TempDir::new().unwrap();
-            let (mut store, encoded) = recording_store(dir.path());
-            let body = long_note(4, false);
-            let first = embed_and_persist(&mut store, "hash-one", &body);
-            store
-                .db
-                .execute(
-                    &format!("UPDATE content_vectors SET {column} = 'someone-else'"),
-                    [],
-                )
-                .unwrap();
-            encoded.lock().unwrap().clear();
+    fn chunk_ac_3_a_vector_recorded_under_another_model_is_never_reused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, encoded) = recording_store(dir.path());
+        let body = long_note(4, false);
+        let first = embed_and_persist(&mut store, "hash-one", &body);
+        store
+            .db
+            .execute("UPDATE content_vectors SET model = 'someone-else'", [])
+            .unwrap();
+        encoded.lock().unwrap().clear();
 
-            embed_and_persist(&mut store, "hash-two", &body);
+        embed_and_persist(&mut store, "hash-two", &body);
 
-            assert_eq!(
-                encoded.lock().unwrap().len(),
-                first.len(),
-                "a differing {column} must force every chunk to be encoded"
-            );
-        }
+        assert_eq!(
+            encoded.lock().unwrap().len(),
+            first.len(),
+            "a differing model must force every chunk to be encoded"
+        );
     }
 
     #[test]
@@ -3068,7 +3149,10 @@ mod tests {
         let first = embed_and_persist(&mut store, "hash-one", &body);
         store
             .db
-            .execute("UPDATE content_vectors SET chunk_hash = NULL", [])
+            .execute(
+                "UPDATE content_vectors SET chunk_hash = NULL, vector_key = NULL",
+                [],
+            )
             .unwrap();
         encoded.lock().unwrap().clear();
 
@@ -3115,6 +3199,170 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has_column, 1);
+    }
+
+    #[test]
+    fn key_ac_1_identical_chunks_in_two_documents_are_encoded_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, encoded) = recording_store(dir.path());
+        let body = long_note(4, false);
+
+        let first = store
+            .embed_document_chunks("hash-a", "a.md", &body)
+            .unwrap();
+        let encoded_for_first = encoded.lock().unwrap().len();
+        assert_eq!(encoded_for_first, first.len());
+
+        // The first document's rows are not stored yet, as inside one embed run.
+        let second = store
+            .embed_document_chunks("hash-b", "b.md", &body)
+            .unwrap();
+
+        assert_eq!(second.len(), first.len());
+        assert_eq!(
+            encoded.lock().unwrap().len(),
+            encoded_for_first,
+            "the second document's chunks all match staged vectors"
+        );
+        for (a, b) in first.iter().zip(&second) {
+            assert_eq!(a.vector_key, b.vector_key);
+            assert_eq!(
+                store.hnsw.get_vector(a.vid).unwrap(),
+                store.hnsw.get_vector(b.vid).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn key_ac_2_a_vector_is_reused_under_a_different_chunking_fingerprint() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, encoded) = recording_store(dir.path());
+        let body = long_note(4, false);
+        embed_and_persist(&mut store, "hash-one", &body);
+        store
+            .db
+            .execute(
+                "UPDATE content_vectors SET embed_fingerprint = 'older-chunking'",
+                [],
+            )
+            .unwrap();
+        encoded.lock().unwrap().clear();
+
+        embed_and_persist(&mut store, "hash-two", &body);
+
+        assert!(
+            encoded.lock().unwrap().is_empty(),
+            "same text, backend and context size: nothing to encode"
+        );
+    }
+
+    #[test]
+    fn key_ac_3_another_backend_kind_or_context_size_never_reuses() {
+        let body = long_note(4, false);
+        for (kind, context_size) in [("other-engine", 2048), ("recording", 512)] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let (mut first_store, first_log) = recording_store(dir.path());
+            let first = embed_and_persist(&mut first_store, "hash-one", &body);
+            first_store.flush().unwrap();
+            let chunks = first.len();
+            assert_eq!(first_log.lock().unwrap().len(), chunks);
+            drop(first_store);
+
+            let (mut same, same_log) = recording_store(dir.path());
+            embed_and_persist(&mut same, "hash-two", &body);
+            assert!(
+                same_log.lock().unwrap().is_empty(),
+                "control: an identical backend reuses every chunk"
+            );
+            drop(same);
+
+            let (mut changed, changed_log) = recording_store_as(dir.path(), kind, context_size);
+            embed_and_persist(&mut changed, "hash-three", &body);
+            assert_eq!(
+                changed_log.lock().unwrap().len(),
+                chunks,
+                "{kind} / {context_size}: every chunk must be encoded again"
+            );
+        }
+    }
+
+    #[test]
+    fn key_ac_4_vectors_without_a_key_are_backfilled_without_re_encoding() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut store, encoded) = recording_store(dir.path());
+        let body = long_note(4, false);
+        let first = embed_and_persist(&mut store, "hash-one", &body);
+        store
+            .db
+            .execute("UPDATE content_vectors SET vector_key = NULL", [])
+            .unwrap();
+        // One row embedded under another model must be left alone.
+        store
+            .db
+            .execute(
+                "UPDATE content_vectors SET model = 'someone-else' WHERE seq = 0",
+                [],
+            )
+            .unwrap();
+        encoded.lock().unwrap().clear();
+
+        let filled = store.backfill_vector_keys().unwrap();
+
+        assert_eq!(filled, first.len() - 1);
+        assert!(
+            encoded.lock().unwrap().is_empty(),
+            "the backfill reads metadata only"
+        );
+        let unkeyed: i64 = store
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM content_vectors WHERE vector_key IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unkeyed, 1);
+        assert_eq!(store.backfill_vector_keys().unwrap(), 0, "idempotent");
+
+        embed_and_persist(&mut store, "hash-two", &body);
+        assert_eq!(
+            encoded.lock().unwrap().len(),
+            1,
+            "only the chunk whose row was left alone is encoded again"
+        );
+    }
+
+    #[test]
+    fn key_ac_5_a_database_created_before_the_column_is_upgraded_on_open() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("old.sqlite");
+        {
+            let conn = open_db(&path).unwrap();
+            conn.execute("DROP INDEX idx_content_vectors_vector_key", [])
+                .unwrap();
+            conn.execute("ALTER TABLE content_vectors DROP COLUMN vector_key", [])
+                .unwrap();
+        }
+        let conn = open_db(&path).unwrap();
+        let has_column: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('content_vectors') \
+                 WHERE name = 'vector_key'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 1);
+    }
+
+    #[test]
+    fn key_ac_6_the_key_changes_with_each_input() {
+        let base = vector_key("llama", "m", 2048, "c");
+        assert_eq!(base, vector_key("llama", "m", 2048, "c"));
+        assert_ne!(base, vector_key("ort", "m", 2048, "c"));
+        assert_ne!(base, vector_key("llama", "n", 2048, "c"));
+        assert_ne!(base, vector_key("llama", "m", 512, "c"));
+        assert_ne!(base, vector_key("llama", "m", 2048, "d"));
     }
 
     fn tie_stub() -> StubBackend {

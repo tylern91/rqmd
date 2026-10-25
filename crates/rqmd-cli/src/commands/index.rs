@@ -292,8 +292,8 @@ fn checkpoint(
             &m.now,
         )
         .context("upsert vector meta")?;
-        db::set_vector_chunk_hash(&tx, &m.hash, m.seq, &m.chunk_hash)
-            .context("record chunk hash")?;
+        db::set_vector_identity(&tx, &m.hash, m.seq, &m.chunk_hash, &m.vector_key)
+            .context("record chunk identity")?;
     }
     // Persist the true historical high-water-mark next_vid, atomically with the metadata
     // above — unlike MAX(content_vectors.vid), this floor survives hard-deleted rows, so
@@ -302,6 +302,7 @@ fn checkpoint(
     // class).
     db::persist_next_vid_floor(&tx, next_vid).context("persist next_vid")?;
     tx.commit().context("commit vector metadata")?;
+    s.vectors_committed();
     Ok(())
 }
 
@@ -626,6 +627,8 @@ fn embed_collections(
     // vector at the current fingerprint, not only hashes with no vectors at all).
     if !rebuild {
         store::warn_if_fingerprint_stale(&s);
+        s.backfill_vector_keys()
+            .context("fill in reuse keys of stored vectors")?;
     }
 
     // Advisory: detect when the HNSW index is smaller than what the DB references.
@@ -2517,5 +2520,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(spared, 0);
+    }
+
+    fn unkeyed_vector_rows(index_dir: &Path) -> i64 {
+        rusqlite::Connection::open(index_dir.join("index.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM content_vectors WHERE vector_key IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn identical_chunks_in_two_documents_are_encoded_once_in_one_run() {
+        let a = sectioned_note(5, ORIGINAL_TAIL);
+        let b = sectioned_note(5, EDITED_TAIL);
+        let fx = EmbedFixture::new(&a);
+        fx.write("other.md", &b);
+        fx.update();
+        fx.embed();
+
+        let mut want: Vec<String> = chunk_texts("note.md", &a)
+            .union(&chunk_texts("other.md", &b))
+            .cloned()
+            .collect();
+        want.sort();
+        assert!(want.len() >= 4, "fixture must span several chunks");
+        assert_encoded_exactly(&fx.take_encoded(), &want);
+    }
+
+    #[test]
+    fn embed_gives_vectors_from_the_previous_release_a_reuse_key() {
+        let before = sectioned_note(5, ORIGINAL_TAIL);
+        let after = sectioned_note(5, EDITED_TAIL);
+        let fx = EmbedFixture::new(&before);
+        fx.update();
+        fx.embed();
+        fx.take_encoded();
+        rusqlite::Connection::open(fx.index_dir.path().join("index.sqlite"))
+            .unwrap()
+            .execute("UPDATE content_vectors SET vector_key = NULL", [])
+            .unwrap();
+        assert!(unkeyed_vector_rows(fx.index_dir.path()) > 0);
+
+        fx.write("other.md", &after);
+        fx.update();
+        fx.embed();
+
+        assert_eq!(unkeyed_vector_rows(fx.index_dir.path()), 0);
+        assert_encoded_exactly(
+            &fx.take_encoded(),
+            &changed_chunks("other.md", &before, &after),
+        );
     }
 }
