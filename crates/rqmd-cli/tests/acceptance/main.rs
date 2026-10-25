@@ -9,6 +9,7 @@ mod helpers;
 mod hook_signals;
 mod index_rebuild;
 mod output_plain;
+mod query_timeout;
 mod security;
 mod status_cost;
 mod update_skip;

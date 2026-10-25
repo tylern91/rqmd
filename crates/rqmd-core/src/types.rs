@@ -87,6 +87,8 @@ pub enum RerankStatus {
     Unsupported,
     /// The rerank model failed or returned unusable scores; results are in fusion order.
     Failed,
+    /// The deadline passed before or during reranking; results are in fusion order.
+    DeadlineExpired,
 }
 
 impl RerankStatus {
@@ -101,6 +103,10 @@ impl RerankStatus {
             ),
             Self::Failed => Some(
                 "results were not reranked: the rerank model failed, so they are in keyword \
+                 and vector fusion order",
+            ),
+            Self::DeadlineExpired => Some(
+                "results were not reranked: the time limit was reached, so they are in keyword \
                  and vector fusion order",
             ),
             Self::Reranked | Self::NotRun => None,

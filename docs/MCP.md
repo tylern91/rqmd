@@ -110,9 +110,15 @@ for each other; they no longer delay `search`, `get` or `status`.
 
 A `query` call is also bounded by `RQMD_MCP_TOOL_TIMEOUT_SECS` (default 120): once the call
 holds the model store, it returns a `timed out after …` error as soon as the deadline has
-passed at the next stage boundary (before expansion, each expanded sub-query, or rerank). A
-model call already running is not interrupted, so a call can overrun by one stage. The other
-tools are single index lookups and have no such bound.
+passed at the next stage boundary (before expansion, each expanded sub-query, or embedding the
+query). A model call already running is not interrupted, so a call can overrun by one stage. The
+other tools are single index lookups and have no such bound.
+
+Once `query` has its fused results, the deadline no longer makes it fail: if it passes before
+reranking starts, or while candidates are being reranked, `query` returns the results in fusion
+order and ends the text with one `Note:` line saying they were not reranked. Pass
+`strict_timeout: true` to get the `timed out after …` error instead for a deadline that passes
+before reranking starts; a rerank already running is not interrupted.
 
 If the rerank model fails, returns an unusable score list, or the active backend cannot rerank,
 `query` still returns its results in fusion order and ends the text with one `Note:` line saying
@@ -133,6 +139,7 @@ Exact input fields per tool, as accepted by the JSON-RPC tool call
 | | `offset` | `number`, optional | Results to skip, for the next page. Default 0, capped at 1000 |
 | | `rerank` | `boolean`, optional | Default `true` |
 | | `expand` | `boolean`, optional | Default `true` |
+| | `strict_timeout` | `boolean`, optional | Default `false`: a tool timeout that passes before reranking returns the results in fusion order with a note. `true`: it returns a `timed out` error instead |
 | `search` | `query` | `string` (required) | BM25-only search text |
 | | `collections` | `string[]`, optional | Scope to these collections |
 | | `limit` | `number`, optional | Default 10 |

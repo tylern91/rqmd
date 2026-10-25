@@ -45,17 +45,23 @@ pub struct QueryOptions<'a> {
     pub full: bool,
     pub no_expand: bool,
     pub timeout: Option<Duration>,
+    /// Fail with exit 124 when `timeout` passes before reranking, instead of
+    /// returning the results in fusion order.
+    pub timeout_strict: bool,
 }
 
 /// Stderr line for a query whose results were not reranked although reranking
 /// was expected. Plain text, so it reads the same under `NO_COLOR` and
 /// `TERM=dumb`, and stdout stays machine-parseable.
-fn rerank_warning(status: RerankStatus) -> Option<String> {
+fn rerank_warning(status: RerankStatus, timeout: Option<Duration>) -> Option<String> {
     let notice = status.notice()?;
-    let hint = if status == RerankStatus::Failed {
-        " (set RUST_LOG=warn for details)"
-    } else {
-        ""
+    let hint = match (status, timeout) {
+        (RerankStatus::Failed, _) => " (set RUST_LOG=warn for details)".to_string(),
+        (RerankStatus::DeadlineExpired, Some(limit)) => format!(
+            " (--timeout of {}s; add --timeout-strict to exit 124 instead)",
+            limit.as_secs()
+        ),
+        _ => String::new(),
     };
     Some(format!("rqmd: warning: {notice}{hint}"))
 }
@@ -72,8 +78,9 @@ pub fn run_query(index_dir: &Path, query: &str, opts: QueryOptions) -> Result<()
             opts.no_rerank,
             opts.no_expand,
             deadline,
+            opts.timeout_strict,
         )?;
-        if let Some(line) = rerank_warning(outcome.rerank) {
+        if let Some(line) = rerank_warning(outcome.rerank, opts.timeout) {
             eprintln!("{line}");
         }
         Ok(outcome.results)
@@ -112,12 +119,25 @@ mod tests {
 
     #[test]
     fn rerank_warning_is_one_plain_line_only_for_degraded_runs() {
-        assert_eq!(rerank_warning(RerankStatus::Reranked), None);
-        assert_eq!(rerank_warning(RerankStatus::NotRun), None);
-        for status in [RerankStatus::Unsupported, RerankStatus::Failed] {
-            let line = rerank_warning(status).expect("warning");
+        let limit = Some(Duration::from_secs(7));
+        assert_eq!(rerank_warning(RerankStatus::Reranked, limit), None);
+        assert_eq!(rerank_warning(RerankStatus::NotRun, limit), None);
+        for status in [
+            RerankStatus::Unsupported,
+            RerankStatus::Failed,
+            RerankStatus::DeadlineExpired,
+        ] {
+            let line = rerank_warning(status, limit).expect("warning");
             assert!(line.starts_with("rqmd: warning: results were not reranked"));
             assert!(!line.contains('\n') && !line.contains('\x1b'), "{line:?}");
         }
+    }
+
+    #[test]
+    fn deadline_warning_names_the_timeout_and_the_strict_flag() {
+        let line = rerank_warning(RerankStatus::DeadlineExpired, Some(Duration::from_secs(7)))
+            .expect("warning");
+        assert!(line.contains("--timeout of 7s"), "{line}");
+        assert!(line.contains("--timeout-strict"), "{line}");
     }
 }

@@ -68,8 +68,14 @@ enum Commands {
         no_expand: bool,
         /// Give up after this many seconds (exit 124). Checked between stages — a model
         /// call already running is not interrupted — and starts once the index is open.
+        /// Once results exist, running out of time during reranking returns them in
+        /// fusion order with a note on stderr and exit 0 (see --timeout-strict).
         #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..))]
         timeout: Option<u64>,
+        /// With --timeout: exit 124 when time runs out before reranking, instead of
+        /// returning the results in fusion order.
+        #[arg(long, requires = "timeout")]
+        timeout_strict: bool,
     },
     /// Full-text keyword search (BM25 only, no LLM)
     Search {
@@ -364,6 +370,7 @@ fn run() -> Result<()> {
             intent,
             no_expand,
             timeout,
+            timeout_strict,
         } => commands::query::run_query(
             &index_dir,
             &query,
@@ -376,6 +383,7 @@ fn run() -> Result<()> {
                 full: scope.full,
                 no_expand,
                 timeout: timeout.map(std::time::Duration::from_secs),
+                timeout_strict,
             },
         ),
         Commands::Search { query, scope } => commands::query::run_search(

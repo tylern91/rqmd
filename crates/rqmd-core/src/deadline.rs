@@ -31,6 +31,12 @@ impl Deadline {
             _ => Ok(()),
         }
     }
+
+    /// Whether the limit has passed, for a caller that stops early instead of
+    /// failing.
+    pub fn is_expired(&self) -> bool {
+        self.limit.is_some_and(|(at, _)| Instant::now() >= at)
+    }
 }
 
 /// The deadline passed before `stage` could start.
@@ -83,5 +89,12 @@ mod tests {
     #[test]
     fn unexpired_deadline_passes() {
         assert!(Deadline::after(Duration::from_secs(60)).check("x").is_ok());
+    }
+
+    #[test]
+    fn is_expired_follows_the_limit() {
+        assert!(!Deadline::none().is_expired());
+        assert!(!Deadline::after(Duration::from_secs(60)).is_expired());
+        assert!(Deadline::after(Duration::ZERO).is_expired());
     }
 }

@@ -210,6 +210,21 @@ pub trait InferenceBackend: Send {
     /// Higher = more relevant. Scores are NOT normalized across pairs.
     fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>>;
 
+    /// [`Self::rerank`] that gives up with `Ok(None)` once `expired` returns
+    /// true. Default: one check before the call; a backend that scores pairs
+    /// one at a time should check between pairs.
+    fn rerank_until(
+        &mut self,
+        query: &str,
+        docs: &[&str],
+        expired: &dyn Fn() -> bool,
+    ) -> Result<Option<Vec<f32>>> {
+        if expired() {
+            return Ok(None);
+        }
+        self.rerank(query, docs).map(Some)
+    }
+
     /// Generate free-form text from a prompt. Returns the generated string.
     /// The caller is responsible for parsing the output (e.g. stripping lex:/vec:/hyde: lines).
     fn generate(&mut self, prompt: &str) -> Result<String>;
@@ -1044,9 +1059,22 @@ impl InferenceBackend for LlamaCppBackend {
     }
 
     fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>> {
+        self.rerank_until(query, docs, &|| false)?
+            .context("rerank stopped early")
+    }
+
+    fn rerank_until(
+        &mut self,
+        query: &str,
+        docs: &[&str],
+        expired: &dyn Fn() -> bool,
+    ) -> Result<Option<Vec<f32>>> {
         self.ensure_rerank()?;
         let mut scores = Vec::with_capacity(docs.len());
         for doc in docs {
+            if expired() {
+                return Ok(None);
+            }
             // Fresh context per pair — KV cache holds positions 0..n for seq_id=0;
             // next batch at position 0 fails with "positions not consecutive".
             let mut ctx = self
@@ -1081,7 +1109,7 @@ impl InferenceBackend for LlamaCppBackend {
             let score_slice = ctx.embeddings_seq_ith(0).context("rerank score extract")?;
             scores.push(score_slice.first().copied().unwrap_or(f32::NEG_INFINITY));
         }
-        Ok(scores)
+        Ok(Some(scores))
     }
 
     fn generate(&mut self, prompt: &str) -> Result<String> {
@@ -1333,6 +1361,52 @@ pub fn create_backend(kind: &BackendKind) -> Result<Box<dyn InferenceBackend>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Backend that records `rerank` calls and keeps the trait's default
+    /// `rerank_until`.
+    struct CountingRerank(usize);
+
+    impl InferenceBackend for CountingRerank {
+        fn embed(&mut self, _text: &str) -> Result<Vec<f32>> {
+            unreachable!()
+        }
+        fn rerank(&mut self, _query: &str, docs: &[&str]) -> Result<Vec<f32>> {
+            self.0 += 1;
+            Ok(vec![1.0; docs.len()])
+        }
+        fn generate(&mut self, _prompt: &str) -> Result<String> {
+            unreachable!()
+        }
+        fn embed_model_name(&self) -> &str {
+            "counting"
+        }
+        fn rerank_model_name(&self) -> &str {
+            "counting"
+        }
+        fn generate_model_name(&self) -> &str {
+            "counting"
+        }
+    }
+
+    #[test]
+    fn default_rerank_until_skips_the_model_once_expired() {
+        let mut backend = CountingRerank(0);
+        assert_eq!(
+            backend.rerank_until("q", &["a", "b"], &|| true).unwrap(),
+            None
+        );
+        assert_eq!(backend.0, 0);
+    }
+
+    #[test]
+    fn default_rerank_until_reranks_while_time_remains() {
+        let mut backend = CountingRerank(0);
+        assert_eq!(
+            backend.rerank_until("q", &["a", "b"], &|| false).unwrap(),
+            Some(vec![1.0, 1.0])
+        );
+        assert_eq!(backend.0, 1);
+    }
 
     use std::cell::RefCell;
 

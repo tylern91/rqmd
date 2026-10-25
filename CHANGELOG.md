@@ -32,6 +32,13 @@
 - `rqmd doctor`, `rqmd collection list`, `rqmd collection show`, `rqmd ls` and the MCP `status`
   tool count a collection's documents with `COUNT(*)` instead of loading every document row.
   The numbers shown are unchanged.
+- `rqmd query --timeout` and the MCP tool timeout no longer discard results that already exist. If
+  the deadline passes before reranking starts, or while it runs, `rqmd query` prints the results in
+  fusion order, exits `0` and writes one `rqmd: warning: results were not reranked` line to stderr,
+  and the MCP `query` result ends with one `Note:` line. Before, a deadline that passed before
+  reranking failed (exit `124`, a `timed out` error). Pass `--timeout-strict` (CLI, requires `--timeout`) or `strict_timeout: true`
+  (MCP, a new optional `query` input field) to keep the old failure for a deadline that passes
+  before reranking. A deadline that passes before the first results exist still exits `124`.
 
 ### Fixed
 - Output is plain text when it is not a terminal. Before, `status`, `update`, `embed`, `doctor` and
