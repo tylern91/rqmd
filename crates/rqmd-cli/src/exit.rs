@@ -15,7 +15,7 @@ pub const EXIT_TIMEOUT: u8 = 124;
 
 /// Added to a signal number for the exit code of a run it stopped (`128 + n`,
 /// as a shell reports it: 130 for SIGINT, 143 for SIGTERM, 129 for SIGHUP).
-const EXIT_SIGNAL_BASE: u8 = 128;
+pub const EXIT_SIGNAL_BASE: u8 = 128;
 
 /// The run was stopped by a signal it caught.
 #[derive(Debug)]

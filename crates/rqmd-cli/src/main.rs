@@ -8,6 +8,7 @@ mod exclusions;
 mod exit;
 mod format;
 mod hook;
+mod signals;
 mod store;
 
 /// rqmd — hybrid local document search

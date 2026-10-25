@@ -37,3 +37,7 @@ exclusion_visibility	4	6a647307bbec8f4eff68af4b90ffa561d3dbf32f	2026-10-25
 exclusion_visibility	5	6a647307bbec8f4eff68af4b90ffa561d3dbf32f	2026-10-25
 exclusion_visibility	6	6a647307bbec8f4eff68af4b90ffa561d3dbf32f	2026-10-25
 exclusion_visibility	7	6a647307bbec8f4eff68af4b90ffa561d3dbf32f	2026-10-25
+graceful_interrupt	1	91003b5557c50c2bda83c8c55e6318166d96a0b6	2026-10-25
+graceful_interrupt	2	91003b5557c50c2bda83c8c55e6318166d96a0b6	2026-10-25
+graceful_interrupt	3	91003b5557c50c2bda83c8c55e6318166d96a0b6	2026-10-25
+graceful_interrupt	4	91003b5557c50c2bda83c8c55e6318166d96a0b6	2026-10-25

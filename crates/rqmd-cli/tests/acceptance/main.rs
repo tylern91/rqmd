@@ -4,6 +4,7 @@
 mod collection;
 mod embed_reuse;
 mod exclusion_visibility;
+mod graceful_interrupt;
 mod helpers;
 mod hook_signals;
 mod index_rebuild;

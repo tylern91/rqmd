@@ -12,7 +12,7 @@ use rqmd_core::{
 
 use crate::exit::{Interrupted, PartialFailure};
 use crate::hook::{self, HookConfig, HookOutcome};
-use crate::{document, exclusions, format as fmt, store};
+use crate::{document, exclusions, format as fmt, signals, store};
 
 pub fn run_status(index_dir: &Path) -> Result<()> {
     let s = store::open_store_no_backend(index_dir, true)?;
@@ -398,6 +398,8 @@ enum EmbedFlow {
     Continue,
     Abort,
     TimedOut(TimedOut),
+    /// A signal asked the run to stop; carries its number.
+    Interrupted(i32),
 }
 
 /// Embed `docs` in order. A document whose embedding fails is recorded in
@@ -407,18 +409,23 @@ enum EmbedFlow {
 /// this document already covers them. Returns [`EmbedFlow::Abort`] once
 /// [`MAX_CONSECUTIVE_EMBED_FAILURES`] documents fail in a row, and
 /// [`EmbedFlow::TimedOut`] when `deadline` passes before the next document
-/// starts. Errors from the index itself (not from embedding) are returned as
-/// `Err`.
+/// starts, and [`EmbedFlow::Interrupted`] when `interrupted` reports a signal
+/// before the next document starts, so the document in hand always finishes.
+/// Errors from the index itself (not from embedding) are returned as `Err`.
 fn embed_docs(
     s: &mut rqmd_core::Store,
     run: &mut EmbedRun,
     docs: &[&Document],
     deadline: Deadline,
+    interrupted: &dyn Fn() -> Option<i32>,
     mut on_progress: impl FnMut(usize, usize, usize),
 ) -> Result<EmbedFlow> {
     let mut done = 0usize;
     let mut bytes_processed = 0usize;
     for doc in docs {
+        if let Some(signal) = interrupted() {
+            return Ok(EmbedFlow::Interrupted(signal));
+        }
         if let Err(timed_out) = deadline.check("the next document") {
             return Ok(EmbedFlow::TimedOut(timed_out));
         }
@@ -464,6 +471,8 @@ fn embed_docs(
     Ok(EmbedFlow::Continue)
 }
 
+const EMBED_RESUME_HINT: &str = "Embedded work so far was saved; rerun `rqmd embed` to resume.";
+
 /// Print the skipped documents and turn how the run ended into its exit status.
 fn finish_embed(run: &EmbedRun, flow: &EmbedFlow) -> Result<()> {
     if !run.failures.is_empty() {
@@ -487,8 +496,12 @@ fn finish_embed(run: &EmbedRun, flow: &EmbedFlow) -> Result<()> {
              (likely a model or GPU problem); embedded work was saved — fix the cause and rerun to resume"
         ),
         EmbedFlow::TimedOut(timed_out) => {
-            eprintln!("Embedded work so far was saved; rerun `rqmd embed` to resume.");
+            eprintln!("{EMBED_RESUME_HINT}");
             Err((*timed_out).into())
+        }
+        EmbedFlow::Interrupted(signal) => {
+            eprintln!("{EMBED_RESUME_HINT}");
+            Err(Interrupted(*signal).into())
         }
         EmbedFlow::Continue if run.failures.is_empty() => Ok(()),
         EmbedFlow::Continue => Err(PartialFailure(format!(
@@ -508,6 +521,8 @@ pub fn run_embed(
     // Held for the whole command: `Store::open`'s next_vid floor and the
     // HNSW file are both unguarded against a second concurrent writer.
     let lock = IndexLock::acquire(index_dir)?;
+    // A signal stops the embed loop after the document in hand; a second ends the process.
+    let _catch = signals::Catch::install_exiting_on_repeat();
 
     let cols = {
         let s = store::open_store_no_backend(index_dir, true)?;
@@ -677,21 +692,28 @@ fn embed_collections(
         }
 
         let todo: Vec<&Document> = todo_indices.iter().map(|i| &docs[*i]).collect();
-        let flow = embed_docs(&mut s, &mut run, &todo, deadline, |done, bytes, chunks| {
-            lock.heartbeat();
-            if progress.is_active() {
-                let line = render_embed_progress_line(
-                    done,
-                    todo_total,
-                    chunks,
-                    bytes,
-                    start.elapsed().as_secs_f64(),
-                    fmt::Paint::stderr(),
-                    progress.is_plain(),
-                );
-                progress.show(&line, done, todo_total);
-            }
-        })?;
+        let flow = embed_docs(
+            &mut s,
+            &mut run,
+            &todo,
+            deadline,
+            &signals::pending,
+            |done, bytes, chunks| {
+                lock.heartbeat();
+                if progress.is_active() {
+                    let line = render_embed_progress_line(
+                        done,
+                        todo_total,
+                        chunks,
+                        bytes,
+                        start.elapsed().as_secs_f64(),
+                        fmt::Paint::stderr(),
+                        progress.is_plain(),
+                    );
+                    progress.show(&line, done, todo_total);
+                }
+            },
+        )?;
         if flow != EmbedFlow::Continue {
             end = flow;
             break;
@@ -718,9 +740,13 @@ fn embed_collections(
     // Summary — matches qmd's "✓ Done!" line (qmd.ts:1938).
     let elapsed = fmt::format_eta(start.elapsed().as_secs_f64());
     let p = fmt::Paint::stdout();
+    let headline = if matches!(end, EmbedFlow::Interrupted(_)) {
+        p.yellow("Interrupted.")
+    } else {
+        p.green("✓ Done!")
+    };
     println!(
-        "\n{} Embedded {} chunks from {} documents in {}",
-        p.green("✓ Done!"),
+        "\n{headline} Embedded {} chunks from {} documents in {}",
         p.bold(run.new_chunks),
         p.bold(run.new_docs),
         p.bold(&elapsed)
@@ -802,6 +828,8 @@ fn run_update_with(
     // mid-way through a concurrent `embed`'s snapshot is a separate hazard
     // from the vid race, but the two commands never need to run at once.
     let lock = IndexLock::acquire(index_dir)?;
+    // A signal stops the walk after the file in hand; a second ends the process.
+    let _catch = signals::Catch::install_exiting_on_repeat();
 
     // Re-walk each collection's directory and re-index changed files.
     let cols = {
@@ -848,6 +876,9 @@ fn run_update_with(
     let mut hook_failures: Vec<(String, String)> = Vec::new();
 
     for (ci, col) in cols.iter().enumerate() {
+        if let Some(signal) = signals::pending() {
+            return Err(stopped_by_signal(signal));
+        }
         // Per-collection header: [i/n] name (pattern)
         println!(
             "{} {} {}",
@@ -866,7 +897,11 @@ fn run_update_with(
                 hook_config,
             },
             &|| lock.heartbeat(),
+            &signals::pending,
         )?;
+        if let Some(signal) = outcome.interrupted {
+            return Err(stopped_by_signal(signal));
+        }
         all_collections_clean &= outcome.clean;
         if let Some(reason) = outcome.hook_failure {
             hook_failures.push((col.name.clone(), reason));
@@ -930,12 +965,21 @@ fn run_update_with(
     .into())
 }
 
+/// The resume hint, then the error that maps to the signal's exit code. What
+/// was indexed so far is already saved, and a rerun skips it by stat.
+fn stopped_by_signal(signal: i32) -> anyhow::Error {
+    eprintln!("Progress was saved; rerun `rqmd update` to continue.");
+    Interrupted(signal).into()
+}
+
 /// What `update_one_collection` reports back to `run_update`.
 struct CollectionOutcome {
     /// The collection was fully walked and every file indexed without error.
     clean: bool,
     /// Why the collection's update hook failed or timed out, if it did.
     hook_failure: Option<String>,
+    /// The signal that stopped this collection's update before it finished.
+    interrupted: Option<i32>,
 }
 
 /// Re-walk one collection's directory, run its update hook, re-index changed
@@ -945,7 +989,9 @@ struct CollectionOutcome {
 /// collection was skipped or any file failed to index — the caller uses this
 /// to decide whether the run is clean enough to certify the raw-split backfill.
 /// A failing or timed-out hook never stops the walk; it is reported in
-/// `hook_failure`.
+/// `hook_failure`. When `interrupted` reports a signal the walk stops before
+/// the next file, what was indexed is flushed, nothing is pruned, and the
+/// signal is returned in `interrupted`.
 ///
 /// `hooks_allowed` gates `col.update_command`: a project-local `.rqmd/` index
 /// (picked up implicitly from the current directory) can belong to a repo the
@@ -965,6 +1011,7 @@ fn update_one_collection(
     col: &Collection,
     run: UpdateRun,
     heartbeat: &dyn Fn(),
+    interrupted: &dyn Fn() -> Option<i32>,
 ) -> Result<CollectionOutcome> {
     let UpdateRun {
         progress_mode,
@@ -979,6 +1026,7 @@ fn update_one_collection(
         return Ok(CollectionOutcome {
             clean: false,
             hook_failure: None,
+            interrupted: None,
         });
     }
 
@@ -1001,7 +1049,13 @@ fn update_one_collection(
                     "timed out after {}s and was killed",
                     limit.as_secs()
                 )),
-                HookOutcome::Interrupted(signal) => return Err(Interrupted(signal).into()),
+                HookOutcome::Interrupted(signal) => {
+                    return Ok(CollectionOutcome {
+                        clean: false,
+                        hook_failure: None,
+                        interrupted: Some(signal),
+                    });
+                }
             };
             if let Some(reason) = &hook_failure {
                 eprintln!("  WARN: update hook {reason}");
@@ -1019,6 +1073,7 @@ fn update_one_collection(
             return Ok(CollectionOutcome {
                 clean: false,
                 hook_failure,
+                interrupted: None,
             });
         }
     };
@@ -1036,6 +1091,7 @@ fn update_one_collection(
     let mut processed = 0usize;
     let mut skips = document::SkipCounts::default();
     let mut clean = true;
+    let mut stopped_by = None;
 
     // Pre-collect matching paths so we know the total before indexing begins,
     // enabling "Indexing: N/total" progress (matching qmd's output). Reuses the
@@ -1075,6 +1131,10 @@ fn update_one_collection(
 
     for path in &files {
         heartbeat();
+        if let Some(signal) = interrupted() {
+            stopped_by = Some(signal);
+            break;
+        }
         let stat = document::stat_file(path);
         if let Some(stat) = stat
             && stat_cache.get(&document::rel_path_of(path, dir)) == Some(&stat)
@@ -1134,7 +1194,7 @@ fn update_one_collection(
     // *present* and must not be soft-deleted just because this pass couldn't
     // read it. Skipped entirely when the mask matched 0 files (warned above) —
     // a config/mount glitch must never read as "delete everything".
-    let removed_count = if total > 0 {
+    let removed_count = if total > 0 && stopped_by.is_none() {
         let present_paths: HashSet<String> = files
             .iter()
             .map(|p| {
@@ -1162,6 +1222,17 @@ fn update_one_collection(
 
     progress.clear();
 
+    if stopped_by.is_some() {
+        println!(
+            "\nStopped after {processed} of {total} file(s): {new_count} new, {updated_count} updated, {unchanged_count} unchanged"
+        );
+        return Ok(CollectionOutcome {
+            clean: false,
+            hook_failure,
+            interrupted: stopped_by,
+        });
+    }
+
     // Summary line: the counts, an honest skip-reason breakdown instead of silently
     // dropping unreadable files, then the folders the built-in rule left out.
     let skip_suffix = if skips.total() > 0 {
@@ -1178,6 +1249,7 @@ fn update_one_collection(
     Ok(CollectionOutcome {
         clean,
         hook_failure,
+        interrupted: None,
     })
 }
 
@@ -1447,8 +1519,8 @@ mod tests {
         db::upsert_collection(&s.db, &coll_col).unwrap();
 
         // Initial walk indexes both collections' files as active documents.
-        update_one_collection(&mut s, &keep_col, TEST_RUN, &|| {}).unwrap();
-        update_one_collection(&mut s, &coll_col, TEST_RUN, &|| {}).unwrap();
+        update_one_collection(&mut s, &keep_col, TEST_RUN, &|| {}, &|| None).unwrap();
+        update_one_collection(&mut s, &coll_col, TEST_RUN, &|| {}, &|| None).unwrap();
 
         let shared_hash =
             db::hashes_for_paths(&s.db, "keep", &["shared.md".to_string()]).unwrap()[0].clone();
@@ -1471,7 +1543,7 @@ mod tests {
         // and "keep" still references shared_hash, so only unique_hash
         // should be reclaimed.
         std::fs::remove_file(coll_src.path().join("unique.md")).unwrap();
-        update_one_collection(&mut s, &coll_col, TEST_RUN, &|| {}).unwrap();
+        update_one_collection(&mut s, &coll_col, TEST_RUN, &|| {}, &|| None).unwrap();
         s.reclaim_orphaned_vectors().unwrap();
 
         assert!(
@@ -1481,6 +1553,55 @@ mod tests {
         assert!(
             !db::hash_has_any_vector(&s.db, &unique_hash),
             "unique_hash's vector must be reclaimed — no active document references it anymore"
+        );
+    }
+
+    /// A signal that lands while a file is being indexed lets that file finish,
+    /// stops the walk before the next one, and prunes nothing: the files that
+    /// are gone from disk are left for the rerun.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_stops_the_walk_before_the_next_file_and_prunes_nothing() {
+        let _catch = signals::Catch::install_exiting_on_repeat();
+        let index_dir = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("gone.md"), "soon deleted").unwrap();
+        let col = test_collection("c", src.path());
+        let mut s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+        db::upsert_collection(&s.db, &col).unwrap();
+        update_one_collection(&mut s, &col, TEST_RUN, &|| {}, &|| None).unwrap();
+
+        std::fs::remove_file(src.path().join("gone.md")).unwrap();
+        for i in 0..5 {
+            std::fs::write(src.path().join(format!("note{i}.md")), format!("body {i}")).unwrap();
+        }
+        let files_seen = std::cell::Cell::new(0);
+        let heartbeat = || {
+            files_seen.set(files_seen.get() + 1);
+            if files_seen.get() == 3 {
+                // SAFETY: plain syscall; the handler under test only records it.
+                unsafe { libc::raise(libc::SIGTERM) };
+            }
+        };
+
+        let outcome =
+            update_one_collection(&mut s, &col, TEST_RUN, &heartbeat, &signals::pending).unwrap();
+
+        assert_eq!(outcome.interrupted, Some(libc::SIGTERM));
+        assert!(!outcome.clean);
+        let paths: HashSet<String> = db::list_documents(&s.db, Some("c"))
+            .unwrap()
+            .into_iter()
+            .map(|d| d.path)
+            .collect();
+        assert_eq!(
+            paths.len(),
+            3,
+            "two notes before the signal, and gone.md: {paths:?}"
+        );
+        assert!(
+            paths.contains("gone.md"),
+            "nothing is pruned after a signal"
         );
     }
 
@@ -1612,11 +1733,21 @@ mod tests {
         /// Embedding any text containing this marker fails.
         fail_on: Option<&'static str>,
         delay: Duration,
+        /// Raise this signal on this process during the n-th embed call (1-based).
+        signal_on_call: Option<(usize, i32)>,
+        calls: usize,
     }
 
     impl rqmd_llm::InferenceBackend for TestBackend {
         fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
             std::thread::sleep(self.delay);
+            self.calls += 1;
+            if let Some((call, signal)) = self.signal_on_call
+                && call == self.calls
+            {
+                // SAFETY: plain syscall; the handler under test only records it.
+                unsafe { libc::raise(signal) };
+            }
             if self.fail_on.is_some_and(|marker| text.contains(marker)) {
                 anyhow::bail!("injected embed failure");
             }
@@ -1652,6 +1783,8 @@ mod tests {
                 model,
                 fail_on,
                 delay: Duration::ZERO,
+                signal_on_call: None,
+                calls: 0,
             }),
         )
         .unwrap()
@@ -1689,9 +1822,26 @@ mod tests {
         docs: &[Document],
         interval: usize,
     ) -> (EmbedRun, EmbedFlow) {
+        run_embed_docs_until(s, docs, interval, &|| None)
+    }
+
+    fn run_embed_docs_until(
+        s: &mut rqmd_core::Store,
+        docs: &[Document],
+        interval: usize,
+        interrupted: &dyn Fn() -> Option<i32>,
+    ) -> (EmbedRun, EmbedFlow) {
         let mut run = EmbedRun::new(interval);
         let refs: Vec<&Document> = docs.iter().collect();
-        let flow = embed_docs(s, &mut run, &refs, Deadline::none(), |_, _, _| {}).unwrap();
+        let flow = embed_docs(
+            s,
+            &mut run,
+            &refs,
+            Deadline::none(),
+            interrupted,
+            |_, _, _| {},
+        )
+        .unwrap();
         checkpoint(s, &mut run.pending, &mut run.pending_deletes).unwrap();
         (run, flow)
     }
@@ -1784,6 +1934,8 @@ mod tests {
                 model: "m",
                 fail_on: None,
                 delay: Duration::from_millis(200),
+                signal_on_call: None,
+                calls: 0,
             }),
         )
         .unwrap();
@@ -1796,6 +1948,7 @@ mod tests {
             &mut run,
             &refs,
             Deadline::after(Duration::from_millis(100)),
+            &|| None,
             |_, _, _| {},
         )
         .unwrap();
@@ -1808,6 +1961,44 @@ mod tests {
 
         let end = finish_embed(&run, &flow).unwrap_err();
         assert!(end.downcast_ref::<TimedOut>().is_some());
+    }
+
+    fn signalling_store(dir: &Path, signal_on_call: (usize, i32)) -> rqmd_core::Store {
+        rqmd_core::Store::open(
+            store::store_config(dir, false),
+            Box::new(TestBackend {
+                model: "m",
+                fail_on: None,
+                delay: Duration::ZERO,
+                signal_on_call: Some(signal_on_call),
+                calls: 0,
+            }),
+        )
+        .unwrap()
+    }
+
+    /// A signal that lands while a document is embedding lets that document
+    /// finish and checkpoint, then stops before the next one.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_during_a_document_lets_it_finish_then_stops_with_its_work_saved() {
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            let _catch = signals::Catch::install_exiting_on_repeat();
+            let dir = tempfile::tempdir().unwrap();
+            let mut s = signalling_store(dir.path(), (2, signal));
+            let docs = seed_docs(&mut s, &["one", "two", "three", "four", "five"]);
+
+            let (run, flow) = run_embed_docs_until(&mut s, &docs, 50, &signals::pending);
+
+            assert_eq!(flow, EmbedFlow::Interrupted(signal));
+            assert_eq!(run.new_docs, 2, "the document being embedded finishes");
+            assert!(db::hash_has_any_vector(&s.db, &docs[0].hash));
+            assert!(db::hash_has_any_vector(&s.db, &docs[1].hash));
+            assert!(!db::hash_has_any_vector(&s.db, &docs[2].hash));
+
+            let end = finish_embed(&run, &flow).unwrap_err();
+            assert_eq!(end.downcast_ref::<Interrupted>().map(|i| i.0), Some(signal));
+        }
     }
 
     #[test]
