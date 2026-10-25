@@ -40,6 +40,9 @@
   Until then `rqmd doctor` does not count them as orphaned, and `rqmd embed --cleanup` leaves them
   alone. `documents.prev_hash` is added automatically, in place; no re-embed is needed and the
   embedding fingerprint is unchanged.
+- `rqmd mcp --http` now closes open event streams when it receives SIGTERM or Ctrl-C. A client
+  holding a `GET /mcp` stream open used to keep the process alive, so `rqmd mcp stop` could give
+  up after its 5 s wait and leave the pidfile behind.
 
 ## [0.29.0] - 2026-10-25
 

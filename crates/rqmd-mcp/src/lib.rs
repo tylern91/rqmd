@@ -14,6 +14,7 @@ use axum::{
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -247,7 +248,27 @@ pub async fn run_http(
         allowed_hosts.push(host_entry);
     }
 
+    let addr = host_port(host, port);
+    eprintln!("RQMD MCP server listening on http://{addr}/mcp");
+    eprintln!("Health endpoint:            http://{addr}/health");
+
+    let listener = tokio::net::TcpListener::bind((bare_host(host), port)).await?;
+    on_bound()?;
+    serve_http(listener, server, allowed_hosts, port, shutdown_signal()).await
+}
+
+/// Serve on an already-bound listener until `shutdown` completes. Cancelling
+/// the transport's token then ends every open SSE stream, so graceful
+/// shutdown does not wait on a client that never disconnects.
+async fn serve_http(
+    listener: tokio::net::TcpListener,
+    server: RqmdServer,
+    allowed_hosts: Vec<String>,
+    port: u16,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let config = http_server_config(&allowed_hosts, port);
+    let streams = config.cancellation_token.clone();
 
     let pid = std::process::id();
     let index_dir = server.index_dir().to_string_lossy().to_string();
@@ -258,15 +279,12 @@ pub async fn run_http(
         config,
     );
 
-    let addr = host_port(host, port);
-    eprintln!("RQMD MCP server listening on http://{addr}/mcp");
-    eprintln!("Health endpoint:            http://{addr}/health");
-
     let router = build_router(service, allowed_hosts, pid, index_dir);
-    let listener = tokio::net::TcpListener::bind((bare_host(host), port)).await?;
-    on_bound()?;
     axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            streams.cancel();
+        })
         .await?;
     Ok(())
 }

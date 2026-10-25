@@ -313,3 +313,71 @@ async fn http2_prior_knowledge_requests_are_served() {
     assert_eq!(init.status(), 200);
     assert!(init.headers().contains_key("mcp-session-id"));
 }
+
+#[tokio::test]
+async fn shutdown_completes_while_a_client_holds_a_stream_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = RqmdServer::new(dir.path().to_path_buf()).unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let allowed_hosts = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let serving = tokio::spawn(serve_http(listener, server, allowed_hosts, port, async {
+        let _ = stopped.await;
+    }));
+
+    let http = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let init = http
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .body(initialize_request(1).to_string())
+        .send()
+        .await
+        .unwrap();
+    let session = init.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    init.text().await.unwrap();
+    let notified = http
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("Mcp-Session-Id", &session)
+        .header("MCP-Protocol-Version", "2025-06-18")
+        .body(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(notified.status(), 202);
+
+    let stream = http
+        .get(&url)
+        .header("Accept", "text/event-stream")
+        .header("Mcp-Session-Id", &session)
+        .header("MCP-Protocol-Version", "2025-06-18")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), 200);
+    // The first event proves the stream is established and still open.
+    let mut stream = stream;
+    let first = stream.chunk().await.unwrap();
+    assert!(first.is_some(), "the stream closed before shutdown");
+
+    stop.send(()).unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), serving).await;
+    assert!(
+        outcome.is_ok(),
+        "the server was still running 5s after shutdown with a stream open"
+    );
+    assert!(outcome.unwrap().unwrap().is_ok());
+    assert!(
+        stream.chunk().await.unwrap().is_none(),
+        "the stream outlived the server"
+    );
+}
