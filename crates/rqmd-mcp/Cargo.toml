@@ -32,4 +32,4 @@ tower-http = { version = "0.6", features = ["limit"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["http2"] }
