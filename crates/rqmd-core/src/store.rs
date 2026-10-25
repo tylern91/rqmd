@@ -676,58 +676,76 @@ impl Store {
     /// Every full-text entry that no active document accounts for is removed
     /// first, which covers the old name's entries and any left by an earlier
     /// rename; the renamed collection's documents are then indexed again under
-    /// the new name. The SQLite changes commit only after the full-text writes
-    /// are staged; call this from a writer that holds the index lock.
+    /// the new name. A full-text delete matches a token phrase, so it can also
+    /// hit a longer live path in another collection (`proj/docs/a.md` for
+    /// `docs/a.md`); those entries are written back. All deletes are staged
+    /// before any insert. The SQLite changes commit only after the full-text
+    /// writes are staged; call this from a writer that holds the index lock.
     pub fn rename_collection(&mut self, old: &str, new: &str) -> Result<RenameSummary> {
         let tx = self.db.unchecked_transaction()?;
         db::rename_collection(&tx, old, new)?;
 
+        const ROW_SQL: &str = "SELECT d.collection || '/' || d.path, d.title, c.doc, d.id, d.raw \
+             FROM documents d JOIN content c ON c.hash = d.hash WHERE d.active = 1 AND ";
+        let read_row = |r: &rusqlite::Row<'_>| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        };
+        let mut rows = tx
+            .prepare(&format!("{ROW_SQL}d.collection = ?1"))?
+            .query_map([new], read_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let documents = rows.len();
+        let renamed: HashSet<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+
         let live = db::active_filepaths(&tx)?;
         let old_prefix = format!("{old}/");
         let mut stale_removed = 0;
+        let mut deletes: Vec<String> = rows.iter().map(|r| r.0.clone()).collect();
         for filepath in self.fts.indexed_filepaths()? {
             if live.contains(&filepath) {
                 continue;
             }
-            self.fts.delete_by_filepath(&filepath)?;
             if !filepath.starts_with(&old_prefix) {
                 stale_removed += 1;
             }
+            deletes.push(filepath);
         }
 
-        let mut stmt = tx.prepare(
-            "SELECT d.path, d.title, c.doc, d.id, d.raw \
-             FROM documents d JOIN content c ON c.hash = d.hash \
-             WHERE d.collection = ?1 AND d.active = 1",
-        )?;
-        let rows = stmt
-            .query_map([new], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut hit = HashSet::new();
+        for filepath in &deletes {
+            for matched in self.fts.filepaths_matched_by(filepath)? {
+                if live.contains(&matched) && !renamed.contains(matched.as_str()) {
+                    hit.insert(matched);
+                }
+            }
+            self.fts.delete_by_filepath(filepath)?;
+        }
+        let mut stmt = tx.prepare(&format!("{ROW_SQL}d.collection || '/' || d.path = ?1"))?;
+        for filepath in &hit {
+            rows.extend(
+                stmt.query_map([filepath], read_row)?
+                    .take(1)
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            );
+        }
         drop(stmt);
-        for (path, title, doc, id, raw) in &rows {
+
+        for (filepath, title, doc, id, raw) in &rows {
             self.fts
-                .add_document_with_frontmatter(
-                    &format!("{new}/{path}"),
-                    title,
-                    doc,
-                    &frontmatter_terms(raw),
-                    *id,
-                )
+                .insert_document(filepath, title, doc, &frontmatter_terms(raw), *id)
                 .context("re-index renamed document")?;
         }
 
         tx.commit().context("commit collection rename")?;
         self.fts.commit().context("commit full-text index")?;
         Ok(RenameSummary {
-            documents: rows.len(),
+            documents,
             stale_removed,
         })
     }

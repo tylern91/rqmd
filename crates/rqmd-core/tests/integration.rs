@@ -2420,3 +2420,29 @@ fn purge_collection_deletes_that_collections_path_contexts_only() {
         );
     }
 }
+
+// `proj/docs/readme.md` contains the token phrase of `docs/readme.md`, so the
+// delete of the old name's entry also matches it.
+#[test]
+fn rename_collection_keeps_a_longer_path_in_another_collection() {
+    let dir = TempDir::new().unwrap();
+    let mut store = test_store(&dir);
+    store
+        .index_document_fts_only("docs", "readme.md", "R", "zebra top")
+        .unwrap();
+    store
+        .index_document_fts_only("proj", "docs/readme.md", "R", "zebra nested")
+        .unwrap();
+    store.flush().unwrap();
+
+    store.rename_collection("docs", "d2").unwrap();
+
+    assert_eq!(
+        fts_paths(&store, "zebra", None),
+        vec!["d2/readme.md", "proj/docs/readme.md"]
+    );
+    assert_eq!(
+        fts_paths(&store, "nested", Some("proj")),
+        vec!["proj/docs/readme.md"]
+    );
+}
