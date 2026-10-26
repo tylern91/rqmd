@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.32.1] - 2026-10-26
+
 ### Added
 
 - Release archives and the Homebrew install now include `LICENSE` and `THIRD-PARTY-LICENSES.md`,
