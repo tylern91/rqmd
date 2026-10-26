@@ -50,3 +50,11 @@ updates:
       - dependency-name: "tree-sitter*"
       - dependency-name: "rusqlite"
       - dependency-name: "libsqlite3-sys"
+      # hf-hub 1.0 needs reqwest 0.13, and reqwest 0.13 alone drops the TLS
+      # backend hf-hub 0.5 gets through feature unification, which breaks
+      # model downloads. The two move together in one change made by hand.
+      # Versions, not update-types: a 0.x minor bump counts as semver-minor.
+      - dependency-name: "reqwest"
+        versions: [">= 0.13"]
+      - dependency-name: "hf-hub"
+        versions: [">= 1.0"]
