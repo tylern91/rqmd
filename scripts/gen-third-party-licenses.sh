@@ -29,7 +29,7 @@ for target in aarch64-apple-darwin x86_64-unknown-linux-gnu; do
       echo "::error::$crate ($target) is not listed in $out" >&2
       missing=1
     fi
-  done < <(cargo tree --frozen -p rqmd-cli -e normal,no-proc-macro \
+  done < <(cargo tree --frozen --color never -p rqmd-cli -e normal,no-proc-macro \
     --target "$target" --prefix none --format '{p}' \
     | sed -E 's/ \(\*\)$//; s/ \(.*\)$//; s/ v/ /' | grep -v '^rqmd' | sort -u)
 done
