@@ -16,6 +16,8 @@ Precompiled binaries published on the [releases page](https://github.com/tylern9
 
 This software incorporates third-party open-source components, each governed by their respective licenses, and downloads pretrained models from Hugging Face at runtime (see Data and Network Access below). The authors make no representations or warranties regarding these dependencies or downloaded models, and accept no liability for any issues arising from their use.
 
+The license texts of every component compiled into the `rqmd` binary are in `THIRD-PARTY-LICENSES.md`, which ships in each release archive and, for Homebrew installs, in `$(brew --prefix)/share/doc/rqmd/`. `scripts/gen-third-party-licenses.sh` generates it from the release's `Cargo.lock`.
+
 ## Use at Your Own Risk
 
 This software interacts with your file system, indexes the content you point it at, and — if you enable the MCP HTTP server — can expose that indexed content over the network with no built-in authentication (see [SECURITY.md](SECURITY.md)). It is your responsibility to ensure that its use, and how you configure it, is appropriate for your environment and complies with any applicable policies, regulations, or agreements. The authors are not responsible for any unintended side effects resulting from its use.

@@ -10,6 +10,8 @@ while IFS= read -r file; do
     crates/* | .cargo/* | \
       Cargo.toml | Cargo.lock | CHANGELOG.md | \
       scripts/check-version-sync.sh | \
+      about.toml | packaging/licenses/* | \
+      scripts/gen-third-party-licenses.sh | \
       scripts/run-acceptance-tests.sh | \
       scripts/lint-acceptance-tests.sh | \
       scripts/ci-rust-changed.sh | \

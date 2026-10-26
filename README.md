@@ -152,6 +152,8 @@ The BM25 eval also runs in CI on every push.
 See also: [SECURITY.md](SECURITY.md) for vulnerability reporting and the
 known MCP-listener authentication boundary, and
 [DISCLAIMER.md](DISCLAIMER.md) for license, warranty, and no-telemetry terms.
+Release archives and the Homebrew install include `THIRD-PARTY-LICENSES.md`,
+the license texts of the code compiled into the binary.
 
 ---
 

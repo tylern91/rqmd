@@ -1,0 +1,24 @@
+# cargo-about configuration for THIRD-PARTY-LICENSES.md, which
+# scripts/gen-third-party-licenses.sh generates for each release.
+#
+# `accepted` is ordered by preference: for a crate offered under several
+# licenses, the first accepted one is the one listed. Add a license here only
+# after reviewing what it asks of a binary distribution.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+]
+
+# The two release targets (publish-assets.yml).
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
+
+# Only code compiled into the binary.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# rqmd's own crates are unpublished and covered by LICENSE.
+private = { ignore = true }

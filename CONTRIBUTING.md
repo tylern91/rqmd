@@ -183,6 +183,13 @@ MSRV therefore follows each stable release, raised within days of it.
 
 ## Dependency updates
 
+A new dependency's license must be in the `accepted` list in `about.toml`;
+the `Third-party licenses` CI job fails otherwise. Extend that list only after
+checking what the license asks of a binary distribution. The job also fails
+when a shipped crate's license text cannot be found, and each release
+generates `THIRD-PARTY-LICENSES.md` with the same script
+(`scripts/gen-third-party-licenses.sh`).
+
 `.github/dependabot.yml` opens weekly update PRs for `github-actions` and
 `cargo`. Both ecosystems set `cooldown: default-days: 30`, so Dependabot
 skips a release until it has been public for 30 days. That matches the
