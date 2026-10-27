@@ -35,6 +35,7 @@ class Rqmd < Formula
 
   def install
     bin.install "rqmd"
+    doc.install "LICENSE", "THIRD-PARTY-LICENSES.md"
   end
 
   test do

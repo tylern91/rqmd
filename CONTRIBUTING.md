@@ -3,6 +3,10 @@
 Thanks for considering a contribution. This document covers everything a new
 contributor needs to land a correct PR without having to ask.
 
+Everyone taking part in rqmd's issues, pull requests and discussions is
+expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md). If you change
+what rqmd prints or how it is documented, see [ACCESSIBILITY.md](ACCESSIBILITY.md).
+
 ## ⚠️ Before your first commit: GPG signing is mandatory
 
 `main` is protected by a repository ruleset that requires every commit to be
@@ -182,6 +186,13 @@ MSRV therefore follows each stable release, raised within days of it.
   isn't itself an MSRV constraint.
 
 ## Dependency updates
+
+A new dependency's license must be in the `accepted` list in `about.toml`;
+the `Third-party licenses` CI job fails otherwise. Extend that list only after
+checking what the license asks of a binary distribution. The job also fails
+when a shipped crate's license text cannot be found, and each release
+generates `THIRD-PARTY-LICENSES.md` with the same script
+(`scripts/gen-third-party-licenses.sh`).
 
 `.github/dependabot.yml` opens weekly update PRs for `github-actions` and
 `cargo`. Both ecosystems set `cooldown: default-days: 30`, so Dependabot

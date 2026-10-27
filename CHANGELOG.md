@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.32.1] - 2026-10-26
+
+### Added
+
+- Release archives and the Homebrew install now include `LICENSE` and `THIRD-PARTY-LICENSES.md`,
+  the license texts of every crate and vendored C/C++ library compiled into the binary. The file
+  is generated for each release, and a CI check fails on a dependency whose license is not
+  accepted or whose license text is missing.
+
 ## [0.32.0] - 2026-10-25
 
 ### Fixed

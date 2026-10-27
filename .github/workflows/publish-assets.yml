@@ -131,12 +131,17 @@ jobs:
           fi
           echo "Binary version '$got' matches release tag '$want'"
 
+      - name: Generate THIRD-PARTY-LICENSES.md
+        run: |
+          cargo install cargo-about --version 0.9.2 --locked --features cli
+          bash scripts/gen-third-party-licenses.sh THIRD-PARTY-LICENSES.md
+
       - name: Package tarball and checksum
         id: pkg
         run: |
           set -euo pipefail
           TARBALL="rqmd-${VERSION}-${{ matrix.name_suffix }}.tar.gz"
-          tar -czf "$TARBALL" -C target/dist rqmd
+          tar -czf "$TARBALL" -C target/dist rqmd -C "$GITHUB_WORKSPACE" LICENSE THIRD-PARTY-LICENSES.md
           shasum -a 256 "$TARBALL" > "${TARBALL}.sha256"
           printf 'tarball=%s\n' "$TARBALL" >> "$GITHUB_OUTPUT"
 
