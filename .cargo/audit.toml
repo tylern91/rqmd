@@ -1,0 +1,27 @@
+# cargo-audit config, read by `cargo audit` and by rustsec/audit-check in
+# .github/workflows/security.yml.
+#
+# Every entry needs a reason and a removal trigger. An ignore is not a fix:
+# it covers an advisory whose patched release is still inside the 30-day
+# soak (CONTRIBUTING.md, "Dependency updates"), and it comes out with the
+# bump that makes the patched release resolvable.
+
+[advisories]
+ignore = [
+    # zstd 0.13.3, zstd-safe 7.2.4 and zstd-sys 2.0.16 reach rqmd only
+    # through tantivy 0.26.1 (tantivy, tantivy-sstable, tantivy-columnar).
+    # Those crates use `zstd::bulk` only, none of the affected paths:
+    #   0391  zstd::stream::raw::{Encoder,Decoder}::with_context
+    #   0398  zstd_safe::seekable::*
+    #   0403  zstd_safe::DCtx::decompress_stream (streaming decoder)
+    #   0410  wasm32 allocator shim (rqmd does not build for wasm32)
+    # The patched zstd 0.14.3 / zstd-safe 8.2.0 / zstd-sys 2.1.2 are a
+    # breaking bump for 0.x crates, so only tantivy 0.27 (which depends on
+    # zstd ^0.14 and lru ^0.18.2) can pull them in.
+    # lean: unreachable in tantivy 0.26.1, remove with the tantivy 0.27 bump
+    # in #157 (soak ends 2026-11-16, tantivy-columnar 0.27.0 released 2026-10-17).
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0403",
+    "RUSTSEC-2026-0410",
+]
