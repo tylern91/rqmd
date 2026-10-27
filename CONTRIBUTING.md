@@ -3,6 +3,9 @@
 Thanks for considering a contribution. This document covers everything a new
 contributor needs to land a correct PR without having to ask.
 
+Everyone taking part in rqmd's issues, pull requests and discussions is
+expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## ⚠️ Before your first commit: GPG signing is mandatory
 
 `main` is protected by a repository ruleset that requires every commit to be
