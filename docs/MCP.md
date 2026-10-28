@@ -174,7 +174,7 @@ Exact input fields per tool, as accepted by the JSON-RPC tool call
 | `get` | `file` | `string` (required) | Path or `#docid` |
 | | `from_line` | `number`, optional | Start line for partial retrieval |
 | | `max_lines` | `number`, optional | Cap on lines returned (default 2000) |
-| `multi_get` | `pattern` | `string` (required) | Glob pattern |
+| `multi_get` | `pattern` | `string` (required) | Comma-separated paths, globs and `#docid`s (see [multi_get patterns](#multi_get-patterns)) |
 | | `collections` | `string[]`, optional | Scope to these collections |
 | | `max_lines` | `number`, optional | Cap on lines returned per document (default 2000) |
 | `status` | *(none)* | | Takes no input. Reports document/vector counts, `Pending embed: N` (documents whose text has no current embedding, counted for the backend the server runs with, so it can differ from a CLI run under another `RQMD_INFERENCE_BACKEND`) and per-collection document counts; it does not disclose filesystem paths |
@@ -215,6 +215,36 @@ caps the whole response at 4 MiB. A response cut short by a cap ends with a
 `[truncated: …]` note (or, for `multi_get`, an `Output budget` note naming how
 many documents were omitted); use `from_line`/`max_lines` on `get` to page
 through the rest.
+
+### multi_get patterns
+
+`pattern` is a comma-separated list of entries, resolved exactly as for
+`rqmd multi-get`; the full rules are in [Multi-get patterns](CLI.md#multi-get-patterns).
+In short, each entry's kind comes from its form, no kind outranks another, and
+the response holds the union of all matches, each document once, ordered by
+`collection/path` rather than by entry order:
+
+| Kind | Example entry | Returns |
+|------|---------------|---------|
+| docid | `#a1b2c3` | the document whose content hash starts with `a1b2c3` (not narrowed by `collections`) |
+| glob | `notes/2025-05*.md` | every document whose `collection/path` matches |
+| path | `README.md` | every document whose path or `collection/path` is `README.md` or ends with `/README.md` |
+
+A list of any length is accepted. The 200-document and 4 MiB caps apply after
+resolution, so which documents survive a cap follows that order. When a cap
+drops documents, its note says how many were dropped.
+
+Entries that need a second look add one `Note:` line each at the end of the
+response, after any cap note, without changing the documents returned:
+
+```
+Note: no document matched "missing.md".
+Note: "README.md" matched 3 documents; all are returned.
+```
+
+An entry of any kind is noted when it matches nothing, and a path entry also
+when it matches more than one document. At most 20 entries are named; the rest
+are counted in a final `Note:` line.
 
 ## Refreshing before a search
 

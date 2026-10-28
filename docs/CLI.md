@@ -11,7 +11,7 @@
 | `rqmd vsearch <text> [--per-file N] [--recency HALF_LIFE]` | Vector similarity only; each result shows the chunk that matched |
 | `rqmd similar <path\|#docid>` | Find documents most similar to an already-indexed one |
 | `rqmd get <path\|#docid>` | Retrieve document by path or content hash |
-| `rqmd multi-get <glob>` | Retrieve multiple documents |
+| `rqmd multi-get <pattern> [-c collection]` | Retrieve multiple documents by a comma-separated list of paths, globs and `#docid`s; see [Multi-get patterns](#multi-get-patterns) |
 | `rqmd ls [collection[/path]]` | List collections or files |
 | `rqmd embed [-c collection] [--rebuild] [--timeout SECS]` | Generate embeddings (`--rebuild`: clear vectors and re-embed from scratch). A chunk whose text was already embedded under the same model, backend and context size reuses that stored vector, wherever it came from (an earlier version of the note or another document), so only new text is encoded. A document that fails to embed is skipped and listed at the end; see [Exit codes](#exit-codes). `--timeout` stops after that many seconds with the work so far saved; see [Timeouts](#timeouts). `SIGINT` or `SIGTERM` stops it after the document in hand, with the work so far saved; see [Interrupting update and embed](#interrupting-update-and-embed) |
 | `rqmd embed --cleanup` | Reclaim orphaned vectors and unreferenced content — no model, no re-embed. Vectors of an edited note that `rqmd embed` has not embedded yet are kept, because the next `embed` copies its unchanged chunks from them |
@@ -217,6 +217,55 @@ never removed from the results.
   they can be lower than without it.
 - No index change and no rebuild: all three read the mtime the index already
   holds.
+
+## Multi-get patterns
+
+`rqmd multi-get <pattern>` (and the MCP `multi_get` tool) takes a comma-separated list of entries.
+Spaces around each entry are ignored, and a leading `rqmd://` is dropped from path and glob entries.
+Each entry is one of three kinds, decided by its form alone:
+
+| Kind | Form | Matches | Example |
+|------|------|---------|---------|
+| docid | starts with `#` | the document whose content hash starts with the given hex; when several share the prefix, the first by `collection/path` | `#a1b2c3` |
+| glob | contains `*`, `?`, `[` or `{` | every document whose `collection/path` matches; wildcards also match `/`, so `docs/*` covers `docs/a/b.md` | `notes/2025-05*.md` |
+| path | anything else | every document whose path, or `collection/path`, equals the entry or ends with `/` followed by it | `guide/setup.md`, `README.md` |
+
+How the entries combine:
+
+- An entry's kind is fixed by its form; there is no fallback from one kind to another. `notes/*.md`
+  is only ever a glob, never a literal path. A glob that does not parse fails the whole command, and
+  `{a,b}` alternation cannot be used because `,` separates entries.
+- No kind takes precedence over another. The result is the union of what every entry matched, and a
+  document selected by several entries is returned once.
+- A path entry returns all of its matches. An exact path does not hide suffix matches: `README.md`
+  returns `README.md` and `guide/README.md` in every collection. Name the collection
+  (`docs/README.md`) or a longer suffix to narrow it. The `/`-suffix part is case-insensitive for
+  ASCII letters; the exact part is not.
+- Documents are listed by `collection/path`, not in the order the entries were given.
+- `-c/--collection` narrows path and glob entries. A docid entry is not narrowed: `#a1b2c3` returns
+  its document even when it lives in a collection that `-c` leaves out.
+- A list of any length works: path entries are looked up in batches, so a pattern with thousands
+  of entries returns the same documents as the same entries split over several calls.
+
+For example, with `docs/README.md`, `docs/guide/README.md` and `notes/todo.md` indexed:
+
+```sh
+rqmd multi-get 'notes/todo.md, README.md, docs/guide/*, #a1b2c3, missing.md'
+```
+
+returns `docs/README.md`, `docs/guide/README.md` and `notes/todo.md` in that order, each once,
+whichever of them `#a1b2c3` names.
+
+Entries that need a second look are reported on stderr, one line each, after the documents:
+
+```
+rqmd multi-get: no document matched "missing.md"
+rqmd multi-get: "README.md" matched 2 documents; all are returned
+```
+
+A docid or glob entry is reported when it matches nothing, and a path entry also when it matches
+more than one document. stdout, `--format` output and the exit code are unchanged: a pattern that
+matches nothing still exits 0 and prints `No documents matched: <pattern>` to stderr.
 
 ## Colour and progress output
 

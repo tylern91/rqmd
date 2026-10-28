@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+- `rqmd multi-get` and the MCP `multi_get` tool now say which entries of a pattern need a second
+  look: an entry that matched no document, and a path entry that matched more than one (such as
+  `README.md` present in several folders). The CLI prints one line per entry to stderr; MCP adds
+  one `Note:` line per entry at the end of the response. stdout, exit codes, the documents returned
+  and the tool schemas are unchanged. When the MCP 200-document or 4 MiB cap cuts a response, its
+  note now also says how many documents were dropped. The rules for combining docid, glob and path
+  entries are documented, with an example of each, in
+  [docs/CLI.md](docs/CLI.md#multi-get-patterns) and [docs/MCP.md](docs/MCP.md#multi_get-patterns).
+  `rqmd_core::resolve::resolve_multi_get_report` returns the same documents as
+  `resolve_multi_get` together with that report.
+
+### Fixed
+- A `multi-get` pattern with about 1,000 or more path entries no longer fails with the SQLite error
+  `Expression tree is too large (maximum depth 1000)`. Path entries are now looked up in batches,
+  and the result is the same as for the same entries split over several smaller calls. Glob entries
+  are matched against one listing of the documents instead of one listing per glob.
+
 ## [0.32.1] - 2026-10-26
 
 ### Added
