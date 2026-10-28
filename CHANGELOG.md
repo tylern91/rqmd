@@ -13,6 +13,19 @@
   [docs/CLI.md](docs/CLI.md#multi-get-patterns) and [docs/MCP.md](docs/MCP.md#multi_get-patterns).
   `rqmd_core::resolve::resolve_multi_get_report` returns the same documents as
   `resolve_multi_get` together with that report.
+- `rqmd mcp stop --force` kills a daemon that is still running after `SIGTERM` and the 5 second
+  wait, then removes the pidfile. It sends `SIGKILL` only after checking that the pid is still
+  the recorded daemon (alive, with the process start time the pidfile records), and refuses with
+  the reason when the pid was reused, or when the pidfile was written by an older rqmd and has no
+  start time. Without `--force` nothing changes: `stop` sends `SIGTERM` only, and if the process
+  is still running after the wait it now says so and points at `--force` (exit `1`, pidfile kept
+  as before). The pidfile gains a `process_start_unix` field; older pidfiles still parse. A
+  daemon that is alive but not answering `/health` is no longer reported as a stale pidfile or
+  have its pidfile deleted: `rqmd mcp status` reports it as running but not answering and
+  `rqmd mcp stop` stops it. A live pid whose start time is not available (an older rqmd's pidfile, or a pid the OS will
+  not report on) is reported the same way but never signalled and its pidfile is kept, where it used to be
+  reported as "no longer running" and deleted; `rqmd mcp --daemon` refuses to start over it until
+  you stop the process or delete the pidfile. See [docs/MCP.md](docs/MCP.md#daemon-lifecycle).
 
 ### Fixed
 - A `multi-get` pattern with about 1,000 or more path entries no longer fails with the SQLite error

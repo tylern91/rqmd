@@ -12,7 +12,7 @@ use super::helpers::rqmd;
 
 const ENV: &str = "RQMD_MCP_IDLE_EXIT_SECS";
 
-fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+pub(super) fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + limit;
     while Instant::now() < deadline {
         if done() {
@@ -23,7 +23,7 @@ fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
     done()
 }
 
-fn free_port() -> u16 {
+pub(super) fn free_port() -> u16 {
     std::net::TcpListener::bind(("127.0.0.1", 0))
         .expect("bind port 0")
         .local_addr()
@@ -31,7 +31,7 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn pidfile(index_dir: &Path) -> std::path::PathBuf {
+pub(super) fn pidfile(index_dir: &Path) -> std::path::PathBuf {
     index_dir.join("mcp.pid")
 }
 
@@ -54,7 +54,7 @@ impl Drop for StopDaemon<'_> {
     }
 }
 
-fn rqmd_command(index_dir: &Path, idle: Option<&str>) -> Command {
+pub(super) fn rqmd_command(index_dir: &Path, idle: Option<&str>) -> Command {
     let program = assert_cmd::Command::cargo_bin("rqmd").expect("rqmd binary");
     let mut command = Command::new(program.get_program());
     command
