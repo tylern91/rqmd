@@ -187,7 +187,12 @@ impl FtsPool {
 pub struct RqmdServer {
     index_dir: Arc<PathBuf>,
     /// Read-only FTS stores for search/get/status (no ML model loaded).
-    fts_pool: Arc<FtsPool>,
+    /// Opened at start when the index exists, otherwise on the first tool
+    /// call that finds one, so a server started before any index never
+    /// creates an empty one.
+    fts_pool: Arc<once_cell::sync::OnceCell<FtsPool>>,
+    /// How many handles `fts_pool` opens.
+    fts_readers: usize,
     /// ML store for hybrid query (lazily initialised on first `query` call).
     ml_store: Arc<once_cell::sync::OnceCell<Arc<std::sync::Mutex<Store>>>>,
     /// Ceiling on one `query` call once it holds the model store, and on one
@@ -203,12 +208,20 @@ impl RqmdServer {
     }
 
     /// Like [`Self::new`] with an explicit number of concurrent FTS readers.
+    ///
+    /// Creates nothing: when no index exists at `index_dir` yet, the server
+    /// still starts, and each tool answers that there is no index until one
+    /// is created.
     pub fn with_fts_readers(index_dir: PathBuf, readers: usize) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(&index_dir)?;
-        let fts_pool = FtsPool::open(&index_dir, readers)?;
+        let fts_pool = once_cell::sync::OnceCell::new();
+        if index_exists(&index_dir) {
+            // Opened eagerly, as before, so a broken index fails the start.
+            let _ = fts_pool.set(FtsPool::open(&index_dir, readers)?);
+        }
         Ok(Self {
             index_dir: Arc::new(index_dir),
             fts_pool: Arc::new(fts_pool),
+            fts_readers: readers,
             ml_store: Arc::new(once_cell::sync::OnceCell::new()),
             tool_timeout: tool_timeout_from_env(),
             refresher: None,
@@ -247,6 +260,7 @@ impl RqmdServer {
             eprintln!(
                 "[rqmd-mcp] Loading inference backend (kind={kind:?}, models download on first run)..."
             );
+            require_index(&self.index_dir)?;
             let backend = create_backend(&kind).context("failed to init inference backend")?;
             eprintln!("[rqmd-mcp] Backend ready.");
             let config = make_config(&self.index_dir);
@@ -280,7 +294,19 @@ impl RqmdServer {
     }
 
     fn fts(&self) -> anyhow::Result<MutexGuard<'_, Store>> {
-        self.fts_pool.checkout()
+        self.fts_pool
+            .get_or_try_init(|| {
+                require_index(&self.index_dir)?;
+                FtsPool::open(&self.index_dir, self.fts_readers)
+            })?
+            .checkout()
+    }
+
+    /// `Err` with the no-index message when no index exists yet. Checked
+    /// before a tool does anything else, so neither a store open nor a
+    /// `refresh: true` pass creates one.
+    fn existing_index(&self) -> Result<(), String> {
+        require_index(&self.index_dir).map_err(|e| e.to_string())
     }
 
     /// Release any GGUF model idle for at least `ttl`. Returns how many were
@@ -295,6 +321,26 @@ impl RqmdServer {
             return 0;
         };
         guard.release_idle_models(ttl)
+    }
+}
+
+/// Whether an index exists at `index_dir`: every store open needs its SQLite
+/// database, and opening one that is missing would create an empty index.
+fn index_exists(index_dir: &Path) -> bool {
+    index_dir.join("index.sqlite").is_file()
+}
+
+/// The answer to any tool call while no index exists. It names no directory:
+/// MCP replies never disclose filesystem paths (see `status`).
+fn no_index_message() -> String {
+    "no index; run `rqmd collection add <path>` to create one".to_string()
+}
+
+fn require_index(index_dir: &Path) -> anyhow::Result<()> {
+    if index_exists(index_dir) {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(no_index_message()))
     }
 }
 
@@ -472,6 +518,7 @@ impl RqmdServer {
         let cols = p.collections.as_deref();
         let intent = p.intent.as_deref();
         let recency = recency_of(p.recency.as_deref())?;
+        self.existing_index()?;
         let refresh_note = self.refresh_note(p.refresh, cols);
         let mut store = self
             .ml()
@@ -509,6 +556,7 @@ impl RqmdServer {
         let offset = clamp_offset(p.offset);
         let cols = p.collections.as_deref();
         let recency = recency_of(p.recency.as_deref())?;
+        self.existing_index()?;
         let refresh_note = self.refresh_note(p.refresh, cols);
         let store = self
             .fts()
@@ -535,6 +583,7 @@ impl RqmdServer {
 
     fn get_blocking(&self, p: GetInput) -> Result<String, String> {
         let (lookup, from_line, max_lines) = parse_file_spec(&p.file, p.from_line, p.max_lines);
+        self.existing_index()?;
         let store = self
             .fts()
             .map_err(|e| format!("Error opening store: {e:#}"))?;
@@ -542,6 +591,7 @@ impl RqmdServer {
     }
 
     fn multi_get_blocking(&self, p: MultiGetInput) -> Result<String, String> {
+        self.existing_index()?;
         let store = self
             .fts()
             .map_err(|e| format!("Error opening store: {e:#}"))?;
@@ -549,6 +599,10 @@ impl RqmdServer {
     }
 
     fn status_blocking(&self) -> Result<String, String> {
+        // Informational, as `rqmd status` is: not a tool error.
+        if !index_exists(&self.index_dir) {
+            return Ok(no_index_message());
+        }
         let store = self
             .fts()
             .map_err(|e| format!("Error opening store: {e:#}"))?;
@@ -964,6 +1018,86 @@ mod tests {
     use super::*;
     use crate::refresh::RefreshOutcome;
 
+    /// Create an empty index under `parent` and return its directory: the
+    /// server never creates one, so a test that seeds documents through
+    /// `fts()` needs it to exist first.
+    fn seed_empty_index(parent: &Path) -> PathBuf {
+        let index_dir = parent.join("index");
+        std::fs::create_dir_all(&index_dir).expect("index dir");
+        drop(Store::open(make_config(&index_dir), no_backend()).expect("seed index"));
+        index_dir
+    }
+
+    #[test]
+    fn server_starts_without_an_index_and_creates_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index_dir = dir.path().join("missing");
+        let (refresher, refresh_calls) = recording_refresher(Ok(RefreshOutcome::Refreshed));
+        let server = RqmdServer::new(index_dir.clone())
+            .expect("server starts")
+            .with_refresher(refresher);
+        let expected = no_index_message();
+        assert!(expected.contains("rqmd collection add"), "{expected}");
+        assert!(
+            !expected.contains(&index_dir.display().to_string()),
+            "an MCP reply must not disclose the index directory: {expected}"
+        );
+
+        assert_eq!(server.status_blocking(), Ok(expected.clone()));
+        let search = server.search_blocking(SearchInput {
+            query: "hello".to_string(),
+            collections: None,
+            limit: None,
+            offset: None,
+            per_file: None,
+            recency: None,
+            refresh: Some(true),
+        });
+        assert_eq!(search, Err(expected.clone()));
+        let get = server.get_blocking(GetInput {
+            file: "col/doc1.md".to_string(),
+            from_line: None,
+            max_lines: None,
+        });
+        assert_eq!(get, Err(expected.clone()));
+        let multi = server.multi_get_blocking(MultiGetInput {
+            pattern: "*".to_string(),
+            collections: None,
+            max_lines: None,
+        });
+        assert_eq!(multi, Err(expected.clone()));
+        let query = server.query_blocking(QueryInput {
+            query: "hello".to_string(),
+            intent: None,
+            collections: None,
+            limit: None,
+            offset: None,
+            per_file: None,
+            rerank: Some(false),
+            expand: Some(false),
+            strict_timeout: None,
+            recency: None,
+            refresh: None,
+        });
+        assert_eq!(query, Err(expected));
+
+        assert!(refresh_calls.lock().unwrap().is_empty(), "no refresh pass");
+        assert!(!index_dir.exists(), "no tool call may create the index");
+    }
+
+    #[test]
+    fn server_started_before_the_index_serves_it_once_it_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index_dir = dir.path().join("index");
+        let server = RqmdServer::new(index_dir.clone()).expect("server starts");
+        assert!(!index_dir.exists());
+
+        seed_empty_index(dir.path());
+
+        let status = server.status_blocking().expect("status");
+        assert_ne!(status, no_index_message());
+    }
+
     fn doc(id: i64) -> Document {
         Document {
             id,
@@ -1165,7 +1299,7 @@ mod tests {
 
     fn test_server_with_doc() -> (tempfile::TempDir, RqmdServer) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let server = RqmdServer::new(dir.path().join("index")).expect("server");
+        let server = RqmdServer::new(seed_empty_index(dir.path())).expect("server");
         {
             let mut store = server.fts().expect("fts store");
             store
@@ -1419,7 +1553,7 @@ mod tests {
     fn pool_server(readers: usize) -> (tempfile::TempDir, RqmdServer) {
         let dir = tempfile::tempdir().expect("tempdir");
         let server =
-            RqmdServer::with_fts_readers(dir.path().join("index"), readers).expect("server");
+            RqmdServer::with_fts_readers(seed_empty_index(dir.path()), readers).expect("server");
         {
             let mut store = server.fts().expect("fts store");
             store

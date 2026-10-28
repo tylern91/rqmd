@@ -6,6 +6,8 @@ use std::process::ExitCode;
 
 use rqmd_core::TimedOut;
 
+use crate::store::NoIndex;
+
 /// Exit code for a run that completed but skipped or failed part of its work
 /// (an update hook that failed, a document that could not be embedded).
 pub const EXIT_PARTIAL: u8 = 2;
@@ -49,8 +51,8 @@ impl std::error::Error for PartialFailure {}
 
 /// Report `result` on stderr and map it to a process exit code: 0 on success,
 /// [`EXIT_PARTIAL`] for a [`PartialFailure`], [`EXIT_TIMEOUT`] for a
-/// [`TimedOut`], `128 + n` for an [`Interrupted`] by signal `n`, 1 for any other
-/// error.
+/// [`TimedOut`], `128 + n` for an [`Interrupted`] by signal `n`, 1 for a
+/// [`NoIndex`] or any other error.
 pub fn report(result: anyhow::Result<()>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -66,6 +68,9 @@ pub fn report(result: anyhow::Result<()>) -> ExitCode {
                 ExitCode::from(
                     EXIT_SIGNAL_BASE.saturating_add(u8::try_from(interrupted.0).unwrap_or(0)),
                 )
+            } else if let Some(no_index) = e.downcast_ref::<NoIndex>() {
+                eprintln!("rqmd: {no_index}");
+                ExitCode::FAILURE
             } else {
                 eprintln!("Error: {e:?}");
                 ExitCode::FAILURE
@@ -94,6 +99,10 @@ mod tests {
             ExitCode::from(EXIT_TIMEOUT)
         );
         assert_eq!(report(Err(Interrupted(15).into())), ExitCode::from(143));
+        let no_index = NoIndex {
+            dir: "/nowhere".into(),
+        };
+        assert_eq!(report(Err(no_index.into())), ExitCode::FAILURE);
         assert_eq!(report(Err(anyhow::anyhow!("boom"))), ExitCode::FAILURE);
     }
 }

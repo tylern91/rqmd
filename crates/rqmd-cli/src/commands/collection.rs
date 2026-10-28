@@ -225,6 +225,9 @@ fn add(
 }
 
 fn list(index_dir: &Path) -> Result<()> {
+    if store::report_if_no_index(index_dir) {
+        return Ok(());
+    }
     let s = store::open_store_no_backend(index_dir, true)?;
     let cols = db::list_collections(&s.db)?;
     if cols.is_empty() {

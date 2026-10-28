@@ -46,7 +46,7 @@ pub fn run_get(
     no_line_numbers: bool,
     fmt: Format,
 ) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir, true)?;
+    let s = store::open_existing_store_no_backend(index_dir, true)?;
 
     let spec =
         PathSpec::parse(path_arg).with_context(|| format!("cannot parse path: {path_arg}"))?;
@@ -89,7 +89,7 @@ pub fn run_multi_get(
     max_lines: Option<usize>,
     fmt: Format,
 ) -> Result<()> {
-    let s = store::open_store_no_backend(index_dir, true)?;
+    let s = store::open_existing_store_no_backend(index_dir, true)?;
 
     // Support comma-separated list, "#docid" entries, and glob-style "*" patterns.
     let report = resolve::resolve_multi_get_report(&s.db, collections, pattern)?;
@@ -152,6 +152,9 @@ fn multi_get_report_lines(report: &resolve::MultiGetReport) -> Vec<String> {
 }
 
 pub fn run_ls(index_dir: &Path, path: Option<&str>) -> Result<()> {
+    if store::report_if_no_index(index_dir) {
+        return Ok(());
+    }
     let s = store::open_store_no_backend(index_dir, true)?;
 
     let (filter_collection, filter_prefix) = match path {

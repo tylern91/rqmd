@@ -21,6 +21,18 @@
   entry is looked up once, and more than 5,000 distinct path entries in one call is an error, so a
   single request cannot trigger an unbounded number of table scans. Glob entries
   are matched against one listing of the documents instead of one listing per glob.
+- Commands that only read an index no longer create an empty one. Pointed at a directory with no
+  index (a new `--index-dir`, or the global index before anything was added), `rqmd status`,
+  `search`, `vsearch`, `query`, `get`, `multi-get`, `collection list`, `context list` and `ls`
+  used to leave an empty `index.sqlite` and `tantivy/` behind and report an empty result. They,
+  and `rqmd doctor`, now create nothing and say
+  `` no index at <dir>; run `rqmd collection add <path>` to create one ``. `search`, `vsearch`,
+  `query`, `get` and `multi-get` exit `1`; `status`, `doctor`, `collection list`, `context list`
+  and `ls` exit `0`. `rqmd mcp` starts without creating an index, and its tools answer
+  `` no index; run `rqmd collection add <path>` to create one `` (no directory, as MCP replies never
+  disclose paths) until one exists (`status` as its result, the others as a tool error). `collection add`, `update`,
+  `embed` and `init` create the index as before, and nothing changes for an existing index. See
+  [docs/CLI.md](docs/CLI.md#exit-codes).
 
 ## [0.32.1] - 2026-10-26
 

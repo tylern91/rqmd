@@ -307,6 +307,13 @@ and its output is unchanged. Ranking and scores do not depend on whether the sta
 | `124` | Stopped by `--timeout` (the `timeout(1)` convention). `rqmd query` exits `124` only when the deadline passes before it has results, or with `--timeout-strict`; see [Timeouts](#timeouts) |
 | `129`, `130`, `143` | `rqmd update`, `rqmd embed` or `rqmd watch` stopped by `SIGHUP`, `SIGINT` or `SIGTERM` (`128` plus the signal number); see [Interrupting update and embed](#interrupting-update-and-embed) and [Update hooks and signals](#update-hooks-and-signals) |
 
+With no index at the resolved directory (no `index.sqlite` there), commands that only read
+create nothing and print `` no index at <dir>; run `rqmd collection add <path>` to create one ``.
+`rqmd search`, `vsearch`, `query`, `get` and `multi-get` print it on stderr and exit `1`;
+`rqmd status`, `collection list`, `context list` and `ls` print it on stdout and exit `0`, and
+`rqmd doctor` reports `SQLite exists: NO` with the same hint and exits `0`. `rqmd collection add`,
+`update`, `embed` and `init` create the index.
+
 `rqmd embed` stops early, with exit `1`, after five documents in a row fail to embed — that
 pattern points at the model or GPU rather than at a document. Work embedded up to that point
 is saved, so rerunning resumes.

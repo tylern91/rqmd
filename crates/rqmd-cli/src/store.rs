@@ -101,6 +101,75 @@ pub fn open_store_with_backend_kind(
     Store::open(store_config(index_dir, read_only), backend)
 }
 
+/// No index exists at the resolved directory. A command that only reads an
+/// index returns this instead of opening a store, which would create an
+/// empty index as a side effect.
+#[derive(Debug)]
+pub struct NoIndex {
+    pub dir: PathBuf,
+}
+
+impl std::fmt::Display for NoIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no index at {}; run `rqmd collection add <path>` to create one",
+            self.dir.display()
+        )
+    }
+}
+
+impl std::error::Error for NoIndex {}
+
+/// Whether an index exists at `index_dir`: its SQLite database is the file
+/// every store open needs, and the one a writing command creates first.
+pub fn index_exists(index_dir: &Path) -> bool {
+    index_dir.join("index.sqlite").is_file()
+}
+
+/// `Err(NoIndex)` when no index exists at `index_dir`. Creates nothing.
+pub fn require_index(index_dir: &Path) -> Result<()> {
+    if index_exists(index_dir) {
+        Ok(())
+    } else {
+        Err(NoIndex {
+            dir: index_dir.to_path_buf(),
+        }
+        .into())
+    }
+}
+
+/// For a read command whose answer is informational (`status`, `ls`,
+/// `collection list`, `context list`): when no index exists at `index_dir`,
+/// say so on stdout and return `true`, so the caller exits 0 without opening
+/// a store, which would create the index.
+pub fn report_if_no_index(index_dir: &Path) -> bool {
+    if index_exists(index_dir) {
+        return false;
+    }
+    println!(
+        "{}",
+        NoIndex {
+            dir: index_dir.to_path_buf()
+        }
+    );
+    true
+}
+
+/// [`open_store_no_backend`] for a command that only reads: fails with
+/// [`NoIndex`] instead of creating an index that does not exist yet.
+pub fn open_existing_store_no_backend(index_dir: &Path, read_only: bool) -> Result<Store> {
+    require_index(index_dir)?;
+    open_store_no_backend(index_dir, read_only)
+}
+
+/// [`open_store_with_backend`] for a command that only reads: fails with
+/// [`NoIndex`] before loading any model, and creates nothing.
+pub fn open_existing_store_with_backend(index_dir: &Path, read_only: bool) -> Result<Store> {
+    require_index(index_dir)?;
+    open_store_with_backend(index_dir, read_only)
+}
+
 /// Warn once if any content_vectors row *reachable from an active document*
 /// was produced by a different model or chunking config than the one active
 /// now. Scoped to active-document vectors (`db::fingerprint_breakdown_active`,
@@ -305,6 +374,32 @@ mod tests {
         let roots = collection_roots(&store, Format::Files).unwrap();
 
         assert_eq!(roots.get("notes").map(String::as_str), Some("/repo/notes"));
+    }
+
+    #[test]
+    fn open_existing_store_creates_nothing_when_the_index_is_missing() {
+        let tmp = TempDir::new().unwrap();
+        let index_dir = tmp.path().join("idx");
+
+        let err = open_existing_store_no_backend(&index_dir, true)
+            .err()
+            .expect("missing index must fail");
+
+        let no_index = err.downcast_ref::<NoIndex>().expect("typed NoIndex error");
+        assert_eq!(no_index.dir, index_dir);
+        let msg = err.to_string();
+        assert!(msg.contains(&index_dir.display().to_string()), "{msg}");
+        assert!(msg.contains("rqmd collection add"), "{msg}");
+        assert!(!index_dir.exists(), "a read open must not create the dir");
+    }
+
+    #[test]
+    fn open_existing_store_opens_an_index_that_exists() {
+        let tmp = TempDir::new().unwrap();
+        drop(open_store_no_backend(tmp.path(), false).unwrap());
+
+        assert!(index_exists(tmp.path()));
+        assert!(open_existing_store_no_backend(tmp.path(), true).is_ok());
     }
 
     #[test]
