@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::refresh;
-use crate::daemon;
+use crate::{daemon, store};
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_mcp(
@@ -68,6 +68,14 @@ pub fn run_mcp(
 /// The server, with a refresher only when `refresh_allowed`; without one a
 /// `refresh: true` call is answered with a note and the index is not touched.
 fn build_server(index_dir: &Path, refresh_allowed: bool) -> Result<RqmdServer> {
+    if !store::index_exists(index_dir) {
+        // The server still starts and creates nothing; each tool gives the
+        // same answer until an index exists.
+        let no_index = store::NoIndex {
+            dir: index_dir.to_path_buf(),
+        };
+        eprintln!("rqmd: {no_index}");
+    }
     let server =
         RqmdServer::new(index_dir.to_path_buf()).context("failed to create RQMD server")?;
     if refresh_allowed {
