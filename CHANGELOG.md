@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-28
+
 ### Added
 - `rqmd multi-get` and the MCP `multi_get` tool now say which entries of a pattern need a second
   look: an entry that matched no document, and a path entry that matched more than one (such as
