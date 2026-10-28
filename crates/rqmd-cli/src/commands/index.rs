@@ -2726,4 +2726,129 @@ mod tests {
             &changed_chunks("other.md", &before, &after),
         );
     }
+
+    // ── Embed exclusions (#147), against the counting backend ─────────────────
+
+    /// Files whose bodies carry one unique marker word each. `fm.md` has a
+    /// frontmatter block that makes the raw file larger than 200 bytes while
+    /// its indexed text (the frontmatter stripped) stays under it.
+    fn write_exclusion_fixture(fx: &EmbedFixture) {
+        std::fs::create_dir_all(fx.src.path().join("gen")).unwrap();
+        fx.write("keep.md", "# Keep\nGlacierword hiking routes.\n");
+        fx.write("gen/skip.md", "# Skip\nZanzibarword generated listing.\n");
+        fx.write(
+            "fm.md",
+            &format!(
+                "---\ndescription: {}\n---\n# Small\nKiteword body.\n",
+                "x".repeat(600)
+            ),
+        );
+        fx.write(
+            "big.md",
+            &format!("# Big\nBarnacleword {}\n", "filler words ".repeat(40)),
+        );
+    }
+
+    fn encoded_mentions(encoded: &[String], word: &str) -> bool {
+        encoded.iter().any(|t| t.contains(word))
+    }
+
+    fn set_embed_rules(fx: &EmbedFixture, ignore: &[&str], cap: Option<u64>) {
+        let s = store::open_store_no_backend(fx.index_dir.path(), false).unwrap();
+        let ignore: Vec<String> = ignore.iter().map(|p| p.to_string()).collect();
+        assert!(db::set_collection_embed_rules(&s.db, "c", &ignore, cap).unwrap());
+    }
+
+    fn hash_of(fx: &EmbedFixture, path: &str) -> String {
+        db::list_documents(&fx.store().db, Some("c"))
+            .unwrap()
+            .into_iter()
+            .find(|d| d.path == path)
+            .unwrap()
+            .hash
+    }
+
+    /// AC-1: with no rule and no cap every document is encoded, as before.
+    #[test]
+    fn embed_without_embed_rules_encodes_every_document() {
+        let fx = EmbedFixture::new("# Note\nNoteword.\n");
+        write_exclusion_fixture(&fx);
+        fx.update();
+        fx.embed();
+        let encoded = fx.take_encoded();
+        for word in [
+            "Noteword",
+            "Glacierword",
+            "Zanzibarword",
+            "Kiteword",
+            "Barnacleword",
+        ] {
+            assert!(encoded_mentions(&encoded, word), "{word} must be encoded");
+        }
+    }
+
+    /// AC-2 and AC-3: a rule-matched document and a document whose indexed
+    /// text is over the cap are never encoded; a document whose raw file is
+    /// over the cap but whose indexed text is not is encoded.
+    #[test]
+    fn embed_never_encodes_rule_or_cap_excluded_documents() {
+        let fx = EmbedFixture::new("# Note\nNoteword.\n");
+        write_exclusion_fixture(&fx);
+        set_embed_rules(&fx, &["gen/**"], Some(200));
+        fx.update();
+        fx.embed();
+        let encoded = fx.take_encoded();
+        assert!(encoded_mentions(&encoded, "Glacierword"));
+        assert!(
+            encoded_mentions(&encoded, "Kiteword"),
+            "the cap is measured on indexed text, not the raw file"
+        );
+        assert!(!encoded_mentions(&encoded, "Zanzibarword"), "rule-excluded");
+        assert!(!encoded_mentions(&encoded, "Barnacleword"), "over the cap");
+
+        let s = fx.store();
+        assert!(!db::hash_has_any_vector(
+            &s.db,
+            &hash_of(&fx, "gen/skip.md")
+        ));
+        assert!(!db::hash_has_any_vector(&s.db, &hash_of(&fx, "big.md")));
+        assert_eq!(
+            rqmd_core::embed_exclusion::pending_embed_count(
+                &s.db,
+                &store::expected_fingerprint(),
+                &store::expected_ast_fingerprints(),
+            )
+            .unwrap(),
+            0,
+            "the excluded documents are not pending"
+        );
+    }
+
+    /// AC-5: a document that becomes excluded keeps its vectors through a
+    /// plain embed, and `embed --cleanup` drops them while keeping the rest.
+    #[test]
+    fn newly_excluded_document_keeps_its_vectors_until_cleanup() {
+        let fx = EmbedFixture::new("# Note\nNoteword.\n");
+        fx.write("later.md", "# Later\nLaterword lighthouse text.\n");
+        fx.update();
+        fx.embed();
+        assert!(encoded_mentions(&fx.take_encoded(), "Laterword"));
+        let later = hash_of(&fx, "later.md");
+        let note = hash_of(&fx, "note.md");
+        let hnsw_before = fx.store().hnsw_size();
+
+        set_embed_rules(&fx, &["later.md"], None);
+        fx.embed();
+        assert!(fx.take_encoded().is_empty(), "nothing to encode");
+        assert!(db::hash_has_any_vector(&fx.store().db, &later), "kept");
+
+        run_cleanup(fx.index_dir.path()).unwrap();
+        let s = fx.store();
+        assert!(
+            !db::hash_has_any_vector(&s.db, &later),
+            "dropped by cleanup"
+        );
+        assert!(db::hash_has_any_vector(&s.db, &note), "others kept");
+        assert!(s.hnsw_size() < hnsw_before, "evicted from HNSW too");
+    }
 }

@@ -1,9 +1,18 @@
 //! Per-collection embed-exclusion rules and embed size cap (#147).
 //!
 //! `collection set --embed-ignore` / `--embed-max-bytes` keep documents out of
-//! `rqmd embed` while they stay in the full-text index. AC-4 and AC-7 need no
-//! model; the others embed with the locally cached embedding model, like the
-//! other suites that run `rqmd embed`.
+//! `rqmd embed` while they stay in the full-text index.
+//!
+//! Every test here is model-free, so it runs on CI legs with no model cache.
+//! Vectors are seeded straight into `content_vectors` at the fingerprint the
+//! binary expects (as `embed_reuse` seeds rows), which makes `rqmd embed`
+//! take its no-model fast path when nothing but excluded documents lacks a
+//! vector. AC-6 builds its index through `rqmd_core::Store` with a
+//! deterministic stand-in embedder, then reads it with `rqmd similar`, which
+//! needs no model. The embed loop itself (what gets encoded), the size cap on
+//! indexed text and the vector-search filter for `vsearch` and `query` are
+//! covered with fake embedders in `commands::index::tests` and
+//! `rqmd_core::store::tests`.
 
 use std::path::Path;
 
@@ -59,10 +68,38 @@ fn vectors_for(index: &Path, collection: &str, path: &str) -> i64 {
     .expect("count vectors")
 }
 
-/// With no rule and no cap, every active non-empty document is embedded, and
-/// `status`, `doctor` and `collection show` print nothing new.
+/// Give each listed document one vector row at the fingerprint `rqmd embed`
+/// expects for its path, as if it had been embedded. No HNSW entry is made;
+/// `status`, `doctor`, the embed fast path and `embed --cleanup` read rows only.
+fn seed_vectors(index: &Path, docs: &[(&str, &str)]) {
+    let conn = Connection::open(index.join("index.sqlite")).expect("open index");
+    for (i, (collection, path)) in docs.iter().enumerate() {
+        let hash: String = conn
+            .query_row(
+                "SELECT hash FROM documents WHERE active = 1 AND collection = ?1 AND path = ?2",
+                params![collection, path],
+                |r| r.get(0),
+            )
+            .expect("document hash");
+        conn.execute(
+            "INSERT INTO content_vectors(hash, seq, pos, model, embed_fingerprint, \
+                 total_chunks, embedded_at, vid) \
+             VALUES (?1, 0, 0, 'seeded', ?2, 1, '2026-01-01T00:00:00Z', ?3)",
+            params![
+                hash,
+                rqmd_core::store::expected_fingerprint_for_path(path),
+                9000 + i as i64
+            ],
+        )
+        .expect("seed vector row");
+    }
+}
+
+/// With no rule and no cap, every active non-empty document is pending, as
+/// before; once each has a vector `embed` takes its fast path; and `status`,
+/// `doctor` and `collection show` print nothing new.
 #[test]
-fn ac_1_without_rules_embed_covers_every_document_as_before() {
+fn ac_1_without_rules_every_document_is_embedded_as_before() {
     let index = TempDir::new().expect("tempdir");
     let a = tree(&[
         (
@@ -79,30 +116,25 @@ fn ac_1_without_rules_embed_covers_every_document_as_before() {
 
     let status = run_ok(index.path(), &["status"]);
     assert!(status.contains("Pending:  4 need embedding"), "{status}");
-    rqmd(index.path())
-        .arg("embed")
-        .assert()
-        .success()
-        .stdout(contains("from 4 documents"));
-
-    for (col, path) in [
-        ("a", "notes/plain.md"),
-        ("a", "gen/output.md"),
-        ("a", "big.md"),
-        ("b", "other.md"),
-    ] {
-        assert!(
-            vectors_for(index.path(), col, path) > 0,
-            "{col}/{path} must be embedded"
-        );
-    }
-    let status = run_ok(index.path(), &["status"]);
     assert!(!status.contains("Excluded"), "{status}");
-    assert!(!status.contains("Pending"), "{status}");
     let doctor = run_ok(index.path(), &["doctor"]);
+    assert!(doctor.contains("(4 hashes pending)"), "{doctor}");
     assert!(!doctor.contains("Embed exclusions"), "{doctor}");
     let show = run_ok(index.path(), &["collection", "show", "a"]);
     assert!(!show.contains("Embed"), "{show}");
+
+    seed_vectors(
+        index.path(),
+        &[
+            ("a", "notes/plain.md"),
+            ("a", "gen/output.md"),
+            ("a", "big.md"),
+            ("b", "other.md"),
+        ],
+    );
+    let status = run_ok(index.path(), &["status"]);
+    assert!(!status.contains("Pending"), "{status}");
+    assert!(!status.contains("Excluded"), "{status}");
     rqmd(index.path())
         .arg("embed")
         .assert()
@@ -110,8 +142,9 @@ fn ac_1_without_rules_embed_covers_every_document_as_before() {
         .stdout(contains(FAST_PATH));
 }
 
-/// A document matching an `--embed-ignore` glob is found by `rqmd search` and
-/// has no vector after `rqmd embed`; its neighbour is embedded.
+/// A document matching an `--embed-ignore` glob is found by `rqmd search`, is
+/// not pending, and `rqmd embed` has nothing to encode once its neighbour has
+/// a vector (the fast path, which loads no model).
 #[test]
 fn ac_2_rule_matched_document_is_searchable_but_never_embedded() {
     let index = TempDir::new().expect("tempdir");
@@ -127,27 +160,28 @@ fn ac_2_rule_matched_document_is_searchable_but_never_embedded() {
         .stdout(contains("embed ignore gen/**"));
     rqmd(index.path()).arg("update").assert().success();
 
-    rqmd(index.path())
-        .arg("embed")
-        .assert()
-        .success()
-        .stdout(contains("from 1 documents"));
-    assert!(vectors_for(index.path(), "a", "notes/keep.md") > 0);
-    assert_eq!(vectors_for(index.path(), "a", "gen/skip.md"), 0);
-
-    let search = run_ok(index.path(), &["search", "zanzibarquux"]);
-    assert!(search.contains("rqmd://a/gen/skip.md"), "{search}");
     let status = run_ok(index.path(), &["status"]);
+    assert!(status.contains("Pending:  1 need embedding"), "{status}");
     assert!(
         status.contains("Excluded: 1 from embedding (1 by rule, 0 over the size cap)"),
         "{status}"
     );
+    let search = run_ok(index.path(), &["search", "zanzibarquux"]);
+    assert!(search.contains("rqmd://a/gen/skip.md"), "{search}");
+
+    seed_vectors(index.path(), &[("a", "notes/keep.md")]);
+    rqmd(index.path())
+        .arg("embed")
+        .assert()
+        .success()
+        .stdout(contains(FAST_PATH));
+    assert_eq!(vectors_for(index.path(), "a", "gen/skip.md"), 0);
 }
 
 /// The cap is measured on the indexed text: a file whose frontmatter makes the
-/// raw file larger than the cap, but whose indexed text is under it, is still
-/// embedded; a document whose indexed text is over the cap is searchable and
-/// not embedded.
+/// raw file larger than the cap, but whose indexed text is under it, stays
+/// pending (it will be embedded); a document whose indexed text is over the
+/// cap is searchable and not pending.
 #[test]
 fn ac_3_document_over_the_cap_on_indexed_text_is_searchable_not_embedded() {
     let index = TempDir::new().expect("tempdir");
@@ -170,20 +204,25 @@ fn ac_3_document_over_the_cap_on_indexed_text_is_searchable_not_embedded() {
         .stdout(contains("embed max 200 bytes"));
     rqmd(index.path()).arg("update").assert().success();
 
-    rqmd(index.path()).arg("embed").assert().success();
-    assert!(
-        vectors_for(index.path(), "a", "fm.md") > 0,
-        "raw file is over the cap but its indexed text is not"
-    );
-    assert_eq!(vectors_for(index.path(), "a", "big.md"), 0);
-
-    let search = run_ok(index.path(), &["search", "quuxbarnacle"]);
-    assert!(search.contains("rqmd://a/big.md"), "{search}");
     let status = run_ok(index.path(), &["status"]);
     assert!(
         status.contains("Excluded: 1 from embedding (0 by rule, 1 over the size cap)"),
         "{status}"
     );
+    assert!(
+        status.contains("Pending:  1 need embedding"),
+        "fm.md is still pending: {status}"
+    );
+    let search = run_ok(index.path(), &["search", "quuxbarnacle"]);
+    assert!(search.contains("rqmd://a/big.md"), "{search}");
+
+    seed_vectors(index.path(), &[("a", "fm.md")]);
+    rqmd(index.path())
+        .arg("embed")
+        .assert()
+        .success()
+        .stdout(contains(FAST_PATH));
+    assert_eq!(vectors_for(index.path(), "a", "big.md"), 0);
 }
 
 /// Excluded documents are not pending: `status` drops its Pending line and
@@ -222,22 +261,18 @@ fn ac_4_excluded_documents_are_not_pending_and_embed_takes_the_fast_path() {
 }
 
 /// Chosen behaviour: a document that becomes excluded keeps its vectors on a
-/// plain `rqmd embed` (never served by vector search meanwhile) and loses them
-/// on `rqmd embed --cleanup`, which keeps every other document's vectors.
+/// plain `rqmd embed`, and `rqmd embed --cleanup` drops them while keeping
+/// every other document's vectors.
 #[test]
 fn ac_5_newly_excluded_document_keeps_its_vectors_until_cleanup() {
     let index = TempDir::new().expect("tempdir");
     let a = tree(&[
         ("keep.md", "# Keep\nNotes about mountain goats.\n"),
-        (
-            "later.md",
-            "# Later\nThe lighthouse keeper watched ships cross the harbor at dusk.\n",
-        ),
+        ("later.md", "# Later\nThe lighthouse keeper at dusk.\n"),
     ]);
     add(index.path(), a.path(), "a");
     rqmd(index.path()).arg("update").assert().success();
-    rqmd(index.path()).arg("embed").assert().success();
-    assert!(vectors_for(index.path(), "a", "later.md") > 0);
+    seed_vectors(index.path(), &[("a", "keep.md"), ("a", "later.md")]);
 
     rqmd(index.path())
         .args(["collection", "set", "a", "--embed-ignore", "later.md"])
@@ -248,72 +283,132 @@ fn ac_5_newly_excluded_document_keeps_its_vectors_until_cleanup() {
         .assert()
         .success()
         .stdout(contains(FAST_PATH));
-    assert!(
-        vectors_for(index.path(), "a", "later.md") > 0,
+    assert_eq!(
+        vectors_for(index.path(), "a", "later.md"),
+        1,
         "a plain embed keeps the vectors"
     );
     let doctor = run_ok(index.path(), &["doctor"]);
     assert!(
-        doctor.contains("vector(s) kept for excluded documents"),
+        doctor.contains("1 vector(s) kept for excluded documents"),
         "{doctor}"
     );
-    let vsearch = run_ok(index.path(), &["vsearch", "harbor lighthouse at dusk"]);
-    assert!(!vsearch.contains("rqmd://a/later.md"), "{vsearch}");
 
     rqmd(index.path())
         .args(["embed", "--cleanup"])
         .assert()
         .success()
-        .stdout(contains("kept for documents excluded from embedding"));
+        .stdout(contains(
+            "Swept 1 vector(s) kept for documents excluded from embedding.",
+        ));
     assert_eq!(vectors_for(index.path(), "a", "later.md"), 0);
-    assert!(vectors_for(index.path(), "a", "keep.md") > 0);
+    assert_eq!(vectors_for(index.path(), "a", "keep.md"), 1);
+    let doctor = run_ok(index.path(), &["doctor"]);
+    assert!(!doctor.contains("kept for excluded documents"), "{doctor}");
+}
+
+/// Deterministic stand-in embedder: every text gets the same vector, so any
+/// stored vector is the nearest neighbour of any other.
+struct ConstantEmbedder;
+
+impl rqmd_llm::InferenceBackend for ConstantEmbedder {
+    fn embed(&mut self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        Ok(vec![0.1; rqmd_llm::EMBED_DIM])
+    }
+    fn rerank(&mut self, _query: &str, _docs: &[&str]) -> anyhow::Result<Vec<f32>> {
+        unreachable!("not used to build the index")
+    }
+    fn generate(&mut self, _prompt: &str) -> anyhow::Result<String> {
+        unreachable!("not used to build the index")
+    }
+    fn embed_model_name(&self) -> &str {
+        "test-org/constant-embed.gguf"
+    }
+    fn rerank_model_name(&self) -> &str {
+        "test-rerank"
+    }
+    fn generate_model_name(&self) -> &str {
+        "test-generate"
+    }
 }
 
 /// Two collections hold identical text, so they share one content hash and
-/// one set of vectors. Once collection `a` excludes its copy, neither a
-/// scoped nor an unscoped `vsearch` or `query` returns `a`'s copy through the
-/// vector made for `b`'s.
+/// one stored vector. Once collection `a` excludes its copy, `rqmd similar`
+/// (vector search from a stored document, no model) returns `b`'s copy, never
+/// `a`'s, and `embed --cleanup` keeps the vector `b` still uses. The same
+/// filter for scoped and unscoped `vsearch` and `query` is covered by
+/// `rqmd_core::store::tests::excluded_document_is_never_returned_through_a_shared_vector`.
 #[test]
 fn ac_6_vector_search_never_returns_an_excluded_document_through_a_shared_vector() {
     let index = TempDir::new().expect("tempdir");
-    let same = "# Same\nThe lighthouse keeper watched ships cross the harbor at dusk.\n";
-    let a = tree(&[
-        ("gen/same.md", same),
-        (
-            "other.md",
-            "# Other\nBread recipes with sourdough starter.\n",
-        ),
-    ]);
-    let b = tree(&[("same.md", same)]);
-    add(index.path(), a.path(), "a");
-    add(index.path(), b.path(), "b");
-    rqmd(index.path()).arg("update").assert().success();
-    rqmd(index.path()).arg("embed").assert().success();
+    let same = "The lighthouse keeper watched ships cross the harbor at dusk.";
+    {
+        let mut store = rqmd_core::Store::open(
+            rqmd_core::StoreConfig {
+                db_path: index.path().join("index.sqlite"),
+                tantivy_dir: index.path().join("tantivy"),
+                hnsw_path: index.path().join("hnsw.usearch"),
+                read_only: false,
+            },
+            Box::new(ConstantEmbedder),
+        )
+        .expect("open store");
+        for (collection, path, body) in [
+            ("a", "gen/same.md", same),
+            ("b", "same.md", same),
+            ("a", "other.md", "Bread recipes with sourdough starter."),
+        ] {
+            store
+                .index_document(collection, path, "T", body)
+                .expect("index document");
+        }
+        store.flush().expect("flush");
+        for name in ["a", "b"] {
+            rqmd_core::db::upsert_collection(
+                &store.db,
+                &rqmd_core::Collection {
+                    name: name.into(),
+                    path: index.path().join(name).to_string_lossy().into_owned(),
+                    pattern: "**/*.md".into(),
+                    ignore: vec![],
+                    include_by_default: true,
+                    update_command: None,
+                    allow_hidden: false,
+                    respect_gitignore: false,
+                    max_file_bytes: None,
+                    embed_ignore: vec![],
+                    embed_max_bytes: None,
+                },
+            )
+            .expect("register collection");
+        }
+    }
 
-    // No word of this query is in the shared text, so only the vector route
-    // can reach it.
-    let q = "maritime beacon at night";
-    let query = ["query", q, "--no-expand", "--no-rerank", "-c", "a"];
-    let before = run_ok(index.path(), &["vsearch", q, "-c", "a"]);
-    assert!(before.contains("rqmd://a/gen/same.md"), "premise: {before}");
-    let before = run_ok(index.path(), &query);
+    let similar = ["similar", "a/other.md"];
+    let before = run_ok(index.path(), &similar);
     assert!(before.contains("rqmd://a/gen/same.md"), "premise: {before}");
 
     rqmd(index.path())
         .args(["collection", "set", "a", "--embed-ignore", "gen/**"])
         .assert()
         .success();
+    let after = run_ok(index.path(), &similar);
+    assert!(!after.contains("rqmd://a/gen/same.md"), "{after}");
+    assert!(after.contains("rqmd://b/same.md"), "{after}");
 
-    let scoped = run_ok(index.path(), &["vsearch", q, "-c", "a"]);
-    assert!(!scoped.contains("rqmd://a/gen/same.md"), "{scoped}");
-    let unscoped = run_ok(index.path(), &["vsearch", q]);
-    assert!(!unscoped.contains("rqmd://a/gen/same.md"), "{unscoped}");
-    assert!(unscoped.contains("rqmd://b/same.md"), "{unscoped}");
-    let scoped_query = run_ok(index.path(), &query);
+    rqmd(index.path())
+        .args(["embed", "--cleanup"])
+        .assert()
+        .success()
+        .stdout(contains(
+            "Swept 0 vector(s) kept for documents excluded from embedding.",
+        ));
     assert!(
-        !scoped_query.contains("rqmd://a/gen/same.md"),
-        "{scoped_query}"
+        vectors_for(index.path(), "b", "same.md") > 0,
+        "the shared vector is kept"
     );
+    let after = run_ok(index.path(), &similar);
+    assert!(after.contains("rqmd://b/same.md"), "{after}");
 }
 
 /// Rules and the cap persist with the collection: `collection show` lists
