@@ -21,7 +21,8 @@
 | `rqmd status` | Index health and collection summary. The AST Chunking block lists the extensions chunked at declaration boundaries and, after `Without:`, the indexed extensions that have no grammar with their document counts (prose such as `.md` and `.txt` is not listed) |
 | `rqmd doctor` | Diagnose config, index, model, and device issues |
 | `rqmd bench [-n N]` | Embed throughput benchmark (default: 5 rounds) |
-| `rqmd eval [--mode bm25\|vec\|hybrid] [--verbose]` | Search quality eval against synthetic fixtures |
+| `rqmd eval [--mode bm25\|vec\|hybrid] [--verbose]` | Search quality gate: six built-in synthetic documents and 25 queries, scored by Hit@K in a throwaway index. Needs no index of yours and creates none |
+| `rqmd eval --judgements FILE [--mode bm25\|vec\|hybrid] [--k K] [--json] [--no-rerank] [--no-expand] [--verbose]` | Score your own index against a judgement file: nDCG@10, MRR@10, Recall@K, Hit@K and per-query latency. Read-only. See [Evaluating search quality](#evaluating-search-quality) |
 | `rqmd mcp [--http] [--port N] [--host HOST] [--allow-non-loopback] [--daemon] [--allow-refresh \| --no-refresh]` | Start MCP server. `--allow-refresh` lets `refresh: true` re-index an implicit project-local `.rqmd/` index; `--no-refresh` turns the option off for any index. See [Refreshing before a search](MCP.md#refreshing-before-a-search) |
 | `rqmd mcp status` | Show MCP daemon status (pid, health, uptime) |
 | `rqmd mcp stop [--force]` | Stop the running MCP daemon: `SIGTERM`, then a wait of up to 5 s. If the daemon is still running after that, `stop` exits `1`, says so and keeps the pidfile. `--force` then sends `SIGKILL`, and only after checking that the pid is still the recorded daemon: it must be alive with the same process start time as the pidfile records. A pid that started at another time (the pid was reused) is never signalled, and neither is a pidfile written by an older rqmd, which has no start time. See [Daemon lifecycle](MCP.md#daemon-lifecycle) |
@@ -268,6 +269,84 @@ A docid or glob entry is reported when it matches nothing, and a path entry also
 more than one document. stdout, `--format` output and the exit code are unchanged: a pattern that
 matches nothing still exits 0 and prints `No documents matched: <pattern>` to stderr.
 
+## Evaluating search quality
+
+`rqmd eval` with no `--judgements` is the built-in gate: six synthetic documents and 25 queries
+indexed into a temporary index, scored by Hit@K against fixed thresholds. It ignores your index.
+Its output and exit codes do not change.
+
+`rqmd eval --judgements FILE` measures your own index instead. It opens the index read-only
+(it never creates, updates or embeds anything; with no index it exits `1` as the other read
+commands do), runs each judged query, and reports:
+
+| Metric | Meaning |
+|--------|---------|
+| nDCG@10 | Graded gain `grade / log2(rank + 1)` over the top 10, divided by the same sum for the ideal order. The gain is the grade itself, not `2^grade - 1` |
+| MRR@10 | Mean of `1 / rank` of the first relevant document in the top 10 (0 when none is) |
+| Recall@K | Share of a query's relevant documents found in the top K, averaged over queries |
+| Hit@K | Share of queries with at least one relevant document in the top K |
+| Latency | p50, p95, max and mean milliseconds per query (nearest-rank percentiles) |
+
+A document is relevant when its grade is 1 or more. nDCG and MRR always use 10; `--k` (default
+10) sets the cutoff of Recall@K and Hit@K. Every number is the mean over the scored queries.
+
+| Option | Effect |
+|--------|--------|
+| `--mode bm25\|vec\|hybrid` | Search path to score (default `bm25`). `vec` and `hybrid` need stored embeddings (`rqmd embed`) and a working inference backend, and exit `1` saying which is missing instead of scoring empty results. Here an unknown mode is an error |
+| `--k K` | Cutoff for Recall@K and Hit@K |
+| `--json` | One JSON document on stdout instead of the text report |
+| `--no-rerank`, `--no-expand` | Hybrid only: skip the rerank stage or the query expansion, to isolate the fusion or to make runs repeatable |
+| `--verbose` | Add a line per query to the text report |
+
+All collections in the index are searched, including those excluded from default queries, so a
+judged document is never out of reach.
+
+### Judgement file
+
+JSON, with one object per query. Documents are named `collection/path`, the collection name and
+the path as `rqmd ls` shows them, which stay the same when the index is rebuilt (document ids and
+docids do not).
+
+```json
+{
+  "queries": [
+    {
+      "query": "how do I rotate the signing key",
+      "relevant": {
+        "runbooks/key-rotation.md": 3,
+        "runbooks/release-checklist.md": 1,
+        "notes/old-key-notes.md": 0
+      }
+    },
+    { "query": "retry budget", "relevant": ["design/retries.md"] }
+  ]
+}
+```
+
+- `relevant` is an object mapping `collection/path` to an integer grade, or an array of
+  `collection/path` strings (each grade 1). Grade 0 marks a document as judged and not relevant.
+- Every query needs a non-empty `query` and at least one document graded 1 or more. No other
+  fields are allowed, so a misspelled `relevant` is an error rather than an ignored query.
+- A file ending in `.jsonl` holds the same query objects, one per line (blank lines are skipped),
+  without the outer `{"queries": [...]}`.
+
+A malformed file stops the run before the index is opened: nothing on stdout, the reason on
+stderr (with the query number, or the line number for `.jsonl`), exit `1`.
+
+A judged document that is not in the index (renamed, removed, or typed wrong) is not scored as a
+miss. The report lists each one with its query, it is left out of that query's judgements, and
+the run exits `2` after printing the scores of the rest. A query whose relevant documents are all
+missing is listed as skipped and left out of the means; when no query can be scored the run
+exits `1`.
+
+`--json` output has these keys: `judgements`, `mode`, `k`, `queries_total`, `queries_scored`,
+`queries_skipped` (`query`, `reason`), `metrics` (`ndcg_at_10`, `mrr_at_10`, `recall_at_k`,
+`hit_at_k`), `latency_ms` (`p50`, `p95`, `max`, `mean`), `rerank_notice` (set when a hybrid run
+was not reranked), `missing_documents` (`query`, `document`) and `per_query` (`query`, the
+four metrics, `latency_ms`, and `ranked`, the retrieved `collection/path` keys). Compare two runs
+by their `metrics`; the latency values vary from run to run. In `vec` and `hybrid` the first
+query includes loading the model.
+
 ## Colour and progress output
 
 Escape sequences are written only to a terminal. Piped or redirected output, on stdout and on
@@ -303,7 +382,7 @@ and its output is unchanged. Ranking and scores do not depend on whether the sta
 |------|---------|
 | `0` | Success |
 | `1` | Error — the command did not complete |
-| `2` | Completed with failures: `rqmd update` ran every collection but one or more update hooks failed or timed out, or `rqmd embed` finished but skipped documents it could not embed. Everything else was still indexed or embedded. (Command-line usage errors also exit `2`; they print usage text instead of a summary.) |
+| `2` | Completed with failures: `rqmd update` ran every collection but one or more update hooks failed or timed out, or `rqmd embed` finished but skipped documents it could not embed, or `rqmd eval --judgements` scored the index but some judged documents are missing from it. Everything else was still indexed, embedded or scored. (Command-line usage errors also exit `2`; they print usage text instead of a summary.) |
 | `124` | Stopped by `--timeout` (the `timeout(1)` convention). `rqmd query` exits `124` only when the deadline passes before it has results, or with `--timeout-strict`; see [Timeouts](#timeouts) |
 | `129`, `130`, `143` | `rqmd update`, `rqmd embed` or `rqmd watch` stopped by `SIGHUP`, `SIGINT` or `SIGTERM` (`128` plus the signal number); see [Interrupting update and embed](#interrupting-update-and-embed) and [Update hooks and signals](#update-hooks-and-signals) |
 
