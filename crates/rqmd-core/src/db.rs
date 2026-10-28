@@ -519,15 +519,53 @@ pub fn list_documents_multi(
 /// The anchoring is what prevents a fragment like "SYNTAX.md" from matching
 /// "OLD-SYNTAX.md": the suffix check requires a `/` immediately before the
 /// needle, not just a raw substring match.
+///
+/// The `=` arms compare bytes exactly; the `LIKE` arms fold ASCII case, as
+/// SQLite's `LIKE` does by default (`resolve::needle_match_count` mirrors
+/// both).
+///
+/// Needles are looked up `NEEDLE_BATCH` at a time. One `OR` chain over every
+/// needle fails past roughly 990 needles with SQLite's "Expression tree is
+/// too large (maximum depth 1000)"; batching keeps each statement far below
+/// that. Rows from several batches are merged into the order and uniqueness
+/// one statement would give: sorted by (collection, path), each document once.
 pub fn find_documents_by_needles(
     conn: &Connection,
     collections: Option<&[String]>,
     needles: &[&str],
 ) -> Result<Vec<Document>> {
-    if needles.is_empty() {
+    let mut batches = needles.chunks(NEEDLE_BATCH);
+    let Some(first) = batches.next() else {
         return Ok(vec![]);
+    };
+    let mut rows = find_documents_by_needle_batch(conn, collections, first)?;
+    let mut merged = false;
+    for batch in batches {
+        rows.extend(find_documents_by_needle_batch(conn, collections, batch)?);
+        merged = true;
     }
+    if merged {
+        rows.sort_by(|a, b| {
+            (a.collection.as_str(), a.path.as_str()).cmp(&(b.collection.as_str(), b.path.as_str()))
+        });
+        rows.dedup_by_key(|d| d.id);
+    }
+    Ok(rows)
+}
 
+/// Needles per `find_documents_by_needles` statement: each adds one
+/// four-arm clause to the `OR` chain, so 250 stays a quarter of the way to
+/// SQLite's expression-depth limit of 1000 and binds 1,000 parameters, well
+/// under its default limit of 32,766.
+const NEEDLE_BATCH: usize = 250;
+
+/// One `find_documents_by_needles` statement over at most `NEEDLE_BATCH`
+/// needles.
+fn find_documents_by_needle_batch(
+    conn: &Connection,
+    collections: Option<&[String]>,
+    needles: &[&str],
+) -> Result<Vec<Document>> {
     // The two LIKE arms need `ESCAPE '\'` and an escaped needle — otherwise a
     // needle containing `%` or `_` (e.g. a client-supplied "%") widens into a
     // wildcard and the suffix check degrades to "any path with a `/` in it",

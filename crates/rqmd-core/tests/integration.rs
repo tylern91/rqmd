@@ -11,7 +11,7 @@ use rqmd_core::{
         get_document_by_docid_prefix, get_document_by_filepath, hash_needs_embed, list_documents,
         open_db, purge_collection, set_config, upsert_content, upsert_document, upsert_vector_meta,
     },
-    resolve::resolve_multi_get,
+    resolve::{resolve_multi_get, resolve_multi_get_report},
     rrf::{reciprocal_rank_fusion, rrf_weights},
     types::{QueryType, RankedListMeta, RankedResult},
 };
@@ -1176,6 +1176,163 @@ fn resolve_multi_get_combines_docid_glob_and_plain_patterns() {
         "docid pattern must not pull in unrelated docs: {paths:?}"
     );
     assert_eq!(docs.len(), 2, "expected no duplicates: {docs:?}");
+}
+
+/// Five documents across two collections, each with its own content so every
+/// docid is distinct. Returns the docid of each, keyed by `collection/path`.
+fn overlap_fixture(db: &rusqlite::Connection) -> std::collections::HashMap<String, String> {
+    let mut docids = std::collections::HashMap::new();
+    for (collection, path) in [
+        ("beta", "notes/todo.md"),
+        ("alpha", "guide/setup.md"),
+        ("beta", "README.md"),
+        ("alpha", "README.md"),
+        ("alpha", "guide/README.md"),
+        ("beta", "zz.md"),
+    ] {
+        let body = format!("body of {collection}/{path}");
+        let hash = content_hash(&body);
+        upsert_content(db, &hash, &body, "t").unwrap();
+        upsert_document(db, collection, path, "Title", &hash, "t").unwrap();
+        docids.insert(
+            format!("{collection}/{path}"),
+            docid_from_hash(&hash).to_string(),
+        );
+    }
+    let distinct: HashSet<&String> = docids.values().collect();
+    assert_eq!(distinct.len(), docids.len(), "fixture docids must differ");
+    docids
+}
+
+fn full_paths(docs: &[rqmd_core::types::Document]) -> Vec<String> {
+    docs.iter()
+        .map(|d| format!("{}/{}", d.collection, d.path))
+        .collect()
+}
+
+/// Pins the combined result of overlapping docid, glob and plain entries
+/// (github.com/tylern91/rqmd#154, AC-3 and AC-5): every entry contributes
+/// all the documents it matches, a document selected by several entries
+/// appears once, and the result is ordered by (collection, path) whatever
+/// order the entries were listed in. Written against the resolver before the
+/// batching and report changes, and must keep passing after them.
+#[test]
+fn resolve_multi_get_pins_overlapping_docid_glob_and_plain_entries() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir.path().join("test.sqlite")).unwrap();
+    let docids = overlap_fixture(&db);
+
+    let pattern = format!(
+        "beta/notes/todo.md, #{}, alpha/guide/*, README.md, #{}, README.md, rqmd://alpha/guide/setup.md",
+        docids["alpha/guide/README.md"], docids["beta/notes/todo.md"],
+    );
+    let docs = resolve_multi_get(&db, None, &pattern).unwrap();
+    assert_eq!(
+        full_paths(&docs),
+        [
+            "alpha/README.md",
+            "alpha/guide/README.md",
+            "alpha/guide/setup.md",
+            "beta/README.md",
+            "beta/notes/todo.md",
+        ],
+    );
+    let ids: HashSet<i64> = docs.iter().map(|d| d.id).collect();
+    assert_eq!(ids.len(), docs.len(), "a document must appear once");
+
+    // The same entries in reverse order give the same result.
+    let reversed: Vec<&str> = pattern.split(',').rev().collect();
+    let again = resolve_multi_get(&db, None, &reversed.join(",")).unwrap();
+    assert_eq!(full_paths(&again), full_paths(&docs));
+
+    // A collection filter narrows plain and glob entries but not a docid:
+    // `#docid` of alpha/guide/README.md is still returned under `beta`.
+    let beta = ["beta".to_string()];
+    let docs = resolve_multi_get(&db, Some(&beta), &pattern).unwrap();
+    assert_eq!(
+        full_paths(&docs),
+        [
+            "alpha/guide/README.md",
+            "beta/README.md",
+            "beta/notes/todo.md",
+        ],
+    );
+}
+
+/// A plain-entry list longer than SQLite's expression depth allows in one
+/// query (about 990 entries) succeeds and returns the same documents as the
+/// same entries issued in smaller calls (github.com/tylern91/rqmd#154, AC-2).
+#[test]
+fn resolve_multi_get_handles_more_than_a_thousand_plain_entries() {
+    const DOCS: usize = 1_200;
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir.path().join("test.sqlite")).unwrap();
+    db.execute_batch("BEGIN").unwrap();
+    for i in 0..DOCS {
+        let body = format!("doc {i}");
+        let hash = content_hash(&body);
+        upsert_content(&db, &hash, &body, "t").unwrap();
+        upsert_document(&db, "bulk", &format!("dir/doc-{i:04}.md"), "T", &hash, "t").unwrap();
+    }
+    db.execute_batch("COMMIT").unwrap();
+
+    // Every document by file name, plus entries that match nothing, in an
+    // order unrelated to the result order.
+    let mut entries: Vec<String> = (0..DOCS).rev().map(|i| format!("doc-{i:04}.md")).collect();
+    entries.extend((0..60).map(|i| format!("missing-{i}.md")));
+    assert!(entries.len() > 1_000);
+
+    let docs = resolve_multi_get(&db, None, &entries.join(",")).unwrap();
+    assert_eq!(docs.len(), DOCS);
+
+    let mut piecewise = Vec::new();
+    for chunk in entries.chunks(97) {
+        piecewise.extend(resolve_multi_get(&db, None, &chunk.join(",")).unwrap());
+    }
+    piecewise.sort_by(|a, b| (&a.collection, &a.path).cmp(&(&b.collection, &b.path)));
+    piecewise.dedup_by_key(|d| d.id);
+    assert_eq!(full_paths(&docs), full_paths(&piecewise));
+
+    // The db helper itself batches too.
+    let needles: Vec<&str> = entries.iter().map(String::as_str).collect();
+    let direct = find_documents_by_needles(&db, None, &needles).unwrap();
+    assert_eq!(full_paths(&direct), full_paths(&docs));
+}
+
+#[test]
+fn resolve_multi_get_looks_repeated_entries_up_once_and_caps_distinct_ones() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir.path().join("test.sqlite")).unwrap();
+    let hash = content_hash("body");
+    upsert_content(&db, &hash, "body", "t").unwrap();
+    upsert_document(&db, "col", "dir/one.md", "T", &hash, "t").unwrap();
+
+    // 20,000 copies of one entry are one lookup, and the report still names
+    // the entry once when it matches nothing.
+    let repeated = vec!["one.md"; 20_000].join(",");
+    let docs = resolve_multi_get(&db, None, &repeated).unwrap();
+    assert_eq!(
+        full_paths(&docs),
+        full_paths(&resolve_multi_get(&db, None, "one.md").unwrap())
+    );
+    let missing = vec!["gone.md"; 20_000].join(",");
+    let report = resolve_multi_get_report(&db, None, &missing).unwrap();
+    assert_eq!(report.unmatched, vec!["gone.md".to_string()]);
+
+    // Past the cap of distinct entries the call fails with a clear message
+    // instead of scanning the table once per batch without bound.
+    let distinct: Vec<String> = (0..5_001).map(|i| format!("file-{i}.md")).collect();
+    let err = resolve_multi_get(&db, None, &distinct.join(",")).unwrap_err();
+    assert!(
+        err.to_string().contains("too many distinct path entries"),
+        "{err}"
+    );
+    let within: Vec<String> = (0..5_000).map(|i| format!("file-{i}.md")).collect();
+    assert!(
+        resolve_multi_get(&db, None, &within.join(","))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

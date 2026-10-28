@@ -92,11 +92,12 @@ pub fn run_multi_get(
     let s = store::open_existing_store_no_backend(index_dir, true)?;
 
     // Support comma-separated list, "#docid" entries, and glob-style "*" patterns.
-    let docs = resolve::resolve_multi_get(&s.db, collections, pattern)?;
+    let report = resolve::resolve_multi_get_report(&s.db, collections, pattern)?;
+    let docs = &report.documents;
     let roots = store::collection_roots(&s, fmt)?;
     let mut printed = 0usize;
 
-    for doc in &docs {
+    for doc in docs {
         let body = db::get_document_raw(&s.db, doc.id)?.unwrap_or_default();
         let file = format!("rqmd://{}/{}", doc.collection, doc.path);
         if printed > 0 && fmt == Format::Cli {
@@ -117,10 +118,37 @@ pub fn run_multi_get(
         printed += 1;
     }
 
+    for line in multi_get_report_lines(&report) {
+        eprintln!("{line}");
+    }
     if printed == 0 {
         eprintln!("No documents matched: {pattern}");
     }
     Ok(())
+}
+
+/// The stderr lines for a multi-get report: one per unmatched entry, then one
+/// per path entry that matched several documents. Control characters in an
+/// entry become `?` so a pasted escape sequence cannot drive the terminal.
+fn multi_get_report_lines(report: &resolve::MultiGetReport) -> Vec<String> {
+    let clean = |entry: &str| -> String {
+        entry
+            .chars()
+            .map(|c| if c.is_control() { '?' } else { c })
+            .collect()
+    };
+    let unmatched = report
+        .unmatched
+        .iter()
+        .map(|e| format!("rqmd multi-get: no document matched \"{}\"", clean(e)));
+    let ambiguous = report.ambiguous.iter().map(|a| {
+        format!(
+            "rqmd multi-get: \"{}\" matched {} documents; all are returned",
+            clean(&a.entry),
+            a.matches
+        )
+    });
+    unmatched.chain(ambiguous).collect()
 }
 
 pub fn run_ls(index_dir: &Path, path: Option<&str>) -> Result<()> {
@@ -177,4 +205,31 @@ pub fn run_ls(index_dir: &Path, path: Option<&str>) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multi_get_report_lines_name_each_entry_and_strip_control_characters() {
+        let report = resolve::MultiGetReport {
+            documents: Vec::new(),
+            unmatched: vec!["missing.md".into(), "evil\x1b[2J.md".into()],
+            ambiguous: vec![resolve::AmbiguousEntry {
+                entry: "README.md".into(),
+                matches: 3,
+            }],
+        };
+        let lines = multi_get_report_lines(&report);
+        assert_eq!(
+            lines,
+            [
+                "rqmd multi-get: no document matched \"missing.md\"",
+                "rqmd multi-get: no document matched \"evil?[2J.md\"",
+                "rqmd multi-get: \"README.md\" matched 3 documents; all are returned",
+            ]
+        );
+        assert!(lines.iter().all(|l| !l.chars().any(char::is_control)));
+    }
 }

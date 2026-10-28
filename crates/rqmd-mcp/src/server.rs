@@ -877,9 +877,10 @@ fn multi_get_documents(
     collections: Option<&[String]>,
     max_lines: Option<usize>,
 ) -> Result<String, String> {
-    let docs = resolve::resolve_multi_get(&store.db, collections, pattern)
+    let report = resolve::resolve_multi_get_report(&store.db, collections, pattern)
         .map_err(|e| format!("DB error: {e:#}"))?;
-    let (docs, total, truncated) = cap_multi_get_docs(docs, MULTI_GET_MAX_DOCS);
+    let notes = multi_get_report_notes(&report);
+    let (docs, total, truncated) = cap_multi_get_docs(report.documents, MULTI_GET_MAX_DOCS);
 
     let mut out = String::new();
     let mut count = 0usize;
@@ -912,12 +913,13 @@ fn multi_get_documents(
     }
 
     if count == 0 {
-        return Ok(format!("No documents matched: {pattern}"));
+        return Ok(format!("No documents matched: {pattern}{notes}"));
     }
     if truncated {
         out.push_str(&format!(
-            "\n[Showing {count} of {total} matched documents — multi_get is capped at \
-             {MULTI_GET_MAX_DOCS} per call.]\n"
+            "\n[Showing {count} of {total} matched documents; {} dropped — multi_get is capped \
+             at {MULTI_GET_MAX_DOCS} per call.]\n",
+            total - count
         ));
     }
     if count < docs.len() {
@@ -927,7 +929,45 @@ fn multi_get_documents(
             docs.len() - count
         ));
     }
+    out.push_str(&notes);
     Ok(out)
+}
+
+/// Most report entries `multi_get_report_notes` names one by one; the rest
+/// are counted in one closing line.
+const MULTI_GET_MAX_NOTED_ENTRIES: usize = 20;
+
+/// The `Note:` lines for a multi-get report, each starting with a newline:
+/// one per unmatched entry, then one per path entry that matched several
+/// documents, at most `MULTI_GET_MAX_NOTED_ENTRIES` of them, then a count of
+/// any left over. Empty when there is nothing to report.
+fn multi_get_report_notes(report: &resolve::MultiGetReport) -> String {
+    let unmatched = report
+        .unmatched
+        .iter()
+        .map(|e| format!("Note: no document matched {e:?}."));
+    let ambiguous = report.ambiguous.iter().map(|a| {
+        format!(
+            "Note: {:?} matched {} documents; all are returned.",
+            a.entry, a.matches
+        )
+    });
+    let lines: Vec<String> = unmatched.chain(ambiguous).collect();
+    let mut out = String::new();
+    for line in lines.iter().take(MULTI_GET_MAX_NOTED_ENTRIES) {
+        out.push('\n');
+        out.push_str(line);
+    }
+    if lines.len() > MULTI_GET_MAX_NOTED_ENTRIES {
+        out.push_str(&format!(
+            "\nNote: {} more entries matched no document or more than one.",
+            lines.len() - MULTI_GET_MAX_NOTED_ENTRIES
+        ));
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
 }
 
 fn build_status(store: &Store) -> String {
@@ -1299,7 +1339,55 @@ mod tests {
         let store = server.fts().expect("fts store");
         let text = multi_get_documents(&store, "does-not-exist-*", None, None).unwrap();
         assert!(text.contains("No documents matched"), "got: {text}");
+        assert!(
+            text.contains("Note: no document matched \"does-not-exist-*\"."),
+            "got: {text}"
+        );
     }
+
+    /// github.com/tylern91/rqmd#154, AC-4: unmatched and ambiguous entries
+    /// are noted after the documents, which are unchanged.
+    #[test]
+    fn multi_get_documents_notes_unmatched_and_ambiguous_entries() {
+        let (_dir, server) = test_server_with_doc();
+        index_numbered_doc(&server, "sub/doc1.md", "nested\n");
+        let store = server.fts().expect("fts store");
+
+        // The same two documents, named so that nothing needs a note.
+        let plain =
+            multi_get_documents(&store, "col/doc1.md, col/sub/doc1.md", None, None).unwrap();
+        assert!(!plain.contains("Note:"), "nothing to report: {plain}");
+        let noted = multi_get_documents(&store, "doc1.md, missing.md", None, None).unwrap();
+        assert!(plain.contains("rqmd://col/doc1.md") && plain.contains("rqmd://col/sub/doc1.md"));
+        assert_eq!(
+            noted,
+            format!(
+                "{plain}\nNote: no document matched \"missing.md\".\n\
+                 Note: \"doc1.md\" matched 2 documents; all are returned.\n"
+            )
+        );
+
+        let exact = multi_get_documents(&store, "col/doc1.md", None, None).unwrap();
+        assert!(!exact.contains("Note:"), "nothing to report: {exact}");
+    }
+
+    #[test]
+    fn multi_get_report_notes_name_at_most_twenty_entries() {
+        let report = resolve::MultiGetReport {
+            documents: Vec::new(),
+            unmatched: (0..25).map(|i| format!("m{i}.md")).collect(),
+            ambiguous: Vec::new(),
+        };
+        let notes = multi_get_report_notes(&report);
+        assert_eq!(notes.lines().filter(|l| l.contains("m1")).count(), 11);
+        assert_eq!(
+            notes.lines().filter(|l| l.starts_with("Note:")).count(),
+            MULTI_GET_MAX_NOTED_ENTRIES + 1
+        );
+        assert!(notes.contains("Note: 5 more entries matched no document or more than one."));
+        assert!(multi_get_report_notes(&resolve::MultiGetReport::default()).is_empty());
+    }
+
     fn index_numbered_doc(server: &RqmdServer, path: &str, body: &str) {
         let mut store = server.fts().expect("fts store");
         store
