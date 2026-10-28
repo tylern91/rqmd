@@ -10,8 +10,9 @@
   and `rqmd doctor`, now create nothing and say
   `` no index at <dir>; run `rqmd collection add <path>` to create one ``. `search`, `vsearch`,
   `query`, `get` and `multi-get` exit `1`; `status`, `doctor`, `collection list`, `context list`
-  and `ls` exit `0`. `rqmd mcp` starts without creating an index, and its tools give the same answer until
-  one exists (`status` as its result, the others as a tool error). `collection add`, `update`,
+  and `ls` exit `0`. `rqmd mcp` starts without creating an index, and its tools answer
+  `` no index; run `rqmd collection add <path>` to create one `` (no directory, as MCP replies never
+  disclose paths) until one exists (`status` as its result, the others as a tool error). `collection add`, `update`,
   `embed` and `init` create the index as before, and nothing changes for an existing index. See
   [docs/CLI.md](docs/CLI.md#exit-codes).
 

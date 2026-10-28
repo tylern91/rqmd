@@ -330,19 +330,17 @@ fn index_exists(index_dir: &Path) -> bool {
     index_dir.join("index.sqlite").is_file()
 }
 
-/// The answer to any tool call while no index exists at `index_dir`.
-fn no_index_message(index_dir: &Path) -> String {
-    format!(
-        "no index at {}; run `rqmd collection add <path>` to create one",
-        index_dir.display()
-    )
+/// The answer to any tool call while no index exists. It names no directory:
+/// MCP replies never disclose filesystem paths (see `status`).
+fn no_index_message() -> String {
+    "no index; run `rqmd collection add <path>` to create one".to_string()
 }
 
 fn require_index(index_dir: &Path) -> anyhow::Result<()> {
     if index_exists(index_dir) {
         Ok(())
     } else {
-        Err(anyhow::anyhow!(no_index_message(index_dir)))
+        Err(anyhow::anyhow!(no_index_message()))
     }
 }
 
@@ -603,7 +601,7 @@ impl RqmdServer {
     fn status_blocking(&self) -> Result<String, String> {
         // Informational, as `rqmd status` is: not a tool error.
         if !index_exists(&self.index_dir) {
-            return Ok(no_index_message(&self.index_dir));
+            return Ok(no_index_message());
         }
         let store = self
             .fts()
@@ -998,11 +996,11 @@ mod tests {
         let server = RqmdServer::new(index_dir.clone())
             .expect("server starts")
             .with_refresher(refresher);
-        let expected = no_index_message(&index_dir);
+        let expected = no_index_message();
         assert!(expected.contains("rqmd collection add"), "{expected}");
         assert!(
-            expected.contains(&index_dir.display().to_string()),
-            "{expected}"
+            !expected.contains(&index_dir.display().to_string()),
+            "an MCP reply must not disclose the index directory: {expected}"
         );
 
         assert_eq!(server.status_blocking(), Ok(expected.clone()));
@@ -1057,7 +1055,7 @@ mod tests {
         seed_empty_index(dir.path());
 
         let status = server.status_blocking().expect("status");
-        assert_ne!(status, no_index_message(&index_dir));
+        assert_ne!(status, no_index_message());
     }
 
     fn doc(id: i64) -> Document {
