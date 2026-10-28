@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rqmd_core::{
-    Deadline, QueryOutcome, QueryStage, Recency, RerankStatus, SearchOptions, SearchResult, Store,
+    Deadline, QueryOutcome, QueryStage, QueryTimings, Recency, RerankStatus, SearchOptions,
+    SearchResult, Store,
 };
 use std::io::Write;
 use std::path::Path;
@@ -56,6 +57,8 @@ pub struct QueryOptions<'a> {
     pub timeout_strict: bool,
     /// Weight scores by file age.
     pub recency: Option<Recency>,
+    /// After the results, print per-stage durations and counts to stderr.
+    pub timings: bool,
 }
 
 /// Stderr line for a query whose results were not reranked although reranking
@@ -145,18 +148,114 @@ fn query_with_progress<W: Write + Send + 'static>(
     outcome
 }
 
+/// Milliseconds with two decimals, the unit every timings line uses.
+fn ms(d: Duration) -> String {
+    format!("{:.2} ms", d.as_secs_f64() * 1000.0)
+}
+
+/// The `--timings` report: one `rqmd: timings:` line per stage, for stderr.
+/// Counts sit beside the durations they explain.
+fn render_timings(t: &QueryTimings) -> String {
+    let plural = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+    let mut out = vec![format!("total {}", ms(t.total))];
+    out.push(format!(
+        "bm25 {} ({}, scope ids {})",
+        ms(t.bm25),
+        plural(t.bm25_calls, "call"),
+        ms(t.bm25_scope)
+    ));
+    out.push(format!(
+        "embed {} ({}, includes first model load)",
+        ms(t.embed),
+        plural(t.embed_calls, "call")
+    ));
+    for (i, p) in t.ann_passes.iter().enumerate() {
+        out.push(format!(
+            "ann pass {} [{}] k={} vectors fetched={} in scope={} ann={} per-hit lookups={} lookup time={}",
+            i + 1,
+            p.phase,
+            p.k,
+            p.fetched,
+            p.in_scope,
+            ms(p.ann),
+            p.fetched,
+            ms(p.lookup)
+        ));
+    }
+    out.push(format!(
+        "ann total {} pass(es) ann={} per-hit lookups={} lookup time={}",
+        t.ann_passes.len(),
+        ms(t.ann_time()),
+        t.lookups(),
+        ms(t.lookup_time())
+    ));
+    out.push(format!(
+        "expansion generate {} search {} (search includes its embeds, ann passes and keyword calls above)",
+        ms(t.expansion_generate),
+        ms(t.expansion_search)
+    ));
+    out.push(format!(
+        "fusion {} ({} fused into {})",
+        ms(t.fuse),
+        plural(t.fused_from, "list"),
+        plural(t.fused, "candidate")
+    ));
+    out.push(format!(
+        "resolve candidates {} ({})",
+        ms(t.resolve),
+        plural(t.resolve_lookups, "lookup")
+    ));
+    out.push(format!("chunk select {}", ms(t.chunk_select)));
+    if t.rerank_chunks == 0 {
+        out.push("rerank not run".to_string());
+    } else {
+        out.push(format!(
+            "rerank {} ({})",
+            ms(t.rerank),
+            plural(t.rerank_chunks, "section")
+        ));
+    }
+    out.push(format!("assemble {}", ms(t.assemble)));
+    // Expansion search is a span around other stages, so it is left out here.
+    let attributed = t.bm25
+        + t.embed
+        + t.ann_time()
+        + t.lookup_time()
+        + t.expansion_generate
+        + t.fuse
+        + t.resolve
+        + t.chunk_select
+        + t.rerank
+        + t.assemble;
+    out.push(format!(
+        "unattributed {}",
+        ms(t.total.saturating_sub(attributed))
+    ));
+    out.iter()
+        .map(|line| format!("rqmd: timings: {line}\n"))
+        .collect()
+}
+
 pub fn run_query(index_dir: &Path, query: &str, opts: QueryOptions) -> Result<()> {
+    let mut timings = None;
     run_search_command(index_dir, query, opts.fmt, opts.full, true, |s| {
         if let Some(recency) = &opts.recency {
             eprintln!("rqmd: {}", recency.notice());
         }
+        s.set_query_timings(opts.timings);
         let progress = Progress::new(ProgressMode::detect());
         let outcome = query_with_progress(s, query, &opts, progress)?;
+        timings = s.take_query_timings();
         if let Some(line) = rerank_warning(outcome.rerank, opts.timeout) {
             eprintln!("{line}");
         }
         Ok(outcome.results)
-    })
+    })?;
+    // After the results, so a terminal shows the report last.
+    if let Some(timings) = timings {
+        eprint!("{}", render_timings(&timings));
+    }
+    Ok(())
 }
 
 /// Say on stderr that results are weighted by file age, as `query` does.
@@ -215,6 +314,33 @@ mod tests {
             assert!(line.starts_with("rqmd: warning: results were not reranked"));
             assert!(!line.contains('\n') && !line.contains('\x1b'), "{line:?}");
         }
+    }
+
+    #[test]
+    fn timings_report_is_plain_prefixed_lines_with_counts() {
+        let mut t = QueryTimings {
+            total: Duration::from_millis(10),
+            bm25_calls: 1,
+            fused: 3,
+            fused_from: 2,
+            ..QueryTimings::default()
+        };
+        t.ann_passes.push(rqmd_core::AnnPass {
+            phase: "query",
+            k: 20,
+            fetched: 20,
+            in_scope: 2,
+            ann: Duration::from_millis(1),
+            lookup: Duration::from_millis(2),
+        });
+        let report = render_timings(&t);
+        assert!(report.lines().all(|l| l.starts_with("rqmd: timings: ")));
+        assert!(!report.contains('\x1b'), "{report:?}");
+        assert!(report.contains("ann pass 1 [query] k=20 vectors fetched=20 in scope=2"));
+        assert!(report.contains("per-hit lookups=20 lookup time=2.00 ms"));
+        assert!(report.contains("rerank not run"));
+        assert!(report.contains("2 lists fused into 3 candidates"));
+        assert!(report.contains("unattributed 7.00 ms"), "{report}");
     }
 
     #[test]
@@ -310,6 +436,7 @@ mod tests {
             timeout: None,
             timeout_strict: false,
             recency: None,
+            timings: false,
         }
     }
 

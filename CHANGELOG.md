@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+- `rqmd query --timings` (hidden from `--help`) prints, to stderr after the results, how long each
+  stage of the query took and how much work it did: the keyword probe, query embedding, every
+  vector-search pass (the `k` asked for, vectors fetched, how many were in scope, time in the
+  index and time in the per-hit SQLite lookups), expansion, fusion, candidate resolution, section
+  choice, reranking and result assembly. It is off by default; without it stdout, stderr, the exit
+  code and the results are unchanged, and with it stdout and the results are unchanged. Search
+  behaviour, SQL and the index format are untouched. `rqmd_core::Store::set_query_timings` and
+  `take_query_timings` expose the same figures as `QueryTimings`. The numbers behind
+  [#152](https://github.com/tylern91/rqmd/issues/152) are in
+  [docs/research/2026-10-28-scoped-vector-search-timings.md](docs/research/2026-10-28-scoped-vector-search-timings.md).
+
 ## [0.33.0] - 2026-10-28
 
 ### Added
