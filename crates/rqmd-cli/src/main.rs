@@ -260,7 +260,12 @@ pub enum McpAction {
     /// Show MCP daemon status (pid, health, uptime)
     Status,
     /// Stop the running MCP daemon
-    Stop,
+    Stop {
+        /// If the daemon is still running after SIGTERM and the grace period, kill it with
+        /// SIGKILL, but only after checking the process is the one recorded in the pidfile
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -518,7 +523,7 @@ fn run() -> Result<()> {
             action,
         } => match action {
             Some(McpAction::Status) => commands::mcp::run_mcp_status(&index_dir),
-            Some(McpAction::Stop) => commands::mcp::run_mcp_stop(&index_dir),
+            Some(McpAction::Stop { force }) => commands::mcp::run_mcp_stop(&index_dir, force),
             None => commands::mcp::run_mcp(
                 &index_dir,
                 http || daemon,
