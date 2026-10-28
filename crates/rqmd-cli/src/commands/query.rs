@@ -463,6 +463,46 @@ mod tests {
             .collect()
     }
 
+    /// rqmd#152, `--timings` as `run_query` drives it: the results are those
+    /// of an untimed query, and the report names each stage that ran, with
+    /// the counts beside it.
+    #[test]
+    fn timings_leave_the_results_alone_and_report_every_stage() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut s, ..) = nine_doc_store(dir.path());
+        let (plain, _) = run(&mut s, ProgressMode::Off);
+        let plain = plain.unwrap();
+        assert!(s.take_query_timings().is_none(), "off unless asked for");
+
+        s.set_query_timings(true);
+        let (timed, _) = run(&mut s, ProgressMode::Off);
+        let timed = timed.unwrap();
+        let report = render_timings(&s.take_query_timings().expect("timings were on"));
+
+        assert_eq!(ranked(&plain), ranked(&timed));
+        assert_eq!(plain.rerank, timed.rerank);
+        for stage in [
+            "total ",
+            "bm25 ",
+            "(1 call, scope ids ",
+            "embed ",
+            "ann pass 1 [query] k=20 vectors fetched=9 in scope=9",
+            "per-hit lookups=9",
+            "fusion ",
+            "2 lists fused into 9 candidates",
+            "resolve candidates ",
+            "(9 lookups)",
+            "chunk select ",
+            "(9 sections)",
+            "assemble ",
+            "unattributed ",
+        ] {
+            assert!(report.contains(stage), "no `{stage}` in:\n{report}");
+        }
+        assert!(!report.contains("rerank not run"), "{report}");
+        assert!(report.lines().all(|l| l.starts_with("rqmd: timings: ")));
+    }
+
     #[test]
     fn stage_labels_name_the_model_load_with_the_stage_that_needs_it() {
         assert_eq!(stage_label(QueryStage::Searching), "Searching keywords");

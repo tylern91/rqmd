@@ -3511,6 +3511,155 @@ mod tests {
         assert_eq!(results.len(), 1, "vector match must still surface a result");
     }
 
+    /// Embeds text about "xylophone" on one axis and everything else on
+    /// another, so a query about the second is far from the first in vector
+    /// space. Each ordinary text gets a distinct small offset so no two
+    /// vectors are equal. Embed-only, like `StubBackend`.
+    struct TwoTopicBackend;
+
+    impl rqmd_llm::InferenceBackend for TwoTopicBackend {
+        fn capabilities(&self) -> rqmd_llm::BackendCapabilities {
+            rqmd_llm::BackendCapabilities {
+                embed: true,
+                rerank: false,
+                generate: false,
+            }
+        }
+        fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
+            let mut v = vec![0.0; rqmd_llm::EMBED_DIM];
+            if text.contains("xylophone") {
+                v[1] = 1.0;
+            } else {
+                v[0] = 1.0;
+                v[2] = 0.001 * (text.len() % 97) as f32;
+            }
+            Ok(v)
+        }
+        fn rerank(&mut self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>> {
+            panic!("rerank is not supported")
+        }
+        fn generate(&mut self, _prompt: &str) -> Result<String> {
+            panic!("generate is not supported")
+        }
+        fn embed_model_name(&self) -> &str {
+            "two-topic"
+        }
+        fn rerank_model_name(&self) -> &str {
+            "stub-rerank"
+        }
+        fn generate_model_name(&self) -> &str {
+            "stub-generate"
+        }
+    }
+
+    /// A store with 40 notes in `bulk` and one in `small`, about unrelated
+    /// subjects.
+    fn bulk_and_small_store(dir: &std::path::Path) -> Store {
+        let mut store = open_stub_store_with(dir, Box::new(TwoTopicBackend));
+        for n in 0..40 {
+            store
+                .index_document(
+                    "bulk",
+                    &format!("star-{n}.md"),
+                    "Star",
+                    &format!("telescope galaxy nebula {}", "orbit ".repeat(n)),
+                )
+                .unwrap();
+        }
+        store
+            .index_document("small", "drum.md", "Drum", "xylophone marimba mallets")
+            .unwrap();
+        store.flush().unwrap();
+        store
+    }
+
+    fn query_outcome(store: &mut Store, scope: &[String]) -> QueryOutcome {
+        store
+            .hybrid_query_outcome_with(
+                "telescope galaxy",
+                None,
+                10,
+                Some(scope),
+                true,
+                true,
+                Deadline::none(),
+                false,
+                &SearchOptions::default(),
+            )
+            .unwrap()
+    }
+
+    /// rqmd#152: a scoped query far from its scope widens the ANN pool, and
+    /// the timings record every pass: `k` grows, each fetched vector is
+    /// resolved by one lookup, and only the last pass reaches the scoped note.
+    #[test]
+    fn timings_record_each_widening_pass_of_a_scoped_query() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = bulk_and_small_store(dir.path());
+        store.set_query_timings(true);
+
+        let scope = vec!["small".to_string()];
+        let outcome = query_outcome(&mut store, &scope);
+        assert_eq!(outcome.results.len(), 1, "the scoped note must be found");
+        assert_eq!(outcome.results[0].collection, "small");
+
+        let timings = store.take_query_timings().expect("timings were on");
+        let passes = &timings.ann_passes;
+        assert!(passes.len() >= 2, "expected widening: {passes:?}");
+        assert_eq!(passes[0].k, RERANK_CANDIDATE_LIMIT);
+        assert!(passes.windows(2).all(|w| w[1].k > w[0].k), "{passes:?}");
+        assert!(passes.iter().all(|p| p.phase == "query"), "{passes:?}");
+        // The 20 and 40 nearest vectors are all in `bulk`, outside the scope.
+        assert_eq!(passes[0].in_scope, 0, "{passes:?}");
+        assert_eq!(passes.last().unwrap().in_scope, 1, "{passes:?}");
+        assert_eq!(
+            timings.lookups(),
+            passes.iter().map(|p| p.fetched).sum::<usize>()
+        );
+        assert!(passes.iter().all(|p| p.fetched > 0 && p.fetched <= p.k));
+        assert_eq!(timings.bm25_calls, 1);
+        assert_eq!(timings.embed_calls, 1);
+        assert_eq!(timings.rerank_chunks, 0, "rerank was skipped");
+        assert!(timings.total >= timings.fuse + timings.resolve);
+    }
+
+    /// rqmd#152: measuring changes no result, and with it off nothing is
+    /// recorded. Taking the timings starts a fresh set.
+    #[test]
+    fn timings_do_not_change_results_and_are_off_by_default() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = bulk_and_small_store(dir.path());
+        let scope = vec!["small".to_string()];
+
+        let plain = query_outcome(&mut store, &scope);
+        assert!(store.take_query_timings().is_none(), "off by default");
+
+        store.set_query_timings(true);
+        let timed = query_outcome(&mut store, &scope);
+        let first = store.take_query_timings().expect("timings were on");
+        assert!(!first.ann_passes.is_empty());
+
+        let key = |o: &QueryOutcome| {
+            o.results
+                .iter()
+                .map(|r| (r.file.clone(), r.score.to_bits(), r.best_chunk.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(key(&plain), key(&timed));
+
+        let _ = query_outcome(&mut store, &scope);
+        let second = store.take_query_timings().expect("still on");
+        assert_eq!(
+            second.ann_passes.len(),
+            first.ann_passes.len(),
+            "taking starts afresh, so passes are not carried over"
+        );
+
+        store.set_query_timings(false);
+        let _ = query_outcome(&mut store, &scope);
+        assert!(store.take_query_timings().is_none());
+    }
+
     /// A backend whose `generate` returns a fixed, caller-supplied expansion
     /// string — `StubBackend::generate` panics unconditionally, so this
     /// exists only to give `parse_and_run_expansion` a controllable output to
