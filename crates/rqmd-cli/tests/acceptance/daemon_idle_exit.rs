@@ -649,6 +649,40 @@ mod stop_force {
     }
 
     #[test]
+    fn ac_4_an_old_pidfile_without_a_start_time_keeps_a_live_process_and_its_pidfile() {
+        // A pidfile written before the start-time field existed cannot tell
+        // the daemon from a recycled pid: report it, signal nothing, delete nothing.
+        let dir = TempDir::new().expect("tempdir");
+        let stub = Stub::spawn(dir.path(), true);
+        write_record(dir.path(), stub.pid, free_port(), None);
+
+        let out = rqmd_command(dir.path(), None)
+            .args(["mcp", "status"])
+            .output()
+            .expect("run mcp status");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{text}");
+        assert!(
+            text.contains("running but not answering")
+                && text.contains("no process start time")
+                && !text.contains("stale"),
+            "a live process was reported as stale: {text}"
+        );
+        assert!(pidfile(dir.path()).exists(), "status deleted the pidfile");
+
+        for force in [false, true] {
+            let (ok, text) = run_stop(dir.path(), force);
+            assert!(!ok, "{text}");
+            assert!(
+                text.contains("refusing to signal") && !text.contains("no longer running"),
+                "{text}"
+            );
+            assert!(pidfile(dir.path()).exists(), "stop deleted the pidfile");
+            assert!(stub.alive() && !stub.was_sent_sigterm(), "{text}");
+        }
+    }
+
+    #[test]
     fn ac_5_a_recycled_pid_pidfile_never_signals_the_foreign_process() {
         // Without --force a pidfile naming a live pid that is not the daemon
         // is removed as stale and the pid is left alone.

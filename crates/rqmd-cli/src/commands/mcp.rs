@@ -123,6 +123,13 @@ fn spawn_daemon(
                 existing.pid,
                 rqmd_mcp::host_port(&existing.host, existing.port)
             ),
+            daemon::Identity::AliveUnverified(why) => bail!(
+                "pid {} from the MCP daemon pidfile is running but not answering on http://{}, \
+                 and {why} — if it is the daemon, stop it yourself; if not, delete {}",
+                existing.pid,
+                rqmd_mcp::host_port(&existing.host, existing.port),
+                daemon::pidfile_path(index_dir).display()
+            ),
             daemon::Identity::Stale => daemon::remove_pidfile(index_dir),
         }
     }

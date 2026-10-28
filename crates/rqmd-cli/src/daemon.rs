@@ -51,6 +51,11 @@ pub enum Identity {
     /// time matches the one in the pidfile: the daemon is still there, just
     /// not answering.
     AliveUnresponsive,
+    /// `/health` is unreachable and the recorded pid is alive, but the pidfile
+    /// has no start time to check it against (written by an older rqmd, or the
+    /// OS would not report one). It may be the daemon or a recycled pid: it is
+    /// reported, never signalled, and the pidfile is kept.
+    AliveUnverified(NotOurs),
     /// `/health` answered, but with a different pid — someone else owns the port.
     Foreign(HealthResponse),
 }
@@ -120,8 +125,13 @@ pub fn verify_identity(record: &PidRecord) -> Identity {
     match fetch_health(&record.host, record.port) {
         Some(health) if health.pid == record.pid => Identity::Confirmed(health),
         Some(health) => Identity::Foreign(health),
-        None if start_time_matches(record) => Identity::AliveUnresponsive,
-        None => Identity::Stale,
+        None => match check_recorded_process(record) {
+            None => Identity::AliveUnresponsive,
+            Some(why @ (NotOurs::NoRecordedStart | NotOurs::UnreadableStart)) => {
+                Identity::AliveUnverified(why)
+            }
+            Some(NotOurs::Gone | NotOurs::DifferentStart { .. }) => Identity::Stale,
+        },
     }
 }
 
@@ -159,10 +169,6 @@ pub fn check_recorded_process(record: &PidRecord) -> Option<NotOurs> {
         return Some(NotOurs::DifferentStart { actual, recorded });
     }
     None
-}
-
-fn start_time_matches(record: &PidRecord) -> bool {
-    check_recorded_process(record).is_none()
 }
 
 impl std::fmt::Display for NotOurs {
@@ -256,33 +262,22 @@ fn stop_daemon_with(index_dir: &Path, force: bool, grace: Duration) -> Result<()
 
     match verify_identity(&record) {
         Identity::Stale => {
-            // With --force, say why a live pid is left alone: it is not the
-            // daemon we recorded, so nothing is signalled.
-            let why = if force {
-                check_recorded_process(&record).filter(|why| *why != NotOurs::Gone)
-            } else {
-                None
-            };
-            match why {
-                Some(NotOurs::NoRecordedStart | NotOurs::UnreadableStart) => bail!(
-                    "refusing to signal pid {}: {} — pidfile kept; if you are sure it is the \
-                     daemon, stop it yourself",
-                    record.pid,
-                    why.unwrap()
+            remove_pidfile(index_dir);
+            match check_recorded_process(&record) {
+                // A live pid that is not the daemon: say so, and leave it alone.
+                Some(why @ NotOurs::DifferentStart { .. }) => bail!(
+                    "MCP daemon pidfile was stale — removed it; not signalling pid {}: {why}",
+                    record.pid
                 ),
-                Some(why) => {
-                    remove_pidfile(index_dir);
-                    bail!(
-                        "MCP daemon pidfile was stale — removed it; not signalling pid {}: {why}",
-                        record.pid
-                    );
-                }
-                None => {
-                    remove_pidfile(index_dir);
-                    bail!("MCP daemon pidfile was stale (process no longer running) — removed it");
-                }
+                _ => bail!("MCP daemon pidfile was stale (process no longer running) — removed it"),
             }
         }
+        Identity::AliveUnverified(why) => bail!(
+            "refusing to signal pid {}: it is running but {why} — pidfile kept; if it is the \
+             daemon, stop it yourself, and if not, delete {}",
+            record.pid,
+            pidfile_path(index_dir).display()
+        ),
         Identity::Foreign(health) => {
             bail!(
                 "refusing to stop: port {} is held by pid {}, not the recorded pid {} — \
@@ -370,6 +365,16 @@ pub fn status_daemon(index_dir: &Path) -> Result<()> {
                  if it will not exit",
                 record.pid,
                 rqmd_mcp::host_port(&record.host, record.port)
+            );
+        }
+        Identity::AliveUnverified(why) => {
+            println!(
+                "rqmd MCP daemon: pid {} is running but not answering on http://{}, and {why} — \
+                 pidfile kept, nothing signalled; if it is the daemon, stop it yourself, and if \
+                 not, delete {}",
+                record.pid,
+                rqmd_mcp::host_port(&record.host, record.port),
+                pidfile_path(index_dir).display()
             );
         }
         Identity::Stale => {
@@ -506,10 +511,10 @@ mod tests {
     fn stale_pidfile_is_not_signalled_and_does_not_block_startup() {
         let dir = tempfile::tempdir().unwrap();
 
-        // No server is actually listening on this port, so `verify_identity`
-        // must resolve to `Stale` — never `Confirmed` or `Foreign` — for any
-        // pid, including one that legitimately belongs to another live
-        // process (like this very test process).
+        // No server is actually listening on this port. A live pid whose
+        // pidfile has no start time (an older rqmd wrote it) cannot be told
+        // apart from a recycled one: it is reported, never signalled, and the
+        // pidfile is kept for the user to decide.
         let record = PidRecord {
             pid: std::process::id(),
             host: "127.0.0.1".to_string(),
@@ -519,20 +524,27 @@ mod tests {
             started_at_unix: 0,
             process_start_unix: None,
         };
-        assert!(matches!(verify_identity(&record), Identity::Stale));
+        assert!(matches!(
+            verify_identity(&record),
+            Identity::AliveUnverified(NotOurs::NoRecordedStart)
+        ));
+
+        // With a recorded start time that differs from this live process's,
+        // the pid is known to be recycled: `verify_identity` must resolve to
+        // `Stale` — never `Confirmed` or `Foreign` — even though the pid
+        // belongs to another live process (this very test process).
+        let recycled = PidRecord {
+            process_start_unix: process_start_time(std::process::id()).map(|t| t - 3600),
+            ..record.clone()
+        };
+        assert!(matches!(verify_identity(&recycled), Identity::Stale));
 
         // A stale identity must not block startup: the port itself is free,
         // so a fresh daemon can bind it once the caller removes the pidfile.
         check_port_free(&record.host, record.port).unwrap();
 
         // status/stop both self-heal by removing the stale pidfile rather
-        // than ever calling kill() on the recycled pid. The recorded start
-        // time differs from this live process's, which is what marks the pid
-        // as recycled.
-        let recycled = PidRecord {
-            process_start_unix: process_start_time(std::process::id()).map(|t| t - 3600),
-            ..record.clone()
-        };
+        // than ever calling kill() on the recycled pid.
         std::fs::write(
             pidfile_path(dir.path()),
             serde_json::to_string(&recycled).unwrap(),
