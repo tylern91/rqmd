@@ -1,0 +1,20 @@
+rqmd eval — search quality harness
+Corpus: 6 documents, 25 queries
+Mode: BM25 / FTS only (no model required)
+Indexing corpus (6 docs)...
+Indexing complete.
+
+  ┌─────────────────────────────────────────────────────┐
+  │  BM25 / FTS                                          │
+  ├──────────────────────┬────────┬───────────┬─────────┤
+  │  Tier                │  Hit@K │  Score    │  Gate   │
+  ├──────────────────────┼────────┼───────────┼─────────┤
+  │  easy      (Hit@3)   │   @3   │  100.0%  │  PASS   │
+  │  medium    (Hit@3)   │   @3   │  100.0%  │  PASS   │
+  │  hard      (Hit@5)   │   @5   │  100.0%  │  PASS   │
+  │  fusion    (Hit@3)   │   @3   │  100.0%  │  n/a  │
+  ├──────────────────────┼────────┼───────────┼─────────┤
+  │  overall   (Hit@3)   │   @3   │  100.0%  │  PASS   │
+  └──────────────────────┴────────┴───────────┴─────────┘
+
+  ✓ All gates PASS — quality parity confirmed

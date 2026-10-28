@@ -1,0 +1,51 @@
+rqmd eval — search quality harness
+Corpus: 6 documents, 25 queries
+Mode: BM25 / FTS only (no model required)
+Indexing corpus (6 docs)...
+Indexing complete.
+
+  Per-query breakdown:
+  Easy:
+    ✓ "API versioning"  "api-design"
+    ✓ "Series A fundraising"  "fundraising"
+    ✓ "CAP theorem"  "distributed-systems"
+    ✓ "overfitting machine learning"  "machine-learning"
+    ✓ "remote work VPN"  "remote-work"
+    ✓ "Project Phoenix retrospective"  "product-launch"
+    ✓ "telecommuting"  "remote-work"
+  Medium:
+    ✓ "how to structure REST endpoints"  "api-design"
+    ✓ "raising money for startup"  "fundraising"
+    ✓ "consistency vs availability tradeoffs"  "distributed-systems"
+    ✓ "how to prevent models from memorizing data"  "machine-learning"
+    ✓ "working from home guidelines"  "remote-work"
+    ✓ "what went wrong with the launch"  "product-launch"
+  Hard:
+    ✓ "nouns not verbs"  "api-design"
+    ✓ "Sequoia investor pitch"  "fundraising"
+    ✓ "Raft algorithm leader election"  "distributed-systems"
+    ✓ "F1 score precision recall"  "machine-learning"
+    ✓ "quarterly team gathering travel"  "remote-work"
+    ✓ "beta program 47 bugs"  "product-launch"
+  Fusion:
+    ✓ "how much runway before running out of money"  "fundraising"
+    ✓ "datacenter replication sync strategy"  "distributed-systems"
+    ✓ "splitting data for training and testing"  "machine-learning"
+    ✓ "JSON response codes error messages"  "api-design"
+    ✓ "video calls camera async messaging"  "remote-work"
+    ✓ "CI/CD pipeline testing coverage"  "product-launch"
+
+  ┌─────────────────────────────────────────────────────┐
+  │  BM25 / FTS                                          │
+  ├──────────────────────┬────────┬───────────┬─────────┤
+  │  Tier                │  Hit@K │  Score    │  Gate   │
+  ├──────────────────────┼────────┼───────────┼─────────┤
+  │  easy      (Hit@3)   │   @3   │  100.0%  │  PASS   │
+  │  medium    (Hit@3)   │   @3   │  100.0%  │  PASS   │
+  │  hard      (Hit@5)   │   @5   │  100.0%  │  PASS   │
+  │  fusion    (Hit@3)   │   @3   │  100.0%  │  n/a  │
+  ├──────────────────────┼────────┼───────────┼─────────┤
+  │  overall   (Hit@3)   │   @3   │  100.0%  │  PASS   │
+  └──────────────────────┴────────┴───────────┴─────────┘
+
+  ✓ All gates PASS — quality parity confirmed

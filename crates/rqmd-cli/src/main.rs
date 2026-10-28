@@ -212,7 +212,7 @@ enum Commands {
         #[arg(short = 'n', long, default_value = "5")]
         rounds: usize,
     },
-    /// Search quality evaluation against synthetic fixtures
+    /// Search quality evaluation: built-in fixtures, or your own index with --judgements
     Eval {
         /// Search mode: bm25 (default, no model), vec, hybrid
         #[arg(long, default_value = "bm25")]
@@ -220,6 +220,23 @@ enum Commands {
         /// Print per-query pass/fail breakdown
         #[arg(long)]
         verbose: bool,
+        /// Score a judgement file against the existing index (read-only) instead of
+        /// the built-in fixtures; reports nDCG@10, MRR@10, Recall@K, Hit@K and latency
+        #[arg(long, value_name = "FILE")]
+        judgements: Option<std::path::PathBuf>,
+        /// Cutoff for Recall@K and Hit@K (default 10); needs --judgements
+        #[arg(long, value_name = "K", requires = "judgements",
+              value_parser = clap::value_parser!(u64).range(1..))]
+        k: Option<u64>,
+        /// Print the report as JSON; needs --judgements
+        #[arg(long, requires = "judgements")]
+        json: bool,
+        /// Hybrid mode: skip the rerank stage; needs --judgements
+        #[arg(long, requires = "judgements")]
+        no_rerank: bool,
+        /// Hybrid mode: skip query expansion; needs --judgements
+        #[arg(long, requires = "judgements")]
+        no_expand: bool,
     },
     /// Start the MCP server (stdio by default; --http for Streamable HTTP)
     Mcp {
@@ -516,7 +533,32 @@ fn run() -> Result<()> {
         ),
         Commands::Doctor => commands::index::run_doctor(&index_dir),
         Commands::Bench { rounds } => commands::bench::run_bench(&index_dir, rounds),
-        Commands::Eval { mode, verbose } => commands::eval::run_eval(&index_dir, &mode, verbose),
+        Commands::Eval {
+            mode,
+            verbose,
+            judgements: None,
+            ..
+        } => commands::eval::run_eval(&index_dir, &mode, verbose),
+        Commands::Eval {
+            mode,
+            verbose,
+            judgements: Some(judgements),
+            k,
+            json,
+            no_rerank,
+            no_expand,
+        } => commands::eval_judgements::run_eval_judgements(
+            &index_dir,
+            &commands::eval_judgements::JudgementEval {
+                judgements: &judgements,
+                mode: &mode,
+                k: k.map_or(10, |k| usize::try_from(k).unwrap_or(usize::MAX)),
+                json,
+                verbose,
+                no_rerank,
+                no_expand,
+            },
+        ),
         Commands::Mcp {
             http,
             port,
