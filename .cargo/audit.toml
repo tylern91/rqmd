@@ -24,4 +24,43 @@ ignore = [
     "RUSTSEC-2026-0398",
     "RUSTSEC-2026-0403",
     "RUSTSEC-2026-0410",
+
+    # paste 1.0.15 is unmaintained (RUSTSEC-2024-0436), a maintenance notice
+    # and not a vulnerability. It is a proc-macro reached only through
+    # tokenizers 0.23.2 -> macro_rules_attribute, and tokenizers is pulled in
+    # only by the optional `ort-backend` feature of rqmd-llm.
+    # lean: remove when a tokenizers release drops macro_rules_attribute.
+    "RUSTSEC-2024-0436",
+
+    # zstd-safe 7.2.4 has ten unsound advisories beyond the four above. It
+    # reaches rqmd only through tantivy 0.26.1, tantivy-columnar 0.7.0 and
+    # tantivy-sstable 0.7.0, which call `zstd::bulk::{compress_to_buffer,
+    # decompress_to_buffer, Compressor, Decompressor}` and
+    # `zstd_safe::compress_bound` and nothing else from zstd (checked with
+    # rg over the three crates' src/). None of the affected APIs appears there:
+    #   0395  CParameter::StableInBuffer
+    #   0396  seekable::*
+    #   0397  OutBuffer::around_pos
+    #   0399  init_using_cdict, init_using_ddict
+    #   0400  a dictionary used after a one-shot call on a context with an
+    #         open stream (bulk is one-shot only; no dictionary is used)
+    #   0401  train_from_buffer
+    #   0402  CCtx::try_clone on a multithreaded context
+    #   0404  DCtx::try_clone
+    #   0405  InBuffer::pos
+    #   0406  changing a multithreaded context with an unfinished frame
+    # The multithreaded ones (0402, 0406) also need the `zstdmt` feature,
+    # which no crate in this workspace enables (`cargo tree -e features` lists none).
+    # lean: unreachable in tantivy 0.26.1, remove with the tantivy 0.27 bump
+    # in #157 (same trigger as the four entries above).
+    "RUSTSEC-2026-0395",
+    "RUSTSEC-2026-0396",
+    "RUSTSEC-2026-0397",
+    "RUSTSEC-2026-0399",
+    "RUSTSEC-2026-0400",
+    "RUSTSEC-2026-0401",
+    "RUSTSEC-2026-0402",
+    "RUSTSEC-2026-0404",
+    "RUSTSEC-2026-0405",
+    "RUSTSEC-2026-0406",
 ]
