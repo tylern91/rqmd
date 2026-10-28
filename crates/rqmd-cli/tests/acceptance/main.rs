@@ -15,6 +15,7 @@ mod mcp_refresh;
 mod output_plain;
 mod per_file;
 mod query_timeout;
+mod read_no_index;
 mod recency;
 mod security;
 mod status_cost;

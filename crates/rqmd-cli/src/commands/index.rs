@@ -15,6 +15,9 @@ use crate::hook::{self, HookConfig, HookOutcome};
 use crate::{document, exclusions, format as fmt, signals, store};
 
 pub fn run_status(index_dir: &Path) -> Result<()> {
+    if store::report_if_no_index(index_dir) {
+        return Ok(());
+    }
     let s = store::open_store_no_backend(index_dir, true)?;
 
     // ── Index size (single combined line, mirroring qmd's `Size:`) ──────────────
@@ -1300,7 +1303,7 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         if db_path.exists() {
             "yes"
         } else {
-            "NO — run any rqmd command to create"
+            "NO — run `rqmd collection add <path>` to create one"
         }
     );
     println!("  Tantivy dir:   {}", index_dir.join("tantivy").display());

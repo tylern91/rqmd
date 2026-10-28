@@ -146,11 +146,13 @@ fn ac_6_add_rejects_a_malformed_ignore_pattern_and_stores_nothing() {
         .failure()
         .stderr(contains("invalid ignore pattern 'docs/{a'"));
 
+    // The rejected add leaves no index behind, and `collection list` no
+    // longer creates one (#156), so it reports that rather than an empty list.
     rqmd(index_dir.path())
         .args(["collection", "list"])
         .assert()
         .success()
-        .stdout(contains("No collections"));
+        .stdout(contains("no index at"));
 }
 
 /// An already-stored malformed pattern does not stop `update`: it warns once

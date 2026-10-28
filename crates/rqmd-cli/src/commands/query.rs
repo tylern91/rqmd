@@ -23,11 +23,11 @@ fn run_search_command(
     search: impl FnOnce(&mut Store) -> Result<Vec<SearchResult>>,
 ) -> Result<()> {
     let mut s = if with_backend {
-        let s = store::open_store_with_backend(index_dir, true)?;
+        let s = store::open_existing_store_with_backend(index_dir, true)?;
         store::warn_if_fingerprint_stale(&s);
         s
     } else {
-        store::open_store_no_backend(index_dir, true)?
+        store::open_existing_store_no_backend(index_dir, true)?
     };
     store::warn_if_raw_backfill_pending(&s);
     store::warn_if_fts_rebuild_pending(&s);

@@ -71,6 +71,9 @@ fn add(index_dir: &Path, path: Option<&str>, text: &str) -> Result<()> {
 }
 
 fn list(index_dir: &Path) -> Result<()> {
+    if store::report_if_no_index(index_dir) {
+        return Ok(());
+    }
     let s = store::open_store_no_backend(index_dir, true)?;
     let rows = db::list_config_by_prefix(&s.db, CTX_PREFIX)?;
 
