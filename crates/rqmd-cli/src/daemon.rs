@@ -5,16 +5,15 @@
 //! process. `stop`/`status` therefore never trust the pidfile's pid in
 //! isolation: they cross-check it against the daemon's own `/health` response
 //! on the recorded port. Only an exact pid match on a live `/health` counts as
-//! "confirmed"; anything else (`/health` unreachable, or answered by a
-//! different pid) is resolved without ever calling `kill`.
+//! "confirmed"; a `/health` answered by a different pid is never signalled.
 //!
 //! `/health` can also be silent while the process is alive (a daemon that is
 //! slow to shut down). The pidfile therefore records the daemon's own process
 //! start time as well, read from the OS, so a live pid whose start time still
 //! matches is recognised as the daemon even without an answer from `/health`.
-//! That start-time match, and only that, is what lets `rqmd mcp stop --force`
-//! escalate to `SIGKILL`; a recycled pid starts at a different time and is
-//! never signalled.
+//! A match sends the `SIGTERM` of a plain `stop`, and it is the only thing
+//! that lets `rqmd mcp stop --force` escalate to `SIGKILL`; a recycled pid
+//! starts at a different time and is never signalled.
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
