@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### Added
+- A gate for `llama-cpp-2` (llama.cpp) bumps, documented in
+  [CONTRIBUTING.md](CONTRIBUTING.md#llamacpp-llama-cpp-2-bump-gate) and tracked in #151. The embed
+  fingerprint does not name the inference engine, so a bump could change stored-vector values
+  while chunk reuse keeps mixing old-engine and new-engine vectors. The gate embeds a fixed sample
+  (short, near the 2044-token limit, CJK, code) with the old and the new engine and requires a
+  cosine similarity of at least 0.999 for every pair; a lower pair means `rqmd embed --rebuild` is
+  the only correct upgrade path and the bump's changelog must say so. It also lists the Metal,
+  CUDA and Vulkan build checks, the soak re-check and the release-notes review. The measurement
+  is two `#[ignore]` tests in `crates/rqmd-llm/tests/engine_bump_gate.rs` that a maintainer runs
+  by hand with the model present; CI runs only their model-free cosine and threshold tests. No
+  runtime behaviour, fingerprint, chunking or index format changes, and no re-embed is needed.
 - `rqmd eval --judgements <file>` scores search quality on your own index. It reads a judgement
   file (JSON, or JSONL for a `.jsonl` file) that names documents as `collection/path` with an
   optional graded relevance, runs each query in `bm25`, `vec` or `hybrid` mode, and reports
