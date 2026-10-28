@@ -14,6 +14,21 @@
   is two `#[ignore]` tests in `crates/rqmd-llm/tests/engine_bump_gate.rs` that a maintainer runs
   by hand with the model present; CI runs only their model-free cosine and threshold tests. No
   runtime behaviour, fingerprint, chunking or index format changes, and no re-embed is needed.
+- `rqmd eval --judgements <file>` scores search quality on your own index. It reads a judgement
+  file (JSON, or JSONL for a `.jsonl` file) that names documents as `collection/path` with an
+  optional graded relevance, runs each query in `bm25`, `vec` or `hybrid` mode, and reports
+  nDCG@10, MRR@10, Recall@K and Hit@K with per-query latency percentiles, as text or with
+  `--json`. `--k` sets the Recall and Hit cutoff, and `--no-rerank` and `--no-expand` apply to
+  hybrid. It only reads the index. A malformed judgement file exits `1` with the reason; a judged
+  document missing from the index is listed and left out of the scores, and the run exits `2`.
+  `vec` and `hybrid` say so when the index has no embeddings or the backend cannot start. Plain
+  `rqmd eval` is unchanged, byte for byte. The format is documented in
+  [docs/CLI.md](docs/CLI.md#evaluating-search-quality), and the metric functions are
+  `rqmd_core::eval_metrics`.
+
+### Removed
+- The `eval` example of `rqmd-core` (`cargo run --example eval -p rqmd-core`), which read a
+  `test/eval-docs` directory that is not in the repository and could not run.
 
 ## [0.33.0] - 2026-10-28
 

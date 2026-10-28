@@ -2,6 +2,7 @@ pub mod bench;
 pub mod collection;
 pub mod context;
 pub mod eval;
+pub mod eval_judgements;
 pub mod get;
 pub mod index;
 pub mod mcp;

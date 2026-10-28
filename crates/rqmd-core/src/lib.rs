@@ -4,6 +4,7 @@ pub mod chunking;
 mod cjk_tokenizer;
 pub mod db;
 pub mod deadline;
+pub mod eval_metrics;
 pub mod frontmatter;
 pub mod fts;
 pub mod hnsw;
