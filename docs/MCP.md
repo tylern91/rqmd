@@ -29,6 +29,7 @@ rqmd mcp --http --host 0.0.0.0  # bind on all interfaces — see warning below
 rqmd mcp --daemon               # background HTTP (implies --http)
 rqmd mcp status                 # pid, health, uptime of the running daemon
 rqmd mcp stop                   # stop the running daemon
+rqmd mcp stop --force           # ...and SIGKILL it if it ignores SIGTERM
 ```
 
 For Claude Desktop, add to `claude_desktop_config.json`:
@@ -57,6 +58,28 @@ pid on record. Only an exact match counts as confirmed; an unreachable
 *different* pid means another process now owns that port. Starting a daemon
 on a port that's already bound fails immediately with an error instead of
 silently colliding with the existing listener.
+
+The pidfile also records the daemon's own process start time. A daemon that is alive
+but not answering `/health` (for example one that is slow to shut down) is therefore
+told apart from a stale pidfile: `rqmd mcp status` reports it as running but not
+answering, and `rqmd mcp stop` sends it `SIGTERM` and keeps the pidfile if it is still
+there after 5 seconds, exiting `1` and saying the process is still running.
+
+A pidfile with no start time (written by an older rqmd, or on a Unix other than macOS and
+Linux), or one whose pid the operating system will not report on (for example a process
+owned by another user), cannot be told apart from a recycled pid. `rqmd mcp status`, `rqmd mcp stop` (with or without `--force`)
+and `rqmd mcp --daemon` then say the process is running but cannot be checked, keep the
+pidfile, and signal nothing. If it is the daemon, stop it yourself; if not, delete the
+pidfile (the message names it).
+
+`rqmd mcp stop --force` goes one step further. After the same `SIGTERM` and wait, if
+the process is still alive it sends `SIGKILL` and removes the pidfile, but only once it
+has checked that the pid is still the recorded daemon, meaning that it is alive and its
+start time matches the pidfile's. It refuses, and says why, when the pid started at a
+different time (the pid was reused by another process), when the process start time
+cannot be read, or when the pidfile has no start time because an older rqmd wrote it;
+in the last two cases the pidfile is kept. `--force` is never implied: without it
+`SIGKILL` is never sent. Unix only.
 
 On SIGTERM or Ctrl-C the server ends every open event stream before it exits, so a
 connected client that holds a `GET /mcp` stream open no longer delays `rqmd mcp stop`.

@@ -91,8 +91,8 @@ pub fn run_mcp_status(index_dir: &Path) -> Result<()> {
     daemon::status_daemon(index_dir)
 }
 
-pub fn run_mcp_stop(index_dir: &Path) -> Result<()> {
-    daemon::stop_daemon(index_dir)
+pub fn run_mcp_stop(index_dir: &Path, force: bool) -> Result<()> {
+    daemon::stop_daemon(index_dir, force)
 }
 
 fn spawn_daemon(
@@ -116,6 +116,19 @@ fn spawn_daemon(
                 "{} is already in use by a different process (pid {}) — pick a different --port",
                 rqmd_mcp::host_port(&existing.host, existing.port),
                 health.pid
+            ),
+            daemon::Identity::AliveUnresponsive => bail!(
+                "rqmd MCP daemon (pid {}) is running but not answering on http://{} — run \
+                 `rqmd mcp stop` first (add `--force` if it will not exit)",
+                existing.pid,
+                rqmd_mcp::host_port(&existing.host, existing.port)
+            ),
+            daemon::Identity::AliveUnverified(why) => bail!(
+                "pid {} from the MCP daemon pidfile is running but not answering on http://{}, \
+                 and {why} — if it is the daemon, stop it yourself; if not, delete {}",
+                existing.pid,
+                rqmd_mcp::host_port(&existing.host, existing.port),
+                daemon::pidfile_path(index_dir).display()
             ),
             daemon::Identity::Stale => daemon::remove_pidfile(index_dir),
         }
