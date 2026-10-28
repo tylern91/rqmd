@@ -147,7 +147,8 @@ const START_TIME_SLACK_SECS: u64 = 2;
 pub enum NotOurs {
     /// The pid is not running.
     Gone,
-    /// The pidfile has no process start time (written by an older rqmd).
+    /// The pidfile has no process start time (written by an older rqmd, or by one
+    /// on a platform that does not report it).
     NoRecordedStart,
     /// The OS would not tell us when the pid started.
     UnreadableStart,
@@ -177,8 +178,8 @@ impl std::fmt::Display for NotOurs {
             NotOurs::Gone => write!(f, "the process is no longer running"),
             NotOurs::NoRecordedStart => write!(
                 f,
-                "the pidfile has no process start time (it was written by an older rqmd), \
-                 so the pid cannot be told apart from a recycled one"
+                "the pidfile has no process start time (an older rqmd wrote it, or this platform \
+                 does not report one), so the pid cannot be told apart from a recycled one"
             ),
             NotOurs::UnreadableStart => write!(
                 f,

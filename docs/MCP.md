@@ -65,8 +65,9 @@ told apart from a stale pidfile: `rqmd mcp status` reports it as running but not
 answering, and `rqmd mcp stop` sends it `SIGTERM` and keeps the pidfile if it is still
 there after 5 seconds, exiting `1` and saying the process is still running.
 
-A pidfile written by an older rqmd has no start time, so a live pid in it cannot be told
-apart from a recycled one. `rqmd mcp status`, `rqmd mcp stop` (with or without `--force`)
+A pidfile with no start time (written by an older rqmd, or on a Unix other than macOS and
+Linux), or one whose pid the operating system will not report on (for example a process
+owned by another user), cannot be told apart from a recycled pid. `rqmd mcp status`, `rqmd mcp stop` (with or without `--force`)
 and `rqmd mcp --daemon` then say the process is running but cannot be checked, keep the
 pidfile, and signal nothing. If it is the daemon, stop it yourself; if not, delete the
 pidfile (the message names it).
