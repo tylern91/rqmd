@@ -590,6 +590,8 @@ fn search_fts_multi_none_resolves_to_include_by_default_collections() {
             allow_hidden: false,
             respect_gitignore: false,
             max_file_bytes: None,
+            embed_ignore: vec![],
+            embed_max_bytes: None,
         },
     )
     .unwrap();
@@ -605,6 +607,8 @@ fn search_fts_multi_none_resolves_to_include_by_default_collections() {
             allow_hidden: false,
             respect_gitignore: false,
             max_file_bytes: None,
+            embed_ignore: vec![],
+            embed_max_bytes: None,
         },
     )
     .unwrap();
@@ -854,6 +858,8 @@ fn search_vec_multi_none_resolves_to_include_by_default_collections() {
             allow_hidden: false,
             respect_gitignore: false,
             max_file_bytes: None,
+            embed_ignore: vec![],
+            embed_max_bytes: None,
         },
     )
     .unwrap();
@@ -869,6 +875,8 @@ fn search_vec_multi_none_resolves_to_include_by_default_collections() {
             allow_hidden: false,
             respect_gitignore: false,
             max_file_bytes: None,
+            embed_ignore: vec![],
+            embed_max_bytes: None,
         },
     )
     .unwrap();

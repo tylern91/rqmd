@@ -81,7 +81,9 @@ fn init_schema(conn: &Connection) -> Result<()> {
             context            TEXT,
             allow_hidden       INTEGER NOT NULL DEFAULT 0,
             respect_gitignore  INTEGER NOT NULL DEFAULT 0,
-            max_file_bytes     INTEGER
+            max_file_bytes     INTEGER,
+            embed_ignore       TEXT,
+            embed_max_bytes    INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS store_config (
@@ -111,6 +113,21 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "store_collections",
         "max_file_bytes",
         "max_file_bytes INTEGER",
+    )?;
+    // Embed-exclusion rules (#147). Both stay NULL on existing rows, and NULL
+    // means "no rule": the set of embedded documents is unchanged until a
+    // collection opts in with `collection set`.
+    ensure_column(
+        conn,
+        "store_collections",
+        "embed_ignore",
+        "embed_ignore TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "store_collections",
+        "embed_max_bytes",
+        "embed_max_bytes INTEGER",
     )?;
     // `documents.raw` separates the per-document retrieval payload (the
     // verbatim file) from `content.doc`, which is keyed by `content.hash` —
@@ -705,18 +722,63 @@ pub fn count_docs_needing_embed(
     base_fingerprint: &str,
     ast: &[AstFingerprint],
 ) -> rusqlite::Result<i64> {
+    count_pending_hashes(conn, base_fingerprint, ast, None)
+}
+
+/// [`count_docs_needing_embed`] that leaves out the documents in `excluded`
+/// (document ids an embed-exclusion rule keeps out of `rqmd embed`, #147): a
+/// hash counts as pending only through a document that is not excluded, and
+/// the AST group flags are taken over those documents only, the same set
+/// `run_embed` walks. An empty `excluded` runs the unfiltered query unchanged.
+pub fn count_docs_needing_embed_excluding(
+    conn: &Connection,
+    base_fingerprint: &str,
+    ast: &[AstFingerprint],
+    excluded: &HashSet<i64>,
+) -> rusqlite::Result<i64> {
+    if excluded.is_empty() {
+        return count_docs_needing_embed(conn, base_fingerprint, ast);
+    }
+    let ids = excluded_ids_json(excluded);
+    count_pending_hashes(conn, base_fingerprint, ast, Some(&ids))
+}
+
+/// Excluded document ids as a JSON array, bound to `json_each` so the list
+/// travels as one parameter however long it is.
+fn excluded_ids_json(excluded: &HashSet<i64>) -> String {
+    let mut ids: Vec<i64> = excluded.iter().copied().collect();
+    ids.sort_unstable();
+    serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// ` AND d.id NOT IN (...)` bound to parameter `?n`, or nothing when no
+/// document is excluded, so the default query text is unchanged.
+fn not_excluded_clause(excluded: Option<&str>, n: usize) -> String {
+    match excluded {
+        Some(_) => format!(" AND d.id NOT IN (SELECT value FROM json_each(?{n}))"),
+        None => String::new(),
+    }
+}
+
+fn count_pending_hashes(
+    conn: &Connection,
+    base_fingerprint: &str,
+    ast: &[AstFingerprint],
+    excluded: Option<&str>,
+) -> rusqlite::Result<i64> {
     if ast.is_empty() {
-        return conn.query_row(
+        let sql = format!(
             "SELECT COUNT(DISTINCT d.hash) FROM documents d \
              JOIN content c ON c.hash = d.hash \
-             WHERE d.active = 1 AND octet_length(c.doc) > 0 \
+             WHERE d.active = 1 AND octet_length(c.doc) > 0{skip} \
              AND NOT EXISTS (\
                  SELECT 1 FROM content_vectors cv \
                  WHERE cv.hash = d.hash AND cv.embed_fingerprint = ?1\
              )",
-            params![base_fingerprint],
-            |r| r.get(0),
+            skip = not_excluded_clause(excluded, 2)
         );
+        let binds = std::iter::once(base_fingerprint).chain(excluded);
+        return conn.query_row(&sql, rusqlite::params_from_iter(binds), |r| r.get(0));
     }
 
     let satisfied_by_group = (0..ast.len())
@@ -735,16 +797,18 @@ pub fn count_docs_needing_embed(
              SELECT d.hash AS hash, {flags} \
              FROM documents d \
              JOIN content c ON c.hash = d.hash \
-             WHERE d.active = 1 AND octet_length(c.doc) > 0 \
+             WHERE d.active = 1 AND octet_length(c.doc) > 0{skip} \
              GROUP BY d.hash\
          ) h \
          WHERE NOT ({satisfied_by_group} OR (h.all_ast = 0 AND EXISTS (\
              SELECT 1 FROM content_vectors cv \
              WHERE cv.hash = h.hash AND cv.embed_fingerprint = ?1)))",
-        flags = ast_flag_columns(ast)
+        flags = ast_flag_columns(ast),
+        skip = not_excluded_clause(excluded, ast.len() + 2)
     );
     let fingerprints = std::iter::once(base_fingerprint)
         .chain(ast.iter().map(|g| g.fingerprint.as_str()))
+        .chain(excluded)
         .collect::<Vec<_>>();
     conn.query_row(&sql, rusqlite::params_from_iter(fingerprints), |r| r.get(0))
 }
@@ -777,6 +841,33 @@ pub fn hash_needs_embed(
     base_fingerprint: &str,
     ast: &[AstFingerprint],
 ) -> rusqlite::Result<bool> {
+    hash_needs_embed_inner(conn, hash, base_fingerprint, ast, None)
+}
+
+/// [`hash_needs_embed`] with the group flags taken over the documents not in
+/// `excluded` only, matching [`count_docs_needing_embed_excluding`]. An empty
+/// `excluded` runs the unfiltered check unchanged.
+pub fn hash_needs_embed_excluding(
+    conn: &Connection,
+    hash: &str,
+    base_fingerprint: &str,
+    ast: &[AstFingerprint],
+    excluded: &HashSet<i64>,
+) -> rusqlite::Result<bool> {
+    if excluded.is_empty() {
+        return hash_needs_embed(conn, hash, base_fingerprint, ast);
+    }
+    let ids = excluded_ids_json(excluded);
+    hash_needs_embed_inner(conn, hash, base_fingerprint, ast, Some(&ids))
+}
+
+fn hash_needs_embed_inner(
+    conn: &Connection,
+    hash: &str,
+    base_fingerprint: &str,
+    ast: &[AstFingerprint],
+    excluded: Option<&str>,
+) -> rusqlite::Result<bool> {
     if ast.is_empty() {
         return Ok(!hash_has_vector_with_fingerprint(
             conn,
@@ -786,10 +877,12 @@ pub fn hash_needs_embed(
     }
 
     let sql = format!(
-        "SELECT {} FROM documents d WHERE d.hash = ?1 AND d.active = 1",
-        ast_flag_columns(ast)
+        "SELECT {} FROM documents d WHERE d.hash = ?1 AND d.active = 1{}",
+        ast_flag_columns(ast),
+        not_excluded_clause(excluded, 2)
     );
-    let flags: Vec<Option<i64>> = conn.query_row(&sql, params![hash], |r| {
+    let binds = std::iter::once(hash).chain(excluded);
+    let flags: Vec<Option<i64>> = conn.query_row(&sql, rusqlite::params_from_iter(binds), |r| {
         (0..=ast.len()).map(|i| r.get(i)).collect()
     })?;
     let flag = |i: usize| flags[i].unwrap_or(0) == 1;
@@ -1103,6 +1196,62 @@ pub fn doc_chunk_for_vid_in(
     .context("doc_chunk_for_vid_in")
 }
 
+/// [`doc_chunk_for_vid_in`] that never resolves a vector to a document an
+/// embed-exclusion rule keeps out of `rqmd embed` (#147). Vectors are keyed
+/// by content hash and shared across collections, so a vector created for a
+/// non-excluded document would otherwise also surface an excluded document
+/// with identical text. Candidates are tried in the same order as the
+/// unfiltered lookup and the first one not excluded wins. With no rule
+/// configured this is [`doc_chunk_for_vid_in`] itself, the same query.
+pub fn doc_chunk_for_vid_in_excluding(
+    conn: &Connection,
+    vid: u64,
+    collections: Option<&[String]>,
+    exclusions: &crate::embed_exclusion::EmbedExclusions,
+) -> Result<Option<(Document, usize)>> {
+    if exclusions.is_empty() {
+        return doc_chunk_for_vid_in(conn, vid, collections);
+    }
+    let cols = collections.filter(|c| !c.is_empty()).unwrap_or(&[]);
+    let scope = if cols.is_empty() {
+        String::new()
+    } else {
+        format!("AND d.collection IN ({})", vec!["?"; cols.len()].join(","))
+    };
+    let sql = format!(
+        r#"
+        SELECT d.id, d.collection, d.path, d.title, d.hash, d.active, cv.pos,
+               (SELECT octet_length(c.doc) FROM content c WHERE c.hash = cv.hash)
+        FROM content_vectors cv
+        JOIN documents d ON d.hash = cv.hash AND d.active = 1
+        WHERE cv.vid = ?1 {scope}
+        ORDER BY d.collection, d.path
+        "#
+    );
+    let vid_i64 = vid as i64;
+    let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + cols.len());
+    bind.push(&vid_i64);
+    for c in cols {
+        bind.push(c);
+    }
+    let mut stmt = conn
+        .prepare(&sql)
+        .context("doc_chunk_for_vid_in_excluding")?;
+    let mut rows = stmt.query(params_from_iter(bind))?;
+    while let Some(row) = rows.next()? {
+        let doc = map_document(row)?;
+        let bytes = row.get::<_, Option<i64>>(7)?.unwrap_or(0).max(0) as u64;
+        if exclusions
+            .reason(&doc.collection, &doc.path, bytes)
+            .is_none()
+        {
+            let pos = row.get::<_, i64>(6)?.max(0) as usize;
+            return Ok(Some((doc, pos)));
+        }
+    }
+    Ok(None)
+}
+
 /// Return all vids for a content hash's chunks, ordered by `seq` (chunk order).
 /// Used by `rqmd similar` to gather every chunk vector for a resolved document.
 pub fn vids_for_hash(conn: &Connection, hash: &str) -> Result<Vec<u64>> {
@@ -1136,8 +1285,8 @@ pub fn upsert_collection(conn: &Connection, c: &Collection) -> Result<()> {
     let ignore = serde_json::to_string(&c.ignore)?;
     conn.execute(
         r#"
-        INSERT INTO store_collections(name, path, pattern, ignore_patterns, include_by_default, update_command, allow_hidden, respect_gitignore, max_file_bytes)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        INSERT INTO store_collections(name, path, pattern, ignore_patterns, include_by_default, update_command, allow_hidden, respect_gitignore, max_file_bytes, embed_ignore, embed_max_bytes)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ON CONFLICT(name) DO UPDATE SET
             path               = excluded.path,
             pattern            = excluded.pattern,
@@ -1146,7 +1295,9 @@ pub fn upsert_collection(conn: &Connection, c: &Collection) -> Result<()> {
             update_command     = excluded.update_command,
             allow_hidden       = excluded.allow_hidden,
             respect_gitignore  = excluded.respect_gitignore,
-            max_file_bytes     = excluded.max_file_bytes
+            max_file_bytes     = excluded.max_file_bytes,
+            embed_ignore       = excluded.embed_ignore,
+            embed_max_bytes    = excluded.embed_max_bytes
         "#,
         params![
             c.name,
@@ -1158,14 +1309,44 @@ pub fn upsert_collection(conn: &Connection, c: &Collection) -> Result<()> {
             c.allow_hidden as i64,
             c.respect_gitignore as i64,
             c.max_file_bytes.map(|n| n as i64),
+            embed_ignore_json(&c.embed_ignore)?,
+            c.embed_max_bytes.map(|n| n as i64),
         ],
     )?;
     Ok(())
 }
 
+/// `embed_ignore` as stored: NULL for no rule, so a collection that never
+/// opted in keeps the column exactly as an older release left it.
+fn embed_ignore_json(patterns: &[String]) -> Result<Option<String>> {
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::to_string(patterns)?))
+}
+
+/// Replace a collection's embed-exclusion rules (#147). An empty `ignore`
+/// and a `None` cap clear them. Returns false when no collection has `name`.
+pub fn set_collection_embed_rules(
+    conn: &Connection,
+    name: &str,
+    ignore: &[String],
+    max_bytes: Option<u64>,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE store_collections SET embed_ignore=?2, embed_max_bytes=?3 WHERE name=?1",
+        params![
+            name,
+            embed_ignore_json(ignore)?,
+            max_bytes.map(|n| n as i64)
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
 pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>> {
     let mut stmt = conn.prepare(
-        "SELECT name, path, pattern, ignore_patterns, include_by_default, update_command, allow_hidden, respect_gitignore, max_file_bytes FROM store_collections",
+        "SELECT name, path, pattern, ignore_patterns, include_by_default, update_command, allow_hidden, respect_gitignore, max_file_bytes, embed_ignore, embed_max_bytes FROM store_collections",
     )?;
     let rows = stmt
         .query_map([], |row| {
@@ -1179,6 +1360,8 @@ pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>> {
                 row.get::<_, i64>(6)?,
                 row.get::<_, i64>(7)?,
                 row.get::<_, Option<i64>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<i64>>(10)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1195,8 +1378,13 @@ pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>> {
                 allow_hidden,
                 respect_gitignore,
                 max_file_bytes,
+                embed_ignore_json,
+                embed_max_bytes,
             )| {
                 let ignore: Vec<String> = ignore_json
+                    .map(|j| serde_json::from_str(&j).unwrap_or_default())
+                    .unwrap_or_default();
+                let embed_ignore: Vec<String> = embed_ignore_json
                     .map(|j| serde_json::from_str(&j).unwrap_or_default())
                     .unwrap_or_default();
                 Ok(Collection {
@@ -1209,6 +1397,8 @@ pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>> {
                     allow_hidden: allow_hidden != 0,
                     respect_gitignore: respect_gitignore != 0,
                     max_file_bytes: max_file_bytes.and_then(|n| u64::try_from(n).ok()),
+                    embed_ignore,
+                    embed_max_bytes: embed_max_bytes.and_then(|n| u64::try_from(n).ok()),
                 })
             },
         )
@@ -1389,6 +1579,55 @@ pub fn count_orphaned_vectors(conn: &Connection) -> Result<i64> {
         |row| row.get(0),
     )
     .context("count orphaned vectors")
+}
+
+/// Hashes whose every active document is embed-excluded (#147) and that
+/// still carry vectors: kept by a plain `rqmd embed`, dropped by
+/// `rqmd embed --cleanup`. A hash shared with any non-excluded active
+/// document, or named as the `prev_hash` donor of one still waiting for its
+/// own vectors, is not listed.
+const EXCLUDED_ONLY_VECTOR_PREDICATE: &str = "hash IN (SELECT hash FROM documents \
+         WHERE active = 1 AND id IN (SELECT value FROM json_each(?1))) \
+     AND hash NOT IN (SELECT hash FROM documents \
+         WHERE active = 1 AND id NOT IN (SELECT value FROM json_each(?1))) \
+     AND hash NOT IN (SELECT prev_hash FROM documents WHERE active = 1 \
+         AND prev_hash IS NOT NULL AND id NOT IN (SELECT value FROM json_each(?1)) \
+         AND hash NOT IN (SELECT hash FROM content_vectors))";
+
+/// Count the `content_vectors` rows kept for documents in `excluded` only
+/// (see [`EXCLUDED_ONLY_VECTOR_PREDICATE`]). 0 without a query when nothing
+/// is excluded.
+pub fn count_excluded_only_vectors(conn: &Connection, excluded: &HashSet<i64>) -> Result<i64> {
+    if excluded.is_empty() {
+        return Ok(0);
+    }
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM content_vectors WHERE {EXCLUDED_ONLY_VECTOR_PREDICATE}"),
+        params![excluded_ids_json(excluded)],
+        |row| row.get(0),
+    )
+    .context("count excluded-only vectors")
+}
+
+/// The distinct hashes behind [`count_excluded_only_vectors`], for
+/// `rqmd embed --cleanup` to sweep.
+pub fn excluded_only_vector_hashes(
+    conn: &Connection,
+    excluded: &HashSet<i64>,
+) -> Result<Vec<String>> {
+    if excluded.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT hash FROM content_vectors WHERE {EXCLUDED_ONLY_VECTOR_PREDICATE}"
+    ))?;
+    let rows = stmt
+        .query_map(params![excluded_ids_json(excluded)], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("excluded-only vector hashes")?;
+    Ok(rows)
 }
 
 /// Return the distinct hashes backing `count_orphaned_vectors`' count, for
@@ -1955,5 +2194,105 @@ mod tests {
             let doc = doc_for_vid_meta_in(&conn, 7, Some(&both)).unwrap().unwrap();
             assert_eq!(doc.collection, "a", "scoped, insertion order {order:?}");
         }
+    }
+    fn rules_for(conn: &Connection, name: &str, ignore: &[&str], cap: Option<u64>) {
+        upsert_collection(
+            conn,
+            &Collection {
+                name: name.into(),
+                path: format!("/{name}"),
+                pattern: "**/*.md".into(),
+                ignore: vec![],
+                include_by_default: true,
+                update_command: None,
+                allow_hidden: false,
+                respect_gitignore: false,
+                max_file_bytes: None,
+                embed_ignore: ignore.iter().map(|s| s.to_string()).collect(),
+                embed_max_bytes: cap,
+            },
+        )
+        .unwrap();
+    }
+
+    /// #147: an embed-excluded document never resolves through a vector it
+    /// shares with identical non-excluded content in another collection,
+    /// scoped or unscoped; with no rule the lookup is the unfiltered one.
+    #[test]
+    fn excluded_document_is_not_resolved_through_a_shared_vector() {
+        let conn = test_conn();
+        let now = "2026-01-01T00:00:00Z";
+        upsert_content(&conn, "shared_hash", "shared body", now).unwrap();
+        upsert_document(&conn, "a", "gen/doc.md", "t", "shared_hash", now).unwrap();
+        upsert_document(&conn, "b", "doc.md", "t", "shared_hash", now).unwrap();
+        upsert_vector_meta(&conn, "shared_hash", 0, 0, "m", "fp", 1, 7, now).unwrap();
+        rules_for(&conn, "a", &[], None);
+        rules_for(&conn, "b", &[], None);
+
+        let none = crate::embed_exclusion::EmbedExclusions::load(&conn).unwrap();
+        assert!(none.is_empty());
+        let scoped_a = vec!["a".to_string()];
+        let (doc, _) = doc_chunk_for_vid_in_excluding(&conn, 7, Some(&scoped_a), &none)
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.collection, "a", "no rule: unchanged resolution");
+
+        rules_for(&conn, "a", &["gen/**"], None);
+        let rules = crate::embed_exclusion::EmbedExclusions::load(&conn).unwrap();
+        assert!(
+            doc_chunk_for_vid_in_excluding(&conn, 7, Some(&scoped_a), &rules)
+                .unwrap()
+                .is_none(),
+            "scoped to a, the only candidate is excluded"
+        );
+        let (doc, _) = doc_chunk_for_vid_in_excluding(&conn, 7, None, &rules)
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.collection, "b", "unscoped falls through to b's copy");
+    }
+
+    /// #147: pending counts and the per-hash check skip excluded documents,
+    /// and the vectors kept for excluded-only hashes are the ones listed for
+    /// `embed --cleanup`, never a hash a non-excluded document still uses.
+    #[test]
+    fn excluded_documents_are_not_pending_and_their_kept_vectors_are_listed() {
+        let conn = test_conn();
+        let now = "2026-01-01T00:00:00Z";
+        upsert_content(&conn, "h_big", "a body that is long", now).unwrap();
+        upsert_content(&conn, "h_shared", "shared", now).unwrap();
+        upsert_content(&conn, "h_plain", "plain", now).unwrap();
+        upsert_document(&conn, "a", "big.md", "t", "h_big", now).unwrap();
+        upsert_document(&conn, "a", "shared.md", "t", "h_shared", now).unwrap();
+        upsert_document(&conn, "b", "shared.md", "t", "h_shared", now).unwrap();
+        upsert_document(&conn, "a", "plain.md", "t", "h_plain", now).unwrap();
+        rules_for(&conn, "a", &["shared.md"], Some(10));
+        rules_for(&conn, "b", &[], None);
+
+        let rules = crate::embed_exclusion::EmbedExclusions::load(&conn).unwrap();
+        let ex = crate::embed_exclusion::excluded_docs(&conn, &rules).unwrap();
+        assert_eq!((ex.total(), ex.by_rule, ex.by_size), (2, 1, 1));
+        assert_eq!(count_docs_needing_embed(&conn, "fp", &[]).unwrap(), 3);
+        assert_eq!(
+            count_docs_needing_embed_excluding(&conn, "fp", &[], &ex.ids).unwrap(),
+            2,
+            "h_big is excluded; h_shared stays pending through b"
+        );
+
+        for (i, h) in ["h_big", "h_shared", "h_plain"].iter().enumerate() {
+            upsert_vector_meta(&conn, h, 0, 0, "m", "fp", 1, i as u64, now).unwrap();
+        }
+        assert_eq!(
+            count_docs_needing_embed_excluding(&conn, "fp", &[], &ex.ids).unwrap(),
+            0
+        );
+        assert_eq!(
+            excluded_only_vector_hashes(&conn, &ex.ids).unwrap(),
+            vec!["h_big".to_string()]
+        );
+        assert_eq!(count_excluded_only_vectors(&conn, &ex.ids).unwrap(), 1);
+        assert_eq!(
+            count_excluded_only_vectors(&conn, &HashSet::new()).unwrap(),
+            0
+        );
     }
 }

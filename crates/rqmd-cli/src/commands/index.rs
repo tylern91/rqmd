@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
+use rqmd_core::embed_exclusion::{self, EmbedExclusions, ExcludedDocs};
 use rqmd_core::{
     Collection, Deadline, Document, IndexLock, IndexOutcome, PendingVectorMeta, TimedOut, db,
     snap_char_boundary_backward,
@@ -39,10 +40,12 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
     let total_vecs: i64 =
         s.db.query_row("SELECT COUNT(*) FROM content_vectors", [], |r| r.get(0))
             .unwrap_or(0);
-    let docs_needing_embed: i64 = db::count_docs_needing_embed(
+    let (exclusions, excluded) = load_exclusions(&s.db);
+    let docs_needing_embed: i64 = db::count_docs_needing_embed_excluding(
         &s.db,
         &store::expected_fingerprint(),
         &store::expected_ast_fingerprints(),
+        &excluded.ids,
     )
     .unwrap_or(0);
     let last_modified: Option<String> =
@@ -69,6 +72,10 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
             "  {} (run 'rqmd embed')",
             p.yellow(format!("Pending:  {docs_needing_embed} need embedding"))
         );
+    }
+    // Only when a collection has an embed rule, so default output is unchanged.
+    if !exclusions.is_empty() {
+        println!("  Excluded: {}", describe_excluded(&excluded));
     }
     if let Some(ref ts) = last_modified {
         println!("  Updated:  {}", fmt::format_time_ago(ts));
@@ -130,6 +137,26 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
     print_status_tips(&s.db, &cols);
 
     Ok(())
+}
+
+/// The stored embed-exclusion rules (#147) and the documents they keep out of
+/// `rqmd embed`. A report command shows nothing excluded rather than failing
+/// when they cannot be read.
+fn load_exclusions(conn: &Connection) -> (EmbedExclusions, ExcludedDocs) {
+    let exclusions = EmbedExclusions::load(conn).unwrap_or_default();
+    let excluded = embed_exclusion::excluded_docs(conn, &exclusions).unwrap_or_default();
+    (exclusions, excluded)
+}
+
+/// `N from embedding (A by rule, B over the size cap)`, shared by `rqmd
+/// status` and `rqmd doctor`.
+fn describe_excluded(excluded: &ExcludedDocs) -> String {
+    format!(
+        "{} from embedding ({} by rule, {} over the size cap)",
+        excluded.total(),
+        excluded.by_rule,
+        excluded.by_size
+    )
 }
 
 /// Print the "Collections" and "Examples" blocks of `rqmd status`
@@ -602,7 +629,9 @@ pub fn run_embed(
     } else {
         // Fast path: nothing to do.
         let s = store::open_store_no_backend(index_dir, true)?;
-        let needs_embed: i64 = db::count_docs_needing_embed(
+        // Embed-excluded documents (#147) are not pending, so a collection whose
+        // only unembedded documents are excluded still takes this path.
+        let needs_embed: i64 = embed_exclusion::pending_embed_count(
             &s.db,
             &store::expected_fingerprint(),
             &store::expected_ast_fingerprints(),
@@ -674,6 +703,13 @@ fn embed_collections(
     // widening the HNSW/DB gap on every run.  Deduping by hash here stops that at source.
     let mut seen_hashes: HashSet<String> = HashSet::new();
 
+    // Documents an embed-exclusion rule keeps out (#147), taken over every
+    // collection: a hash shared across collections is judged by the documents
+    // that may be embedded, the same set `count_docs_needing_embed_excluding`
+    // counts. Empty when no collection has a rule.
+    let exclusions = EmbedExclusions::load(&s.db)?;
+    let excluded = embed_exclusion::excluded_docs(&s.db, &exclusions)?;
+
     for col in cols {
         // Collect all docs for this collection.  We embed only those whose content
         // hash has no vector row at the current fingerprint (incremental / resumable;
@@ -690,10 +726,12 @@ fn embed_collections(
         let ast_fps = store::expected_ast_fingerprints();
         let mut todo_indices: Vec<usize> = Vec::new();
         for (i, doc) in docs.iter().enumerate() {
-            if seen_hashes.contains(&doc.hash) {
+            if excluded.ids.contains(&doc.id) || seen_hashes.contains(&doc.hash) {
                 continue;
             }
-            if db::hash_needs_embed(&s.db, &doc.hash, &base_fp, &ast_fps).unwrap_or(true) {
+            if db::hash_needs_embed_excluding(&s.db, &doc.hash, &base_fp, &ast_fps, &excluded.ids)
+                .unwrap_or(true)
+            {
                 seen_hashes.insert(doc.hash.clone());
                 todo_indices.push(i);
             }
@@ -785,6 +823,12 @@ pub fn run_cleanup(index_dir: &Path) -> Result<()> {
     // 1. Sweep orphaned vectors — evict from HNSW first, then drop their rows.
     let swept_vectors = s.reclaim_orphaned_vectors()?;
 
+    // 1b. Vectors a plain `rqmd embed` kept for documents an embed-exclusion
+    // rule now leaves out (#147). Nothing to do when no collection has a rule.
+    let exclusions = EmbedExclusions::load(&s.db)?;
+    let excluded = embed_exclusion::excluded_docs(&s.db, &exclusions)?;
+    let swept_excluded = s.reclaim_excluded_vectors(&excluded.ids)?;
+
     // 2. Delete content referenced by no document at all (active or not).
     let swept_content = db::delete_unreferenced_content(&s.db).context("sweep content")?;
 
@@ -800,6 +844,9 @@ pub fn run_cleanup(index_dir: &Path) -> Result<()> {
         "{} Swept {swept_vectors} orphaned vector(s), {swept_content} unreferenced content row(s).",
         fmt::Paint::stdout().green("✓ Cleanup done.")
     );
+    if !exclusions.is_empty() {
+        println!("  Swept {swept_excluded} vector(s) kept for documents excluded from embedding.");
+    }
     println!(
         "  hnsw.usearch: {} -> {}",
         fmt_bytes(before_hnsw),
@@ -934,7 +981,7 @@ fn run_update_with(
 
     // "needs embeddings" notice (qmd.ts:747–748) — printed once after all collections
     // so it isn't repeated N times with the same global count during a multi-collection update.
-    let needs_embed: i64 = db::count_docs_needing_embed(
+    let needs_embed: i64 = embed_exclusion::pending_embed_count(
         &s.db,
         &store::expected_fingerprint(),
         &store::expected_ast_fingerprints(),
@@ -1359,14 +1406,17 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
 
         print_doctor_stale_fingerprint_check(&s.db);
         print_doctor_orphaned_vector_check(&s.db);
+        let (exclusions, excluded) = load_exclusions(&s.db);
+        print_doctor_embed_exclusions(&s.db, &exclusions, &excluded);
         store::warn_if_raw_backfill_pending(&s);
         store::warn_if_fts_rebuild_pending(&s);
 
         // Recommended next steps.
-        let needs_embed: i64 = db::count_docs_needing_embed(
+        let needs_embed: i64 = db::count_docs_needing_embed_excluding(
             &s.db,
             &store::expected_fingerprint(),
             &store::expected_ast_fingerprints(),
+            &excluded.ids,
         )
         .unwrap_or(0);
         if needs_embed > 0 {
@@ -1420,6 +1470,26 @@ fn print_doctor_orphaned_vector_check(conn: &Connection) {
             fmt::Paint::stdout().yellow(format!("⚠ {orphaned_vectors} orphaned vector(s)"))
         );
         println!("    Run 'rqmd embed --cleanup' to reclaim the space");
+    }
+}
+
+/// Embed-exclusion report for `rqmd doctor` (#147), printed only when some
+/// collection has a rule or a cap: how many documents are left out and why,
+/// and how many vectors a plain `rqmd embed` kept for them.
+fn print_doctor_embed_exclusions(
+    conn: &Connection,
+    exclusions: &EmbedExclusions,
+    excluded: &ExcludedDocs,
+) {
+    if exclusions.is_empty() {
+        return;
+    }
+    println!("\n  Embed exclusions: {}", describe_excluded(excluded));
+    let kept = db::count_excluded_only_vectors(conn, &excluded.ids).unwrap_or(0);
+    if kept > 0 {
+        println!(
+            "    {kept} vector(s) kept for excluded documents; run 'rqmd embed --cleanup' to drop them"
+        );
     }
 }
 
@@ -1581,6 +1651,8 @@ mod tests {
             allow_hidden: false,
             respect_gitignore: false,
             max_file_bytes: None,
+            embed_ignore: vec![],
+            embed_max_bytes: None,
         };
         let coll_col = Collection {
             name: "coll".into(),
@@ -1592,6 +1664,8 @@ mod tests {
             allow_hidden: false,
             respect_gitignore: false,
             max_file_bytes: None,
+            embed_ignore: vec![],
+            embed_max_bytes: None,
         };
         db::upsert_collection(&s.db, &keep_col).unwrap();
         db::upsert_collection(&s.db, &coll_col).unwrap();
@@ -1879,6 +1953,8 @@ mod tests {
             allow_hidden: false,
             respect_gitignore: false,
             max_file_bytes: None,
+            embed_ignore: vec![],
+            embed_max_bytes: None,
         }
     }
 

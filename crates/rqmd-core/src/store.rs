@@ -16,11 +16,11 @@ use sha2::{Digest, Sha256};
 use crate::{
     chunking::{chunk_document_for_path, first_chunk},
     db::{
-        self, content_hash, doc_chunk_for_vid_in, doc_for_vid_meta, doc_for_vid_meta_in,
-        docid_from_hash, get_context_for_path, open_db, upsert_content, upsert_document,
-        upsert_vector_meta,
+        self, content_hash, doc_chunk_for_vid_in_excluding, docid_from_hash, get_context_for_path,
+        open_db, upsert_content, upsert_document, upsert_vector_meta,
     },
     deadline::Deadline,
+    embed_exclusion::EmbedExclusions,
     fts::FtsIndex,
     hnsw::VectorIndex,
     query::parse_query,
@@ -712,10 +712,24 @@ impl Store {
     pub fn reclaim_orphaned_vectors(&mut self) -> Result<usize> {
         let orphaned_hashes =
             crate::db::orphaned_vector_hashes(&self.db).context("list orphaned hashes")?;
-        if orphaned_hashes.is_empty() {
+        self.reclaim_vectors_of(&orphaned_hashes)
+    }
+
+    /// Evict and delete the vectors kept for documents in `excluded` only
+    /// (embed-excluded documents, #147), keeping any hash a non-excluded
+    /// document still uses. `rqmd embed --cleanup` calls this; a plain
+    /// `rqmd embed` keeps those vectors. Returns the rows deleted.
+    pub fn reclaim_excluded_vectors(&mut self, excluded: &HashSet<i64>) -> Result<usize> {
+        let hashes = crate::db::excluded_only_vector_hashes(&self.db, excluded)
+            .context("list excluded-only hashes")?;
+        self.reclaim_vectors_of(&hashes)
+    }
+
+    fn reclaim_vectors_of(&mut self, hashes: &[String]) -> Result<usize> {
+        if hashes.is_empty() {
             return Ok(0);
         }
-        for hash in &orphaned_hashes {
+        for hash in hashes {
             let vids = crate::db::vids_for_hash(&self.db, hash)?;
             self.evict_hnsw_vectors(&vids)?;
         }
@@ -724,7 +738,7 @@ impl Store {
         self.flush()?;
         let mut swept = 0usize;
         let tx = self.db.transaction()?;
-        for hash in &orphaned_hashes {
+        for hash in hashes {
             swept += crate::db::delete_vectors_for_hash(&tx, hash)?;
         }
         tx.commit().context("commit orphaned vector sweep")?;
@@ -982,6 +996,8 @@ impl Store {
         // widening pass (rqmd#86).
         let mut by_doc: HashMap<String, (crate::types::Document, Vec<(f32, usize)>)> =
             HashMap::new();
+        // A vector never resolves to an embed-excluded document (#147).
+        let exclusions = EmbedExclusions::load(&self.db)?;
 
         loop {
             let raw = self.hnsw.search(&embedding, k)?;
@@ -991,7 +1007,12 @@ impl Store {
                 // hash shared across collections must resolve to the
                 // in-scope row here, not to an arbitrary one that then gets
                 // discarded by a post-hoc filter (qmd#933 parity, rqmd#86).
-                let Some((doc, pos)) = doc_chunk_for_vid_in(&self.db, vid, effective.as_deref())?
+                let Some((doc, pos)) = doc_chunk_for_vid_in_excluding(
+                    &self.db,
+                    vid,
+                    effective.as_deref(),
+                    &exclusions,
+                )?
                 else {
                     continue;
                 };
@@ -1104,11 +1125,14 @@ impl Store {
         // Same rationale as `search_vec_multi`: rank by identity only
         // (`doc_for_vid_meta`), fetch bodies once for the final survivors.
         let mut by_doc: HashMap<String, (f32, crate::types::Document)> = HashMap::new();
+        let exclusions = EmbedExclusions::load(&self.db)?;
         for vid in vids {
             let embedding = self.hnsw.get_vector(vid)?;
             let hits = self.hnsw.search(&embedding, k)?;
             for (hit_vid, sim) in hits {
-                let Some(doc) = doc_for_vid_meta(&self.db, hit_vid)? else {
+                let Some((doc, _)) =
+                    doc_chunk_for_vid_in_excluding(&self.db, hit_vid, None, &exclusions)?
+                else {
                     continue;
                 };
                 let filepath = format!("{}/{}", doc.collection, doc.path);
@@ -1937,9 +1961,10 @@ impl Store {
     ) -> Result<Vec<RankedResult>> {
         let total_vectors = self.hnsw.size();
         let mut k = fetch_size;
+        let exclusions = EmbedExclusions::load(&self.db)?;
         loop {
             let hits = self.hnsw.search(embedding, k)?;
-            let results = self.vec_hits_to_ranked(hits, collections)?;
+            let results = self.vec_hits_to_ranked(hits, collections, &exclusions)?;
             if results.len() >= fetch_size || k >= total_vectors {
                 return Ok(results);
             }
@@ -1951,6 +1976,7 @@ impl Store {
         &self,
         hits: Vec<(u64, f32)>,
         collections: Option<&[String]>,
+        exclusions: &EmbedExclusions,
     ) -> Result<Vec<RankedResult>> {
         let mut results = Vec::new();
         for (vid, sim) in hits {
@@ -1959,7 +1985,11 @@ impl Store {
             // applied after the fact — a hash shared across collections
             // must resolve to the in-scope row here, not to an arbitrary one
             // that then gets discarded (qmd#933 parity, rqmd#86).
-            if let Some(doc) = doc_for_vid_meta_in(&self.db, vid, collections)? {
+            // An embed-excluded document is never reached through a vector,
+            // even one shared with identical non-excluded content (#147).
+            if let Some((doc, _)) =
+                doc_chunk_for_vid_in_excluding(&self.db, vid, collections, exclusions)?
+            {
                 results.push(RankedResult {
                     filepath: format!("{}/{}", doc.collection, doc.path),
                     title: doc.title,

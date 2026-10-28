@@ -327,6 +327,24 @@ pub enum CollectionCommand {
     Include { name: String },
     /// Exclude collection from default (unscoped) queries
     Exclude { name: String },
+    /// Change a collection's settings after `collection add`: the embed-exclusion
+    /// rules. Excluded documents stay searchable by keyword and are never embedded
+    Set {
+        name: String,
+        /// Keep documents whose collection-relative path matches this glob out of
+        /// `rqmd embed` (repeatable; replaces the stored list; same syntax as --ignore)
+        #[arg(long = "embed-ignore", value_name = "PATTERN")]
+        embed_ignore: Vec<String>,
+        /// Remove every stored --embed-ignore pattern
+        #[arg(long, conflicts_with = "embed_ignore")]
+        clear_embed_ignore: bool,
+        /// Do not embed documents whose indexed text is larger than this many bytes
+        #[arg(long, value_name = "BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        embed_max_bytes: Option<u64>,
+        /// Remove the stored --embed-max-bytes cap
+        #[arg(long, conflicts_with = "embed_max_bytes")]
+        clear_embed_max_bytes: bool,
+    },
 }
 
 #[derive(Subcommand)]
