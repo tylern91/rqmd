@@ -9,6 +9,7 @@ pub mod frontmatter;
 pub mod fts;
 pub mod hnsw;
 pub mod lock;
+pub mod model_cache;
 pub mod query;
 pub mod resolve;
 pub mod rrf;

@@ -39,6 +39,46 @@ raw query already returns a dominant top result (score above a fixed
 threshold with a clear gap to the runner-up), expansion is skipped entirely
 and the pipeline proceeds directly to reranking that candidate set.
 
+### Query cache
+
+`rqmd query --cache` (off by default; see [Query cache](CLI.md#query-cache)) keeps model output
+in `model_cache.sqlite`, a separate SQLite file beside `index.sqlite`, created on the first
+cached query with mode `0600` on Unix. It is a separate file rather than a table in the index on
+purpose: `index.sqlite` and its schema are never touched, a cache write never contends with an
+`update` or `embed` that holds the index lock, and deleting the file is always safe, because the
+next query recomputes what it needs. The code is `rqmd_core::model_cache` (storage) and
+`crates/rqmd-core/src/store/query_cache.rs` (the three hooks the hybrid query calls).
+
+The file has two tables, `expansion` and `rerank`. Each row has a `key` (a SHA-256 digest), the
+`model` and `prompt_version` it was produced under, the value, and a `last_used` counter:
+
+| Table | Key digest covers | Value |
+|-------|-------------------|-------|
+| `expansion` | the full expansion prompt, which holds the query text, the intent and the template | the generation model's raw output, parsed again on each use |
+| `rerank` | the rerank query (intent prepended, as the reranker sees it) and the SHA-256 of the exact chunk text the reranker scored | the score |
+
+A lookup matches only when `model` and `prompt_version` also equal the current ones. `model` is
+the model name plus the size and modification time of its weights file, so replacing the weights
+under the same name misses; when the weights file cannot be read, that stage neither reads nor
+writes the cache. `prompt_version` is a per-table constant plus the rqmd version, so a template
+change or an upgrade misses. Keying rerank scores on chunk text means an edited document is
+scored again while unchanged notes keep their scores, and a score never depends on which
+document or collection the text came from: the reranker scores each (query, chunk) pair on its
+own. When only some chunks are cached, the reranker is called for the rest only.
+
+Only real model output is written: an expansion after the generation model returned it, and the
+scores of a rerank that ended `Reranked` (see [Rerank fallback](CLI.md#rerank-fallback)). A
+failed or skipped expansion, a rerank that failed, ran out of time, was skipped or was
+unsupported, and non-finite scores write nothing, so fusion-order fallbacks are never cached.
+`rqmd update` does not clear the cache: rows for text that changed are unreachable rather than
+wrong. The cache holds at most 10,000 rows across both tables; each write that goes over deletes
+the least recently used rows in the same transaction. `rqmd embed --clear-cache` deletes the file;
+`rqmd status` reports the row count when the file exists. A cache file that cannot be opened or
+read turns the cache off for that run with one stderr line, and lock contention from another
+process skips the cache operation silently, so the cache never fails a query. The file holds
+query-derived text (the model's expanded queries) and scores; query and chunk text appear only as
+digests.
+
 ### Full-text tokenization
 
 BM25 runs on Tantivy's default analyzer (split on whitespace and punctuation, drop tokens over

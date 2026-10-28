@@ -6,7 +6,7 @@
 
 | Command | Description |
 |---------|-------------|
-| `rqmd query <text> [--no-expand] [--per-file N] [--recency HALF_LIFE] [--timeout SECS [--timeout-strict]]` | Hybrid search: BM25 + vector + rerank + LLM query expansion. `--timeout` gives up after that many seconds (exit 124), or returns the results unreranked if only reranking is left; `--timeout-strict` always exits 124; see [Timeouts](#timeouts) |
+| `rqmd query <text> [--no-expand] [--per-file N] [--recency HALF_LIFE] [--timeout SECS [--timeout-strict]] [--cache \| --no-cache]` | Hybrid search: BM25 + vector + rerank + LLM query expansion. `--timeout` gives up after that many seconds (exit 124), or returns the results unreranked if only reranking is left; `--timeout-strict` always exits 124; see [Timeouts](#timeouts). `--cache` reuses expansion output and rerank scores from earlier runs; off by default, see [Query cache](#query-cache) |
 | `rqmd search <text> [--per-file N] [--recency HALF_LIFE]` | BM25 keyword search only |
 | `rqmd vsearch <text> [--per-file N] [--recency HALF_LIFE]` | Vector similarity only; each result shows the chunk that matched |
 | `rqmd similar <path\|#docid>` | Find documents most similar to an already-indexed one |
@@ -15,10 +15,11 @@
 | `rqmd ls [collection[/path]]` | List collections or files |
 | `rqmd embed [-c collection] [--rebuild] [--timeout SECS]` | Generate embeddings (`--rebuild`: clear vectors and re-embed from scratch). A chunk whose text was already embedded under the same model, backend and context size reuses that stored vector, wherever it came from (an earlier version of the note or another document), so only new text is encoded. A document that fails to embed is skipped and listed at the end; see [Exit codes](#exit-codes). `--timeout` stops after that many seconds with the work so far saved; see [Timeouts](#timeouts). `SIGINT` or `SIGTERM` stops it after the document in hand, with the work so far saved; see [Interrupting update and embed](#interrupting-update-and-embed) |
 | `rqmd embed --cleanup` | Reclaim orphaned vectors and unreferenced content — no model, no re-embed. Vectors of an edited note that `rqmd embed` has not embedded yet are kept, because the next `embed` copies its unchanged chunks from them |
+| `rqmd embed --clear-cache` | Delete the [query cache](#query-cache) (`model_cache.sqlite`) and print how many rows it held. Loads no model, takes no index lock and leaves the index untouched; with no cache file it says so and exits `0` |
 | `rqmd unlock [--force [--yes]]` | Remove the write lock left by a crashed or hung `embed`/`update`. Removes it only when the holder is provably dead; a live holder that has made no progress for `RQMD_LOCK_STALE_SECS` (default 600) needs `--force` and a confirmation. A holder that is alive and recently active is never removed |
 | `rqmd update [-c collection] [--run-hooks] [--full]` | Re-index: reports new, updated, unchanged, and removed (soft-deleted) document counts. A file whose size and mtime match its last indexing is counted unchanged without being read; `--full` re-reads and re-hashes every file instead. `--run-hooks` runs each collection's `update_command` even when the index was picked up implicitly from a project-local `.rqmd/` — see [Update hook trust](SECURITY.md#update-hook-trust). The summary line ends with the folders the [built-in exclusions](CONFIGURATION.md#excluding-files) left out, when there are any, and a stored ignore pattern that no longer parses is reported as a warning. A hook that runs longer than `RQMD_HOOK_TIMEOUT_SECS` (default 300) is killed; a failed or timed-out hook never stops the other collections, and is listed at the end. `SIGINT` or `SIGTERM` stops it after the file in hand; see [Interrupting update and embed](#interrupting-update-and-embed) |
 | `rqmd watch [-c collection] [--interval SECS]` | Keep the full-text index current while files change: checks the collections every `--interval` seconds (default 5, minimum 1) and re-indexes a collection whose files changed, with the same walk and rules as `rqmd update`. Keyword search only: it never embeds and never runs a collection's `update_command`. See [Watching for changes](#watching-for-changes) |
-| `rqmd status` | Index health and collection summary. The AST Chunking block lists the extensions chunked at declaration boundaries and, after `Without:`, the indexed extensions that have no grammar with their document counts (prose such as `.md` and `.txt` is not listed) |
+| `rqmd status` | Index health and collection summary. The AST Chunking block lists the extensions chunked at declaration boundaries and, after `Without:`, the indexed extensions that have no grammar with their document counts (prose such as `.md` and `.txt` is not listed). When a [query cache](#query-cache) file exists, the Documents block adds a `Cache:` line with its row count |
 | `rqmd doctor` | Diagnose config, index, model, and device issues |
 | `rqmd bench [-n N]` | Embed throughput benchmark (default: 5 rounds) |
 | `rqmd eval [--mode bm25\|vec\|hybrid] [--verbose]` | Search quality gate: six built-in synthetic documents and 25 queries, scored by Hit@K in a throwaway index. Needs no index of yours and creates none |
@@ -85,6 +86,8 @@ apart this way and are not filtered.
 | `--recency <half-life>` | off | Rank newer files higher, for example `30d`, `2w` or `12h`; accepted by `query`, `search` and `vsearch`, see [Recency](#recency) |
 | `--no-expand` | off | Skip LLM query expansion; search the query text as-is (env: `RQMD_NO_EXPAND`) |
 | `--no-rerank` | off | Skip cross-encoder reranking (expansion still runs) |
+| `--cache` | off | Reuse expansion output and rerank scores from earlier queries and store new ones; see [Query cache](#query-cache) (env: `RQMD_QUERY_CACHE`) |
+| `--no-cache` | off | Turn the query cache off for this run, even when `--cache` or `RQMD_QUERY_CACHE` is set |
 | `--full` | off | Return full document bodies instead of snippets |
 | `--format <fmt>` | `cli` | Output format — see below |
 
@@ -457,6 +460,41 @@ killing the process: `embed` embeds the documents since its last checkpoint agai
 run, and `update` may leave files it indexed in that run missing from search results. Waiting
 for the index lock, loading a model and a single model call cannot be interrupted: the signal
 is acted on once they return, or send a second one to leave at once.
+
+## Query cache
+
+`rqmd query --cache` (or `RQMD_QUERY_CACHE=1`) keeps the query-expansion output and the rerank
+scores of each query in `model_cache.sqlite` in the index directory, and reuses them when the same
+query runs again: a repeated query calls neither the generation model nor the reranker, and
+returns the same results. The cache is off by default; without `--cache`, `query` creates no file
+and behaves exactly as before. `--no-cache` turns it off for one run when the environment variable
+is set.
+
+- **What is reused.** An expansion is reused for the same query text, intent, generation model and
+  prompt version; a rerank score for the same query (with its intent), the same chunk text and the
+  same rerank model and prompt version. A model is identified by its name and by the size and
+  modification time of its weights file, so replacing the weights under the same name misses. An
+  edited document has new chunk text, so only its chunks are scored again. Upgrading rqmd misses
+  the whole cache once.
+- **What is never stored.** An expansion that failed or was skipped, the scores of a rerank that
+  failed, ran out of `--timeout`, was skipped (`--no-rerank`) or was not supported, and any
+  non-finite score. Results in fusion order are never cached.
+- **Size.** At most 10,000 rows, expansions and rerank scores counted together. A write that goes
+  over evicts the least recently used rows. `rqmd update` does not clear it: rows for text that no
+  longer exists are simply never looked up again, and age out.
+- **Clearing.** `rqmd embed --clear-cache` deletes the file. Deleting `model_cache.sqlite` by hand
+  is equally safe. `rqmd embed --cleanup` does not touch it.
+- **Failures.** A cache file that cannot be created or read never fails the query: it prints one
+  line to stderr and runs without the cache. A cache another `rqmd` process is writing to is
+  skipped for that run without a message.
+- **Privacy.** The file holds query-derived text (the expanded queries the model wrote) and
+  relevance scores on disk, beside the index. Query text and chunk text are stored only as SHA-256
+  digests, but an expansion restates the query. The file is created readable by its owner only
+  (`0600` on Unix).
+- **Scope.** Only `rqmd query` uses it. The MCP server, `rqmd eval` and `rqmd bench` do not.
+
+`RUST_LOG=rqmd::query_cache=debug` logs, per query, whether the expansion came from the cache or
+the model and how many chunks the reranker scored.
 
 ## Rerank fallback
 

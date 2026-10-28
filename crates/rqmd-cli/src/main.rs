@@ -94,6 +94,15 @@ enum Commands {
         /// returning the results in fusion order.
         #[arg(long, requires = "timeout")]
         timeout_strict: bool,
+        /// Reuse expansion output and rerank scores from earlier queries, and store new
+        /// ones, in model_cache.sqlite next to the index. Off by default: the file keeps
+        /// query-derived text and scores on disk.
+        #[arg(long, env = "RQMD_QUERY_CACHE", action = ArgAction::SetTrue,
+              value_parser = clap::builder::BoolishValueParser::new())]
+        cache: bool,
+        /// Turn the query cache off for this run, even when --cache or RQMD_QUERY_CACHE is set
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Full-text keyword search (BM25 only, no LLM)
     Search {
@@ -167,6 +176,9 @@ enum Commands {
         #[arg(long, value_name = "SECS", conflicts_with = "cleanup",
               value_parser = clap::value_parser!(u64).range(1..))]
         timeout: Option<u64>,
+        /// Delete the query cache (model_cache.sqlite) — no model, the index is untouched
+        #[arg(long, conflicts_with_all = ["rebuild", "collection", "cleanup", "timeout"])]
+        clear_cache: bool,
     },
     /// Remove the write lock left by a crashed or hung `embed`/`update`
     Unlock {
@@ -429,6 +441,8 @@ fn run() -> Result<()> {
             no_expand,
             timeout,
             timeout_strict,
+            cache,
+            no_cache,
         } => commands::query::run_query(
             &index_dir,
             &query,
@@ -444,6 +458,7 @@ fn run() -> Result<()> {
                 timeout: timeout.map(std::time::Duration::from_secs),
                 timeout_strict,
                 recency: scope.recency.map(rqmd_core::Recency::new),
+                cache: cache && !no_cache,
             },
         ),
         Commands::Search { query, scope } => commands::query::run_search(
@@ -495,8 +510,11 @@ fn run() -> Result<()> {
             rebuild,
             cleanup,
             timeout,
+            clear_cache,
         } => {
-            if cleanup {
+            if clear_cache {
+                commands::index::run_clear_cache(&index_dir)
+            } else if cleanup {
                 commands::index::run_cleanup(&index_dir)
             } else {
                 commands::index::run_embed(
@@ -597,5 +615,34 @@ mod tests {
             Cli::try_parse_from(["rqmd", "embed", "--cleanup"]).is_ok(),
             "--cleanup alone must parse"
         );
+    }
+
+    #[test]
+    fn embed_clear_cache_stands_alone() {
+        for other in [
+            &["--rebuild"][..],
+            &["--cleanup"],
+            &["-c", "foo"],
+            &["--timeout", "5"],
+        ] {
+            let mut args = vec!["rqmd", "embed", "--clear-cache"];
+            args.extend_from_slice(other);
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?} must fail");
+        }
+        assert!(Cli::try_parse_from(["rqmd", "embed", "--clear-cache"]).is_ok());
+    }
+
+    #[test]
+    fn query_cache_is_off_unless_asked_and_no_cache_wins() {
+        let cache_of = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Commands::Query {
+                cache, no_cache, ..
+            } => cache && !no_cache,
+            _ => unreachable!(),
+        };
+        assert!(!cache_of(&["rqmd", "query", "q"]));
+        assert!(cache_of(&["rqmd", "query", "q", "--cache"]));
+        assert!(!cache_of(&["rqmd", "query", "q", "--cache", "--no-cache"]));
+        assert!(!cache_of(&["rqmd", "query", "q", "--no-cache"]));
     }
 }

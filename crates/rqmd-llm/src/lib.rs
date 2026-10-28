@@ -235,6 +235,20 @@ pub trait InferenceBackend: Send {
     fn rerank_model_name(&self) -> &str;
     fn generate_model_name(&self) -> &str;
 
+    /// The weights file the reranker loads from, when it is a local file. The
+    /// opt-in query cache folds its size and modification time into the cache
+    /// key, so replacing the weights under the same name misses the cache.
+    /// Default: `None` (the model name alone identifies the model).
+    fn rerank_model_file(&self) -> Option<&Path> {
+        None
+    }
+
+    /// The weights file the generation model loads from; see
+    /// [`Self::rerank_model_file`].
+    fn generate_model_file(&self) -> Option<&Path> {
+        None
+    }
+
     /// Engine family that computes this backend's embeddings (`"llama"`,
     /// `"ort"`). With the model name and [`Self::embed_context_size`] it decides
     /// whether a stored vector can stand in for a fresh encode.
@@ -1232,6 +1246,14 @@ impl InferenceBackend for LlamaCppBackend {
 
     fn generate_model_name(&self) -> &str {
         &self.generate_model_name
+    }
+
+    fn rerank_model_file(&self) -> Option<&Path> {
+        Some(&self.rerank_path)
+    }
+
+    fn generate_model_file(&self) -> Option<&Path> {
+        Some(&self.generate_path)
     }
 
     fn release_idle(&mut self, ttl: Duration) -> usize {
