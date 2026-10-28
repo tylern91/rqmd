@@ -97,7 +97,16 @@ pub fn write_pidfile(index_dir: &Path, pid: u32, host: &str, port: u16) -> Resul
 /// fresh start.
 pub fn read_pidfile(index_dir: &Path) -> Option<PidRecord> {
     let data = std::fs::read_to_string(pidfile_path(index_dir)).ok()?;
-    serde_json::from_str(&data).ok()
+    let record: PidRecord = serde_json::from_str(&data).ok()?;
+    plausible_pid(record.pid).then_some(record)
+}
+
+/// A pidfile is plain data and a project-local `.rqmd/` can come with a cloned
+/// repository, so its pid is checked before anything is signalled. `kill` reads
+/// 0 and negative numbers as process groups (a `u32` above `i32::MAX` wraps to
+/// one), and pid 1 or this process are never the daemon.
+fn plausible_pid(pid: u32) -> bool {
+    pid > 1 && pid <= i32::MAX as u32 && pid != std::process::id()
 }
 
 pub fn remove_pidfile(index_dir: &Path) {
@@ -123,15 +132,28 @@ pub fn fetch_health(host: &str, port: u16) -> Option<HealthResponse> {
 
 pub fn verify_identity(record: &PidRecord) -> Identity {
     match fetch_health(&record.host, record.port) {
-        Some(health) if health.pid == record.pid => Identity::Confirmed(health),
-        Some(health) => Identity::Foreign(health),
-        None => match check_recorded_process(record) {
-            None => Identity::AliveUnresponsive,
-            Some(why @ (NotOurs::NoRecordedStart | NotOurs::UnreadableStart)) => {
-                Identity::AliveUnverified(why)
+        // The pidfile also names the host to ask, so a planted one could point
+        // at a server that answers with any pid. An answer from a host that is
+        // not loopback counts only when the recorded process start time agrees.
+        Some(health) if health.pid == record.pid => {
+            if is_loopback(&record.host) || check_recorded_process(record).is_none() {
+                Identity::Confirmed(health)
+            } else {
+                identity_without_health(record)
             }
-            Some(NotOurs::Gone | NotOurs::DifferentStart { .. }) => Identity::Stale,
-        },
+        }
+        Some(health) => Identity::Foreign(health),
+        None => identity_without_health(record),
+    }
+}
+
+fn identity_without_health(record: &PidRecord) -> Identity {
+    match check_recorded_process(record) {
+        None => Identity::AliveUnresponsive,
+        Some(why @ (NotOurs::NoRecordedStart | NotOurs::UnreadableStart)) => {
+            Identity::AliveUnverified(why)
+        }
+        Some(NotOurs::Gone | NotOurs::DifferentStart { .. }) => Identity::Stale,
     }
 }
 
@@ -545,14 +567,55 @@ mod tests {
         check_port_free(&record.host, record.port).unwrap();
 
         // status/stop both self-heal by removing the stale pidfile rather
-        // than ever calling kill() on the recycled pid.
+        // than ever calling kill() on the recycled pid. A child stands in for
+        // that pid, because this process is never accepted as a pidfile target.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let stale = PidRecord {
+            pid: child.id(),
+            process_start_unix: process_start_time(child.id()).map(|t| t - 3600),
+            ..record.clone()
+        };
         std::fs::write(
             pidfile_path(dir.path()),
-            serde_json::to_string(&recycled).unwrap(),
+            serde_json::to_string(&stale).unwrap(),
         )
         .unwrap();
         status_daemon(dir.path()).unwrap();
-        assert!(read_pidfile(dir.path()).is_none());
+        assert!(!pidfile_path(dir.path()).exists());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_pidfile_naming_an_implausible_pid_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |pid: u64| {
+            std::fs::write(
+                pidfile_path(dir.path()),
+                format!(
+                    r#"{{"pid":{pid},"host":"127.0.0.1","port":8181,"index_dir":"/x",
+                        "started_at":"2020-01-01T00:00:00Z","started_at_unix":0}}"#
+                ),
+            )
+            .unwrap();
+        };
+        // 0 and 1, anything that wraps to a negative `pid_t` (kill reads those
+        // as process groups), and this process itself.
+        for pid in [
+            0,
+            1,
+            2_147_483_648,
+            4_294_967_295,
+            u64::from(std::process::id()),
+        ] {
+            write(pid);
+            assert!(read_pidfile(dir.path()).is_none(), "pid {pid} was accepted");
+        }
+        write(4242);
+        assert_eq!(read_pidfile(dir.path()).expect("plausible pid").pid, 4242);
     }
 
     #[test]

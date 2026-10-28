@@ -46,6 +46,12 @@
   disclose paths) until one exists (`status` as its result, the others as a tool error). `collection add`, `update`,
   `embed` and `init` create the index as before, and nothing changes for an existing index. See
   [docs/CLI.md](docs/CLI.md#exit-codes).
+- `rqmd mcp stop`, `rqmd mcp status` and `rqmd mcp --daemon` now validate the pidfile before they
+  signal anything. A pidfile that names pid 0 or 1, a number above `i32::MAX`, or the running
+  `rqmd` process itself is treated as not there. A `/health` answer from a host that is not
+  loopback counts as the daemon only when the process start time recorded in the pidfile also
+  matches; otherwise the pid is treated as unverified and not signalled. A daemon started on a
+  non-loopback address (`--allow-non-loopback`) is still found through its recorded start time.
 
 ## [0.32.1] - 2026-10-26
 
