@@ -229,6 +229,87 @@ least 30 days old, and pin each crate with
   start a release on its own. Apply `patch`, `minor` or `skip-release` by hand
   as described under "Semver labels".
 
+### llama.cpp (`llama-cpp-2`) bump gate
+
+The embed fingerprint (`base_signature()` in `crates/rqmd-core/src/store.rs`)
+names the model, chunking and prompts, but not the inference engine. When the
+unchanged chunks of an edited document reuse their stored vectors, a vector
+from the old engine and one from the new engine would sit under one
+fingerprint. A `llama-cpp-2` bump (which moves the bundled llama.cpp and
+`llama-cpp-sys-2` with it) therefore merges only after every step below passes.
+The first bump PR links
+[#151](https://github.com/tylern91/rqmd/issues/151) and records the measured
+result (the printed cosine table and which builds were run). A bump changes
+nothing in the fingerprint; this gate measures whether it needed to.
+
+1. **Embedding sample.** The fixed sample is
+   `crates/rqmd-llm/tests/fixtures/engine_bump_sample.json`: a short English
+   text, a long text of about 2000 tokens (just under the 2044-token
+   truncation limit), a longer one that is truncated, Chinese and Japanese text, a Rust snippet and a Python
+   snippet. Every text is embedded as a passage and as a query (14 vectors),
+   with the same model file on both sides. Change the sample only in its own
+   PR, because a changed sample cannot be compared with an older reference.
+2. **Measure the old and the new engine.** Run the ignored test with the
+   embedding GGUF in the Hugging Face cache (`HF_HUB_OFFLINE=1` forbids a
+   download; the backend resolves all three default models, as the CLI does).
+   Use a file outside the repository for the reference. Run both
+   steps on the same machine, the same backend (GPU or `RQMD_FORCE_CPU=1`) and
+   the same model file: a GPU and the CPU already differ in the last digits on
+   one engine (a Metal-versus-CPU self-check measured a lowest cosine of
+   0.9994), so mixing backends across the two steps eats most of the margin and
+   can fail a harmless bump.
+
+   ```bash
+   export RQMD_ENGINE_GATE_REFERENCE=/path/to/engine-gate-reference.json
+   # On main, before the bump (old engine). Refuses to overwrite an existing file.
+   RQMD_ENGINE_GATE_LABEL=llama-cpp-2-<old> \
+     cargo test -p rqmd-llm --test engine_bump_gate -- --ignored --nocapture engine_gate_capture
+   # On the bump branch (new engine).
+   RQMD_ENGINE_GATE_LABEL=llama-cpp-2-<new> \
+     cargo test -p rqmd-llm --test engine_bump_gate -- --ignored --nocapture engine_gate_compare
+   ```
+
+   `engine_gate_compare` prints the cosine of every old/new pair and the
+   lowest one, and exits non-zero when any pair is below the threshold, when an
+   id is missing or extra, or when a vector cannot be compared. The cosine,
+   threshold and pairing logic has ordinary tests that need no model and run in
+   CI; the two model steps never run in CI.
+3. **Pass rule.** The cosine similarity of **every** old/new pair is at least
+   **0.999**. One pair below it fails the gate. The mean is not enough.
+4. **If it fails.** `rqmd embed --rebuild` is the only correct upgrade path.
+   Reusing stored chunk vectors across engines is not acceptable, because the
+   fingerprint cannot tell them apart. The bump PR must say so in its
+   `CHANGELOG.md` entry and in the PR body (every user re-embeds once), and
+   must not ship until the fingerprint change or another mechanism keeps
+   chunk reuse from mixing engines. That is a separate change under the
+   `rqmd-embed-fingerprint-changes` rules.
+5. **Build checklist.** Build the new version with each GPU feature of
+   `crates/rqmd-llm/Cargo.toml`. A build only proves the C++ compiles and
+   links; a run is what the gate measures. The PR records, per row, whether it
+   was run or only compiled, and names the machine.
+
+   | Build | Command | How it is verified |
+   | --- | --- | --- |
+   | Metal (default on macOS) | `cargo build -p rqmd-llm` | Run: the steps above on an Apple Silicon Mac, once with the default GPU path and once with `RQMD_FORCE_CPU=1` for the CPU path. |
+   | CUDA | `cargo build -p rqmd-llm --features cuda` | Compiled on a host with the CUDA toolkit. Run only on an NVIDIA machine; otherwise record "compiled only". |
+   | Vulkan | `cargo build -p rqmd-llm --features vulkan` | Compiled on a host with the Vulkan SDK. Run only with a Vulkan GPU; otherwise record "compiled only". |
+
+   CI builds the default feature set and `ort-backend`, so it does not cover
+   CUDA or Vulkan. A backend that was only compiled is stated as such in the PR, not
+   implied to be tested. Repeat both steps for each backend you can run (for example Metal,
+   then `RQMD_FORCE_CPU=1`), each time with its own reference file.
+6. **Soak re-check.** `lock-soak.yml` covers the new `llama-cpp-2` and every
+   transitive crate the PR adds or changes (`llama-cpp-sys-2`, `cc`, `cmake`,
+   `bindgen` and so on). Run
+   `bash scripts/check-lock-soak.sh --dry-run <old Cargo.lock> <new Cargo.lock>`
+   before opening the PR and pin a young crate back with
+   `cargo update -p <crate> --precise <version>`.
+7. **Release notes.** Read the `llama-cpp-2` and llama.cpp release notes for
+   every version between the old and the new one, and list in the PR what
+   touches rqmd's use: embedding output (pooling, normalization, the encoder
+   path), tokenization (vocabulary and BOS handling) and the sampler API used
+   by `generate`. "Nothing relevant found" is a finding to write down too.
+
 ## Version + CHANGELOG convention
 
 This is the part that isn't written down anywhere else, so read it carefully:

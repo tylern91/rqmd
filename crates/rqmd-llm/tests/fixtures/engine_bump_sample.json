@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "samples": [
+    {
+      "id": "short_en",
+      "text": "How do I rebuild the vector index after upgrading the embedding engine?"
+    },
+    {
+      "id": "long_near_limit",
+      "repeat": 20,
+      "text": "The retrieval pipeline splits every document into overlapping chunks, encodes each chunk into a unit-length vector, and stores the vectors beside a hash of the chunk text. When a file changes, only the chunks whose hash differs are encoded again, and the vectors of the unchanged chunks are kept as they are. That shortcut is safe only while every stored vector was produced by the same model, the same prompts and the same inference engine, because a query vector is compared against all of them with one dot product. "
+    },
+    {
+      "id": "long_over_limit",
+      "repeat": 22,
+      "text": "The retrieval pipeline splits every document into overlapping chunks, encodes each chunk into a unit-length vector, and stores the vectors beside a hash of the chunk text. When a file changes, only the chunks whose hash differs are encoded again, and the vectors of the unchanged chunks are kept as they are. That shortcut is safe only while every stored vector was produced by the same model, the same prompts and the same inference engine, because a query vector is compared against all of them with one dot product. "
+    },
+    {
+      "id": "cjk_zh",
+      "text": "向量索引在升级推理引擎之后必须重新构建，否则新旧向量混合会让相似度排序出现无法察觉的偏差。文档被切分成带有重叠的片段，每个片段都会被编码为单位长度的向量。"
+    },
+    {
+      "id": "cjk_ja",
+      "text": "埋め込みモデルの推論エンジンを更新したあとは、保存済みのベクトルを再利用せずに、すべてのチャンクをもう一度エンコードする必要があります。日本語の文章では、単語の区切りにスペースがありません。"
+    },
+    {
+      "id": "code_rust",
+      "text": "pub fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {\n    let norm = v.iter().map(|&x| x * x).sum::<f32>().sqrt().max(1e-12);\n    for x in &mut v {\n        *x /= norm;\n    }\n    v\n}\n\n#[test]\nfn unit_length() {\n    let v = l2_normalize(vec![3.0, 4.0]);\n    assert!((v[0] - 0.6).abs() < 1e-6);\n}"
+    },
+    {
+      "id": "code_python",
+      "text": "def cosine(a: list[float], b: list[float]) -> float:\n    dot = sum(x * y for x, y in zip(a, b))\n    na = sum(x * x for x in a) ** 0.5\n    nb = sum(y * y for y in b) ** 0.5\n    if na == 0 or nb == 0:\n        raise ValueError(\"zero vector\")\n    return dot / (na * nb)\n"
+    }
+  ]
+}
