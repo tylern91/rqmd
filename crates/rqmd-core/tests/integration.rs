@@ -11,7 +11,7 @@ use rqmd_core::{
         get_document_by_docid_prefix, get_document_by_filepath, hash_needs_embed, list_documents,
         open_db, purge_collection, set_config, upsert_content, upsert_document, upsert_vector_meta,
     },
-    resolve::resolve_multi_get,
+    resolve::{resolve_multi_get, resolve_multi_get_report},
     rrf::{reciprocal_rank_fusion, rrf_weights},
     types::{QueryType, RankedListMeta, RankedResult},
 };
@@ -1297,6 +1297,42 @@ fn resolve_multi_get_handles_more_than_a_thousand_plain_entries() {
     let needles: Vec<&str> = entries.iter().map(String::as_str).collect();
     let direct = find_documents_by_needles(&db, None, &needles).unwrap();
     assert_eq!(full_paths(&direct), full_paths(&docs));
+}
+
+#[test]
+fn resolve_multi_get_looks_repeated_entries_up_once_and_caps_distinct_ones() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir.path().join("test.sqlite")).unwrap();
+    let hash = content_hash("body");
+    upsert_content(&db, &hash, "body", "t").unwrap();
+    upsert_document(&db, "col", "dir/one.md", "T", &hash, "t").unwrap();
+
+    // 20,000 copies of one entry are one lookup, and the report still names
+    // the entry once when it matches nothing.
+    let repeated = vec!["one.md"; 20_000].join(",");
+    let docs = resolve_multi_get(&db, None, &repeated).unwrap();
+    assert_eq!(
+        full_paths(&docs),
+        full_paths(&resolve_multi_get(&db, None, "one.md").unwrap())
+    );
+    let missing = vec!["gone.md"; 20_000].join(",");
+    let report = resolve_multi_get_report(&db, None, &missing).unwrap();
+    assert_eq!(report.unmatched, vec!["gone.md".to_string()]);
+
+    // Past the cap of distinct entries the call fails with a clear message
+    // instead of scanning the table once per batch without bound.
+    let distinct: Vec<String> = (0..5_001).map(|i| format!("file-{i}.md")).collect();
+    let err = resolve_multi_get(&db, None, &distinct.join(",")).unwrap_err();
+    assert!(
+        err.to_string().contains("too many distinct path entries"),
+        "{err}"
+    );
+    let within: Vec<String> = (0..5_000).map(|i| format!("file-{i}.md")).collect();
+    assert!(
+        resolve_multi_get(&db, None, &within.join(","))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

@@ -17,7 +17,9 @@
 ### Fixed
 - A `multi-get` pattern with about 1,000 or more path entries no longer fails with the SQLite error
   `Expression tree is too large (maximum depth 1000)`. Path entries are now looked up in batches,
-  and the result is the same as for the same entries split over several smaller calls. Glob entries
+  and the result is the same as for the same entries split over several smaller calls. A repeated
+  entry is looked up once, and more than 5,000 distinct path entries in one call is an error, so a
+  single request cannot trigger an unbounded number of table scans. Glob entries
   are matched against one listing of the documents instead of one listing per glob.
 
 ## [0.32.1] - 2026-10-26

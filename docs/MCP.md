@@ -230,7 +230,8 @@ the response holds the union of all matches, each document once, ordered by
 | glob | `notes/2025-05*.md` | every document whose `collection/path` matches |
 | path | `README.md` | every document whose path or `collection/path` is `README.md` or ends with `/README.md` |
 
-A list of any length is accepted. The 200-document and 4 MiB caps apply after
+Long lists are accepted: a repeated entry is looked up once, and more than 5,000
+distinct path entries in one call is an error. The 200-document and 4 MiB caps apply after
 resolution, so which documents survive a cap follows that order. When a cap
 drops documents, its note says how many were dropped.
 

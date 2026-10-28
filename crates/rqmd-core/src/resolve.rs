@@ -149,6 +149,11 @@ pub fn resolve_multi_get(
     Ok(resolve_multi_get_report(conn, collections, pattern)?.documents)
 }
 
+/// Most distinct plain path entries one call looks up. Each batch of 250 scans
+/// the `documents` table, so the bound keeps one MCP request to about 20 scans;
+/// longer lists failed before batching existed (past roughly 990 entries).
+const MAX_DISTINCT_PATH_ENTRIES: usize = 5_000;
+
 /// Resolve a `multi-get` pattern and report which entries matched nothing and
 /// which plain entries matched more than one document.
 ///
@@ -207,7 +212,21 @@ pub fn resolve_multi_get_report(
         })
         .unzip();
     if !needles.is_empty() {
-        let matched = db::find_documents_by_needles(conn, collections, &needles)?;
+        // Each repeat of an entry adds nothing, so look every distinct entry
+        // up once; `NeedleIndex::count` below still answers per written entry.
+        let mut seen_needles: HashSet<&str> = HashSet::new();
+        let distinct: Vec<&str> = needles
+            .iter()
+            .copied()
+            .filter(|n| seen_needles.insert(n))
+            .collect();
+        if distinct.len() > MAX_DISTINCT_PATH_ENTRIES {
+            anyhow::bail!(
+                "too many distinct path entries ({}); at most {MAX_DISTINCT_PATH_ENTRIES} per call",
+                distinct.len()
+            );
+        }
+        let matched = db::find_documents_by_needles(conn, collections, &distinct)?;
         let index = NeedleIndex::new(&matched);
         for (&slot, needle) in path_slots.iter().zip(&needles) {
             counts[slot] = index.count(needle);

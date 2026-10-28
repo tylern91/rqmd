@@ -244,8 +244,9 @@ How the entries combine:
 - Documents are listed by `collection/path`, not in the order the entries were given.
 - `-c/--collection` narrows path and glob entries. A docid entry is not narrowed: `#a1b2c3` returns
   its document even when it lives in a collection that `-c` leaves out.
-- A list of any length works: path entries are looked up in batches, so a pattern with thousands
-  of entries returns the same documents as the same entries split over several calls.
+- Long lists work: path entries are looked up in batches, so a pattern with thousands of entries
+  returns the same documents as the same entries split over several calls. A repeated entry is
+  looked up once, and a call with more than 5,000 distinct path entries fails with an error.
 
 For example, with `docs/README.md`, `docs/guide/README.md` and `notes/todo.md` indexed:
 
