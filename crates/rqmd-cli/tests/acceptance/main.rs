@@ -12,6 +12,7 @@ mod helpers;
 mod hook_signals;
 mod index_rebuild;
 mod mcp_refresh;
+mod mcp_stop_force;
 mod multi_get;
 mod output_plain;
 mod per_file;
