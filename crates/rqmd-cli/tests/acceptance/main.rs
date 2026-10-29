@@ -18,6 +18,7 @@ mod multi_get;
 mod output_plain;
 mod per_file;
 mod query_timeout;
+mod query_timings;
 mod read_no_index;
 mod recency;
 mod security;

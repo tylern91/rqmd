@@ -5,10 +5,11 @@
 
 use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rqmd_llm::{BackendKind, InferenceBackend};
 use sha2::{Digest, Sha256};
@@ -26,8 +27,8 @@ use crate::{
     query::parse_query,
     rrf::{reciprocal_rank_fusion, rrf_weights},
     types::{
-        Chunk, QueryOutcome, QueryStage, QueryType, RankedListMeta, RankedResult, Recency,
-        RerankStatus, SearchOptions, SearchResult, clamp_per_file,
+        AnnPass, Chunk, QueryOutcome, QueryStage, QueryTimings, QueryType, RankedListMeta,
+        RankedResult, Recency, RerankStatus, SearchOptions, SearchResult, clamp_per_file,
     },
 };
 
@@ -147,6 +148,9 @@ pub struct Store {
     hnsw_dirty: bool,
     /// Told which stage a hybrid query has reached; see [`Store::set_query_observer`].
     query_observer: Option<Box<dyn FnMut(QueryStage) + Send>>,
+    /// Per-stage timings of hybrid queries; `None` (the default) means nothing
+    /// is measured. See [`Store::set_query_timings`].
+    timings: Option<RefCell<QueryTimings>>,
 }
 
 pub struct StoreConfig {
@@ -292,6 +296,7 @@ impl Store {
             hnsw_dirty: false,
             staged_vectors: HashMap::new(),
             query_observer: None,
+            timings: None,
         })
     }
 
@@ -1154,6 +1159,71 @@ impl Store {
         }
     }
 
+    /// Start (`true`) or stop (`false`) measuring where hybrid queries spend
+    /// their time; read the figures with [`Self::take_query_timings`]. Off by
+    /// default, and measuring changes no result: the cost is a few clock reads
+    /// per stage, and with it off the store only tests an `Option`.
+    pub fn set_query_timings(&mut self, on: bool) {
+        self.timings = on.then(|| RefCell::new(Self::fresh_timings()));
+    }
+
+    /// The timings gathered since they were switched on or last taken, then
+    /// start afresh. `None` when measuring is off.
+    pub fn take_query_timings(&mut self) -> Option<QueryTimings> {
+        let cell = self.timings.as_mut()?;
+        Some(std::mem::replace(cell.get_mut(), Self::fresh_timings()))
+    }
+
+    fn fresh_timings() -> QueryTimings {
+        QueryTimings {
+            phase: "query",
+            ..QueryTimings::default()
+        }
+    }
+
+    /// A clock for a timed section: `None`, without reading the clock, when
+    /// timings are off.
+    fn tick(&self) -> Option<Instant> {
+        self.timings.as_ref().map(|_| Instant::now())
+    }
+
+    /// Hand `record` the timings and the time since `start`. Does nothing when
+    /// timings are off.
+    fn tock(&self, start: Option<Instant>, record: impl FnOnce(&mut QueryTimings, Duration)) {
+        if let (Some(start), Some(timings)) = (start, &self.timings) {
+            record(&mut timings.borrow_mut(), start.elapsed());
+        }
+    }
+
+    /// Tag the ANN passes recorded from here on with `phase`.
+    fn timing_phase(&self, phase: &'static str) {
+        if let Some(timings) = &self.timings {
+            timings.borrow_mut().phase = phase;
+        }
+    }
+
+    /// [`InferenceBackend::embed_query`], timed.
+    fn embed_query_timed(&mut self, text: &str) -> Result<Vec<f32>> {
+        let start = self.tick();
+        let embedding = self.backend.embed_query(text);
+        self.tock(start, |t, d| {
+            t.embed_calls += 1;
+            t.embed += d;
+        });
+        embedding
+    }
+
+    /// [`InferenceBackend::embed_passage`], timed.
+    fn embed_passage_timed(&mut self, text: &str) -> Result<Vec<f32>> {
+        let start = self.tick();
+        let embedding = self.backend.embed_passage(text);
+        self.tock(start, |t, d| {
+            t.embed_calls += 1;
+            t.embed += d;
+        });
+        embedding
+    }
+
     /// Full hybrid search: BM25 + vector → optional HyDE expansion → RRF → chunk selection → rerank.
     ///
     /// `intent` provides optional context for expansion, reranking, and snippet selection.
@@ -1292,6 +1362,7 @@ impl Store {
         strict_timeout: bool,
         options: &SearchOptions,
     ) -> Result<QueryOutcome> {
+        let started = self.tick();
         let per_file = clamp_per_file(options.per_file);
         let not_run = |results| QueryOutcome {
             results,
@@ -1347,6 +1418,7 @@ impl Store {
         let candidate_docs =
             self.fuse_and_resolve_candidates(&ranked_lists, &list_meta, fetch_size)?;
         if candidate_docs.is_empty() {
+            self.tock(started, |t, d| t.total = d);
             return Ok(not_run(vec![]));
         }
 
@@ -1369,8 +1441,11 @@ impl Store {
             Some(recency) => Some(self.recency_factors(&recency, &candidate_docs)?),
             None => None,
         };
+        let assemble = self.tick();
         let results =
             self.assemble_results(candidate_docs, sections, rerank_scores, recency, limit);
+        self.tock(assemble, |t, d| t.assemble = d);
+        self.tock(started, |t, d| t.total = d);
         Ok(QueryOutcome { results, rerank })
     }
 
@@ -1397,6 +1472,7 @@ impl Store {
         if !parsed.subqueries.is_empty() {
             // ── Query document mode ────────────────────────────────────────────
             // First sub-query gets weight 2.0 (Original); the rest get 1.0.
+            self.timing_phase("sub-query");
             for (idx, sub) in parsed.subqueries.iter().enumerate() {
                 deadline.check("a sub-query")?;
                 let qt = if idx == 0 {
@@ -1419,8 +1495,7 @@ impl Store {
                     QueryType::Vec => {
                         self.emit_stage(QueryStage::Embedding);
                         let emb = self
-                            .backend
-                            .embed_query(&sub.text)
+                            .embed_query_timed(&sub.text)
                             .context("embed sub-query")?;
                         let results = self.search_vec_scoped(&emb, fetch_size, collections)?;
                         if !results.is_empty() {
@@ -1439,8 +1514,7 @@ impl Store {
                         // it's meant to match, or the whole technique degrades to a
                         // worse-phrased query embedding.
                         let emb = self
-                            .backend
-                            .embed_passage(&sub.text)
+                            .embed_passage_timed(&sub.text)
                             .context("embed sub-query")?;
                         let results = self.search_vec_scoped(&emb, fetch_size, collections)?;
                         if !results.is_empty() {
@@ -1480,10 +1554,7 @@ impl Store {
             // Step 2: Embed original query for vector search.
             deadline.check("embedding the query")?;
             self.emit_stage(QueryStage::Embedding);
-            let query_embedding = self
-                .backend
-                .embed_query(expand_text)
-                .context("embed query")?;
+            let query_embedding = self.embed_query_timed(expand_text).context("embed query")?;
             let vec_results = self.search_vec_scoped(&query_embedding, fetch_size, collections)?;
             if !vec_results.is_empty() {
                 ranked_lists.push(vec_results);
@@ -1505,8 +1576,13 @@ impl Store {
                     deadline.check("query expansion")?;
                     self.emit_stage(QueryStage::Expanding);
                     let prompt = build_expansion_prompt(expand_text, effective_intent);
-                    match self.backend.generate(&prompt) {
+                    let generate = self.tick();
+                    let generated = self.backend.generate(&prompt);
+                    self.tock(generate, |t, d| t.expansion_generate = d);
+                    match generated {
                         Ok(expansion) => {
+                            self.timing_phase("expansion");
+                            let search = self.tick();
                             let expansion_lists = self.parse_and_run_expansion(
                                 &expansion,
                                 expand_text,
@@ -1514,6 +1590,7 @@ impl Store {
                                 fetch_size,
                                 deadline,
                             )?;
+                            self.tock(search, |t, d| t.expansion_search = d);
                             ranked_lists.extend(expansion_lists.0);
                             list_meta.extend(expansion_lists.1);
                         }
@@ -1544,16 +1621,27 @@ impl Store {
         if ranked_lists.is_empty() {
             return Ok(vec![]);
         }
+        let fuse = self.tick();
         let weights = rrf_weights(list_meta);
         let fused = reciprocal_rank_fusion(ranked_lists, &weights);
         let candidates = &fused[..fetch_size.min(fused.len())];
+        self.tock(fuse, |t, d| {
+            t.fuse = d;
+            t.fused_from = ranked_lists.len();
+            t.fused = fused.len();
+        });
 
+        let resolve = self.tick();
         let mut candidate_docs: Vec<(RankedResult, String, String)> = Vec::new();
         for cand in candidates {
             if let Some((doc, body)) = self.filepath_to_doc_body(&cand.filepath)? {
                 candidate_docs.push((cand.clone(), doc.hash, body));
             }
         }
+        self.tock(resolve, |t, d| {
+            t.resolve = d;
+            t.resolve_lookups = candidates.len();
+        });
         Ok(candidate_docs)
     }
 
@@ -1594,6 +1682,7 @@ impl Store {
 
         // Chunk once per candidate. Sections past a file's best one are handed
         // out in candidate order while the rerank pass stays within its ceiling.
+        let chunk_select = self.tick();
         let mut extra_budget = RERANK_POOL_CEILING.saturating_sub(candidate_docs.len());
         let sections: Sections = candidate_docs
             .iter()
@@ -1606,7 +1695,9 @@ impl Store {
             .collect();
 
         let chunk_refs: Vec<&str> = sections.iter().flatten().map(|(t, _)| t.as_str()).collect();
+        self.tock(chunk_select, |t, d| t.chunk_select = d);
 
+        let rerank = self.tick();
         let (rerank_scores, status) = if skip_rerank {
             (None, RerankStatus::NotRun)
         } else if !self.backend.capabilities().rerank {
@@ -1640,6 +1731,12 @@ impl Store {
             }
         };
 
+        if !matches!(status, RerankStatus::NotRun | RerankStatus::Unsupported) {
+            self.tock(rerank, |t, d| {
+                t.rerank = d;
+                t.rerank_chunks = chunk_refs.len();
+            });
+        }
         (sections, rerank_scores, status)
     }
 
@@ -1851,15 +1948,25 @@ impl Store {
         limit: usize,
         collections: Option<&[String]>,
     ) -> Result<Vec<(String, i64, f32)>> {
+        let started = self.tick();
         let ids = match collections.filter(|c| !c.is_empty()) {
-            Some(cols) => Some(Arc::new(
-                db::active_document_ids_in_collections(&self.db, cols)
-                    .context("resolve collection scope")?,
-            )),
+            Some(cols) => {
+                let scope = self.tick();
+                let ids = db::active_document_ids_in_collections(&self.db, cols)
+                    .context("resolve collection scope")?;
+                self.tock(scope, |t, d| t.bm25_scope += d);
+                Some(Arc::new(ids))
+            }
             None => None,
         };
-        self.fts
-            .search_fts_scoped(query, limit, collections, ids.as_ref())
+        let hits = self
+            .fts
+            .search_fts_scoped(query, limit, collections, ids.as_ref());
+        self.tock(started, |t, d| {
+            t.bm25_calls += 1;
+            t.bm25 += d;
+        });
+        hits
     }
 
     fn hits_to_results(
@@ -1938,8 +2045,23 @@ impl Store {
         let total_vectors = self.hnsw.size();
         let mut k = fetch_size;
         loop {
+            let search = self.tick();
             let hits = self.hnsw.search(embedding, k)?;
-            let results = self.vec_hits_to_ranked(hits, collections)?;
+            let ann = search.map(|start| start.elapsed());
+            let fetched = hits.len();
+            let (results, lookup) = self.vec_hits_to_ranked(hits, collections)?;
+            if let (Some(ann), Some(lookup), Some(timings)) = (ann, lookup, &self.timings) {
+                let mut timings = timings.borrow_mut();
+                let phase = timings.phase;
+                timings.ann_passes.push(AnnPass {
+                    phase,
+                    k,
+                    fetched,
+                    in_scope: results.len(),
+                    ann,
+                    lookup,
+                });
+            }
             if results.len() >= fetch_size || k >= total_vectors {
                 return Ok(results);
             }
@@ -1947,11 +2069,16 @@ impl Store {
         }
     }
 
+    /// Resolve each ANN hit to its document with one SQLite lookup per hit,
+    /// keeping the in-scope ones. The second value is the time the lookups
+    /// took, summed, and is `Some` only while timings are on.
     fn vec_hits_to_ranked(
         &self,
         hits: Vec<(u64, f32)>,
         collections: Option<&[String]>,
-    ) -> Result<Vec<RankedResult>> {
+    ) -> Result<(Vec<RankedResult>, Option<Duration>)> {
+        let timed = self.timings.is_some();
+        let mut lookup = Duration::ZERO;
         let mut results = Vec::new();
         for (vid, sim) in hits {
             // Ranking only needs document identity, not the body. The
@@ -1959,7 +2086,12 @@ impl Store {
             // applied after the fact — a hash shared across collections
             // must resolve to the in-scope row here, not to an arbitrary one
             // that then gets discarded (qmd#933 parity, rqmd#86).
-            if let Some(doc) = doc_for_vid_meta_in(&self.db, vid, collections)? {
+            let start = timed.then(Instant::now);
+            let found = doc_for_vid_meta_in(&self.db, vid, collections)?;
+            if let Some(start) = start {
+                lookup += start.elapsed();
+            }
+            if let Some(doc) = found {
                 results.push(RankedResult {
                     filepath: format!("{}/{}", doc.collection, doc.path),
                     title: doc.title,
@@ -1967,7 +2099,7 @@ impl Store {
                 });
             }
         }
-        Ok(results)
+        Ok((results, timed.then_some(lookup)))
     }
 
     fn filepath_to_doc_body(
@@ -2049,8 +2181,7 @@ impl Store {
                     && seen.insert(("vec", text))
                 {
                     let emb = self
-                        .backend
-                        .embed_query(text)
+                        .embed_query_timed(text)
                         .context("embed vec expansion")?;
                     let results = self.search_vec_scoped(&emb, fetch_size, collections)?;
                     if !results.is_empty() {
@@ -2070,8 +2201,7 @@ impl Store {
                 {
                     // Passage-side prompt — see the QueryType::Hyde comment above for why.
                     let emb = self
-                        .backend
-                        .embed_passage(text)
+                        .embed_passage_timed(text)
                         .context("embed hyde expansion")?;
                     let results = self.search_vec_scoped(&emb, fetch_size, collections)?;
                     if !results.is_empty() {
@@ -3379,6 +3509,155 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 1, "vector match must still surface a result");
+    }
+
+    /// Embeds text about "xylophone" on one axis and everything else on
+    /// another, so a query about the second is far from the first in vector
+    /// space. Each ordinary text gets a distinct small offset so no two
+    /// vectors are equal. Embed-only, like `StubBackend`.
+    struct TwoTopicBackend;
+
+    impl rqmd_llm::InferenceBackend for TwoTopicBackend {
+        fn capabilities(&self) -> rqmd_llm::BackendCapabilities {
+            rqmd_llm::BackendCapabilities {
+                embed: true,
+                rerank: false,
+                generate: false,
+            }
+        }
+        fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
+            let mut v = vec![0.0; rqmd_llm::EMBED_DIM];
+            if text.contains("xylophone") {
+                v[1] = 1.0;
+            } else {
+                v[0] = 1.0;
+                v[2] = 0.001 * (text.len() % 97) as f32;
+            }
+            Ok(v)
+        }
+        fn rerank(&mut self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>> {
+            panic!("rerank is not supported")
+        }
+        fn generate(&mut self, _prompt: &str) -> Result<String> {
+            panic!("generate is not supported")
+        }
+        fn embed_model_name(&self) -> &str {
+            "two-topic"
+        }
+        fn rerank_model_name(&self) -> &str {
+            "stub-rerank"
+        }
+        fn generate_model_name(&self) -> &str {
+            "stub-generate"
+        }
+    }
+
+    /// A store with 40 notes in `bulk` and one in `small`, about unrelated
+    /// subjects.
+    fn bulk_and_small_store(dir: &std::path::Path) -> Store {
+        let mut store = open_stub_store_with(dir, Box::new(TwoTopicBackend));
+        for n in 0..40 {
+            store
+                .index_document(
+                    "bulk",
+                    &format!("star-{n}.md"),
+                    "Star",
+                    &format!("telescope galaxy nebula {}", "orbit ".repeat(n)),
+                )
+                .unwrap();
+        }
+        store
+            .index_document("small", "drum.md", "Drum", "xylophone marimba mallets")
+            .unwrap();
+        store.flush().unwrap();
+        store
+    }
+
+    fn query_outcome(store: &mut Store, scope: &[String]) -> QueryOutcome {
+        store
+            .hybrid_query_outcome_with(
+                "telescope galaxy",
+                None,
+                10,
+                Some(scope),
+                true,
+                true,
+                Deadline::none(),
+                false,
+                &SearchOptions::default(),
+            )
+            .unwrap()
+    }
+
+    /// rqmd#152: a scoped query far from its scope widens the ANN pool, and
+    /// the timings record every pass: `k` grows, each fetched vector is
+    /// resolved by one lookup, and only the last pass reaches the scoped note.
+    #[test]
+    fn timings_record_each_widening_pass_of_a_scoped_query() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = bulk_and_small_store(dir.path());
+        store.set_query_timings(true);
+
+        let scope = vec!["small".to_string()];
+        let outcome = query_outcome(&mut store, &scope);
+        assert_eq!(outcome.results.len(), 1, "the scoped note must be found");
+        assert_eq!(outcome.results[0].collection, "small");
+
+        let timings = store.take_query_timings().expect("timings were on");
+        let passes = &timings.ann_passes;
+        assert!(passes.len() >= 2, "expected widening: {passes:?}");
+        assert_eq!(passes[0].k, RERANK_CANDIDATE_LIMIT);
+        assert!(passes.windows(2).all(|w| w[1].k > w[0].k), "{passes:?}");
+        assert!(passes.iter().all(|p| p.phase == "query"), "{passes:?}");
+        // The 20 and 40 nearest vectors are all in `bulk`, outside the scope.
+        assert_eq!(passes[0].in_scope, 0, "{passes:?}");
+        assert_eq!(passes.last().unwrap().in_scope, 1, "{passes:?}");
+        assert_eq!(
+            timings.lookups(),
+            passes.iter().map(|p| p.fetched).sum::<usize>()
+        );
+        assert!(passes.iter().all(|p| p.fetched > 0 && p.fetched <= p.k));
+        assert_eq!(timings.bm25_calls, 1);
+        assert_eq!(timings.embed_calls, 1);
+        assert_eq!(timings.rerank_chunks, 0, "rerank was skipped");
+        assert!(timings.total >= timings.fuse + timings.resolve);
+    }
+
+    /// rqmd#152: measuring changes no result, and with it off nothing is
+    /// recorded. Taking the timings starts a fresh set.
+    #[test]
+    fn timings_do_not_change_results_and_are_off_by_default() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = bulk_and_small_store(dir.path());
+        let scope = vec!["small".to_string()];
+
+        let plain = query_outcome(&mut store, &scope);
+        assert!(store.take_query_timings().is_none(), "off by default");
+
+        store.set_query_timings(true);
+        let timed = query_outcome(&mut store, &scope);
+        let first = store.take_query_timings().expect("timings were on");
+        assert!(!first.ann_passes.is_empty());
+
+        let key = |o: &QueryOutcome| {
+            o.results
+                .iter()
+                .map(|r| (r.file.clone(), r.score.to_bits(), r.best_chunk.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(key(&plain), key(&timed));
+
+        let _ = query_outcome(&mut store, &scope);
+        let second = store.take_query_timings().expect("still on");
+        assert_eq!(
+            second.ann_passes.len(),
+            first.ann_passes.len(),
+            "taking starts afresh, so passes are not carried over"
+        );
+
+        store.set_query_timings(false);
+        let _ = query_outcome(&mut store, &scope);
+        assert!(store.take_query_timings().is_none());
     }
 
     /// A backend whose `generate` returns a fixed, caller-supplied expansion

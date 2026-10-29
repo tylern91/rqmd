@@ -94,6 +94,9 @@ enum Commands {
         /// returning the results in fusion order.
         #[arg(long, requires = "timeout")]
         timeout_strict: bool,
+        /// Diagnostic: print per-stage durations and counts to stderr after the results.
+        #[arg(long, hide = true)]
+        timings: bool,
     },
     /// Full-text keyword search (BM25 only, no LLM)
     Search {
@@ -429,6 +432,7 @@ fn run() -> Result<()> {
             no_expand,
             timeout,
             timeout_strict,
+            timings,
         } => commands::query::run_query(
             &index_dir,
             &query,
@@ -444,6 +448,7 @@ fn run() -> Result<()> {
                 timeout: timeout.map(std::time::Duration::from_secs),
                 timeout_strict,
                 recency: scope.recency.map(rqmd_core::Recency::new),
+                timings,
             },
         ),
         Commands::Search { query, scope } => commands::query::run_search(
