@@ -145,6 +145,8 @@ mod tests {
                 allow_hidden: false,
                 respect_gitignore: false,
                 max_file_bytes: None,
+                embed_ignore: vec![],
+                embed_max_bytes: None,
             },
         )
         .expect("upsert collection");

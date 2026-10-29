@@ -15,6 +15,20 @@
   `rqmd embed --clear-cache` deletes it, `rqmd status` shows its row count when it exists, and
   `--no-cache` turns it off for one run. The file keeps query-derived text and scores on disk. See
   [docs/CLI.md](docs/CLI.md#query-cache).
+- `rqmd collection set <name>` keeps documents out of `rqmd embed` while they stay searchable by
+  keyword (#147). `--embed-ignore PATTERN` (repeatable, the `--ignore` glob syntax, matched on the
+  collection-relative path) and `--embed-max-bytes BYTES` (measured on the indexed text, not the
+  raw file) are stored with the collection, kept by a re-add, shown by `collection show`, and
+  removed with `--clear-embed-ignore` / `--clear-embed-max-bytes`. Excluded documents are not
+  pending, so `rqmd embed` still takes its "all content hashes already have embeddings" path, and
+  `rqmd status` and `rqmd doctor` report how many are excluded and why. Vectors that already exist
+  for a newly excluded document are kept by a plain `rqmd embed` and dropped by
+  `rqmd embed --cleanup`; vector search (`vsearch`, `query`, `similar`) never returns an excluded
+  document, including through a vector shared with identical text in another collection. Two
+  nullable columns are added to `store_collections` on open. The rules are not part of the embed
+  fingerprint: with none configured, the embedded set and every command's output are unchanged
+  and nothing is re-embedded. See
+  [docs/CONFIGURATION.md](docs/CONFIGURATION.md#excluding-documents-from-embedding).
 - A gate for `llama-cpp-2` (llama.cpp) bumps, documented in
   [CONTRIBUTING.md](CONTRIBUTING.md#llamacpp-llama-cpp-2-bump-gate) and tracked in #151. The embed
   fingerprint does not name the inference engine, so a bump could change stored-vector values
@@ -37,6 +51,16 @@
   `rqmd eval` is unchanged, byte for byte. The format is documented in
   [docs/CLI.md](docs/CLI.md#evaluating-search-quality), and the metric functions are
   `rqmd_core::eval_metrics`.
+- `rqmd query --timings` (hidden from `--help`) prints, to stderr after the results, how long each
+  stage of the query took and how much work it did: the keyword probe, query embedding, every
+  vector-search pass (the `k` asked for, vectors fetched, how many were in scope, time in the
+  index and time in the per-hit SQLite lookups), expansion, fusion, candidate resolution, section
+  choice, reranking and result assembly. It is off by default; without it stdout, stderr, the exit
+  code and the results are unchanged, and with it stdout and the results are unchanged. Search
+  behaviour, SQL and the index format are untouched. `rqmd_core::Store::set_query_timings` and
+  `take_query_timings` expose the same figures as `QueryTimings`. The numbers behind
+  [#152](https://github.com/tylern91/rqmd/issues/152) are in
+  [docs/research/2026-10-28-scoped-vector-search-timings.md](docs/research/2026-10-28-scoped-vector-search-timings.md).
 
 ### Removed
 - The `eval` example of `rqmd-core` (`cargo run --example eval -p rqmd-core`), which read a

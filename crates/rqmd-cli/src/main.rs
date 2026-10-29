@@ -103,6 +103,9 @@ enum Commands {
         /// Turn the query cache off for this run, even when --cache or RQMD_QUERY_CACHE is set
         #[arg(long)]
         no_cache: bool,
+        /// Diagnostic: print per-stage durations and counts to stderr after the results.
+        #[arg(long, hide = true)]
+        timings: bool,
     },
     /// Full-text keyword search (BM25 only, no LLM)
     Search {
@@ -339,6 +342,24 @@ pub enum CollectionCommand {
     Include { name: String },
     /// Exclude collection from default (unscoped) queries
     Exclude { name: String },
+    /// Change a collection's settings after `collection add`: the embed-exclusion
+    /// rules. Excluded documents stay searchable by keyword and are never embedded
+    Set {
+        name: String,
+        /// Keep documents whose collection-relative path matches this glob out of
+        /// `rqmd embed` (repeatable; replaces the stored list; same syntax as --ignore)
+        #[arg(long = "embed-ignore", value_name = "PATTERN")]
+        embed_ignore: Vec<String>,
+        /// Remove every stored --embed-ignore pattern
+        #[arg(long, conflicts_with = "embed_ignore")]
+        clear_embed_ignore: bool,
+        /// Do not embed documents whose indexed text is larger than this many bytes
+        #[arg(long, value_name = "BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        embed_max_bytes: Option<u64>,
+        /// Remove the stored --embed-max-bytes cap
+        #[arg(long, conflicts_with = "embed_max_bytes")]
+        clear_embed_max_bytes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -443,6 +464,7 @@ fn run() -> Result<()> {
             timeout_strict,
             cache,
             no_cache,
+            timings,
         } => commands::query::run_query(
             &index_dir,
             &query,
@@ -459,6 +481,7 @@ fn run() -> Result<()> {
                 timeout_strict,
                 recency: scope.recency.map(rqmd_core::Recency::new),
                 cache: cache && !no_cache,
+                timings,
             },
         ),
         Commands::Search { query, scope } => commands::query::run_search(

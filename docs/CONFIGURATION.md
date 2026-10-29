@@ -102,7 +102,68 @@ make `collection/path` ambiguous in `rqmd get` and `rqmd://` URIs). Both
 `collection add --name` and `collection rename` reject such names. Running
 `collection add` again for a name that already exists updates its path, mask,
 ignore, hidden, gitignore and size settings from the new flags, and keeps the
-update hook (`collection update-cmd`) and the include/exclude setting.
+update hook (`collection update-cmd`), the include/exclude setting and the
+embed exclusions below.
+
+## Excluding documents from embedding
+
+A document can stay searchable by keyword (`rqmd search`, and the full-text
+side of `rqmd query`) while `rqmd embed` never encodes it. This suits large or
+low-value files such as generated sources, logs and exports. Both settings are
+per collection, off by default, and changed with `rqmd collection set` at any
+time after `collection add`:
+
+```sh
+# Leave generated files and logs out of the vector index
+rqmd collection set notes --embed-ignore 'generated/**' --embed-ignore '*.log'
+
+# Do not embed documents whose indexed text is over 64 KiB
+rqmd collection set notes --embed-max-bytes 65536
+
+# Remove the rules again
+rqmd collection set notes --clear-embed-ignore --clear-embed-max-bytes
+```
+
+- **`--embed-ignore PATTERN`** (repeatable) uses the same glob syntax as
+  `--ignore`, matched against the path relative to the collection root. The
+  patterns given replace the stored list. A malformed glob fails the command
+  and nothing is stored.
+- **`--embed-max-bytes BYTES`** is measured on the indexed text, which is what
+  the embedder reads: the file with its frontmatter block removed (plus any
+  `tags:`/`aliases:` terms). A file whose frontmatter makes it larger than the
+  cap, but whose indexed text is under it, is still embedded. This cap is
+  separate from `--max-file-bytes`, which leaves a file out of the index
+  entirely.
+- The settings are stored with the collection, so `collection show` lists them
+  (`Embed ignore:` and `Embed max:` lines, shown only when set), re-adding the
+  collection keeps them, and `collection rename` carries them over.
+- They are not part of the embed fingerprint. Adding, changing or clearing a
+  rule re-embeds nothing; it changes only which documents the next
+  `rqmd embed` considers. Clearing a rule makes its documents pending again.
+- Excluded documents do not count as pending. `rqmd status` and `rqmd doctor`
+  stop listing them, and `rqmd embed` says `All content hashes already have
+  embeddings` when only excluded documents lack vectors.
+- **Vectors that already exist** for a document that becomes excluded are kept
+  by a plain `rqmd embed` and dropped by `rqmd embed --cleanup`. Until then
+  vector search never returns the excluded document. `rqmd embed --rebuild`
+  clears vectors and does not re-create them for excluded documents.
+- **Shared content.** Vectors are stored once per distinct text and shared
+  across collections. When an excluded document has the same text as a
+  document that is embedded elsewhere, `rqmd vsearch` and the vector side of
+  `rqmd query` skip the excluded copy, scoped or unscoped, and return only the
+  document that may be embedded. `rqmd embed --cleanup` keeps such shared
+  vectors.
+
+When at least one collection has a rule or a cap, `rqmd status` adds a line
+under `Documents`, and `rqmd doctor` adds an `Embed exclusions:` line and, when
+there are any, the number of vectors kept for excluded documents:
+
+```text
+  Excluded: 12 from embedding (9 by rule, 3 over the size cap)
+```
+
+With no rule and no cap on any collection, the output of `status`, `doctor`,
+`embed` and `collection show` is the same as before these settings existed.
 
 ---
 

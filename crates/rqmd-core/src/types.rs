@@ -24,6 +24,16 @@ pub struct Collection {
     /// built-in default cap.
     #[serde(default)]
     pub max_file_bytes: Option<u64>,
+    /// Globs (same syntax as `ignore`, matched on the collection-relative
+    /// path) whose documents stay in the full-text index but are never
+    /// encoded by `rqmd embed`. Empty means no rule. Not part of the embed
+    /// fingerprint: changing it never re-embeds anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embed_ignore: Vec<String>,
+    /// Documents whose indexed text (what the embedder sees, not the raw file)
+    /// is longer than this many bytes are not embedded. `None` means no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +138,83 @@ pub enum QueryStage {
     Expanding,
     /// Reranking: `done` of `total` candidates are scored.
     Reranking { done: usize, total: usize },
+}
+
+/// One ANN pass of a vector search: the `k` asked of the HNSW index, the hits
+/// it returned, and what resolving those hits to documents cost. A scoped
+/// search that has not found enough in-scope documents runs another pass with
+/// a doubled `k`, so one query can record several.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnPass {
+    /// Which search the pass belongs to: `query` (the original text),
+    /// `sub-query` (a typed query document) or `expansion`.
+    pub phase: &'static str,
+    /// The `k` passed to `hnsw.search`.
+    pub k: usize,
+    /// Vectors the index returned, which is also the number of per-hit
+    /// SQLite lookups the pass made.
+    pub fetched: usize,
+    /// Hits whose document was in scope.
+    pub in_scope: usize,
+    /// Time inside `hnsw.search`.
+    pub ann: Duration,
+    /// Time resolving every hit to a document, summed over the lookups.
+    pub lookup: Duration,
+}
+
+/// Where one hybrid query spent its time, filled in only after
+/// `Store::set_query_timings(true)`. It is diagnostic data: collecting it does
+/// not change a query's results, and with it off the store only tests an
+/// `Option`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueryTimings {
+    /// Phase tag the next ANN passes are recorded under.
+    pub phase: &'static str,
+    /// The whole `hybrid_query_outcome_with` call.
+    pub total: Duration,
+    /// Keyword searches (the BM25 probe, `lex:` sub-queries, expansion `lex:`
+    /// lines) and their count.
+    pub bm25_calls: usize,
+    pub bm25: Duration,
+    /// Part of `bm25` spent resolving a collection scope to document ids.
+    pub bm25_scope: Duration,
+    /// Query/passage embedding calls and their time, which includes loading
+    /// the model on first use.
+    pub embed_calls: usize,
+    pub embed: Duration,
+    /// Time in the expansion model, and in the searches its lines ran.
+    pub expansion_generate: Duration,
+    pub expansion_search: Duration,
+    pub ann_passes: Vec<AnnPass>,
+    /// Reciprocal rank fusion over `fused_from` lists, giving `fused` candidates.
+    pub fuse: Duration,
+    pub fused_from: usize,
+    pub fused: usize,
+    /// Fetching the document and body of each top fused candidate.
+    pub resolve: Duration,
+    pub resolve_lookups: usize,
+    /// Choosing the sections to rerank.
+    pub chunk_select: Duration,
+    /// The reranker, over `rerank_chunks` sections; zero when it did not run.
+    pub rerank: Duration,
+    pub rerank_chunks: usize,
+    /// Blending scores and building the results.
+    pub assemble: Duration,
+}
+
+impl QueryTimings {
+    /// Per-hit lookups over all ANN passes.
+    pub fn lookups(&self) -> usize {
+        self.ann_passes.iter().map(|p| p.fetched).sum()
+    }
+    /// Time in `hnsw.search` over all ANN passes.
+    pub fn ann_time(&self) -> Duration {
+        self.ann_passes.iter().map(|p| p.ann).sum()
+    }
+    /// Time in per-hit lookups over all ANN passes.
+    pub fn lookup_time(&self) -> Duration {
+        self.ann_passes.iter().map(|p| p.lookup).sum()
+    }
 }
 
 /// Most sections of one file a search returns. Every extra section is one more

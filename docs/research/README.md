@@ -8,6 +8,7 @@ next person who hits the same question.
 
 | Date | Doc | Summary |
 |------|-----|---------|
+| 2026-10-28 | [scoped-vector-search-timings.md](2026-10-28-scoped-vector-search-timings.md) | Measured on a copy of a 57k-document index with `rqmd query --timings` (#152): per-hit SQLite lookups are 99% of a one-large-collection scoped query (a join plan that walks the collection per hit), ANN widening dominates a scope far from the query, and the draft of the follow-up issue. |
 | 2026-10-27 | [external-collection-paths.md](2026-10-27-external-collection-paths.md) | Threat model for a project-local `.rqmd/` index whose collections point outside the project, the options compared, and the decision: warn for one release, then skip by default behind `--allow-external-paths` (design #148). |
 | 2026-10-24 | [issue-triage-and-dependency-review.md](2026-10-24-issue-triage-and-dependency-review.md) | Triage of 85 externally reported search and indexing problems against rqmd, the dependency and advisory review (`cargo audit`, soak waivers, llama-cpp-2 skip) and the CI findings behind the 2026-10 CI changes. |
 | 2026-10-13 | [performance-adoption.md](2026-10-13-performance-adoption.md) | Performance and quality changes shipped in 0.24.0 to 0.27.0, ideas filed as issues, and a measured quality and speed comparison of EmbeddingGemma-2 with the current model (not adopted). |

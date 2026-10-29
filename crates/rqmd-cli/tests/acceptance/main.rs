@@ -4,6 +4,7 @@
 mod ast_languages;
 mod collection;
 mod daemon_idle_exit;
+mod embed_exclusion;
 mod embed_reuse;
 mod eval_judgements;
 mod exclusion_visibility;
@@ -19,6 +20,7 @@ mod multi_get;
 mod output_plain;
 mod per_file;
 mod query_timeout;
+mod query_timings;
 mod read_no_index;
 mod recency;
 mod security;

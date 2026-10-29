@@ -984,7 +984,7 @@ fn build_status(store: &Store) -> String {
 
     // Counted for the backend this server is configured with, so a client that
     // reads it knows the number can differ from a CLI run under another backend.
-    let pending: i64 = db::count_docs_needing_embed(
+    let pending: i64 = rqmd_core::embed_exclusion::pending_embed_count(
         &store.db,
         &core_store::expected_fingerprint(),
         &core_store::expected_ast_fingerprints(),
@@ -1483,6 +1483,8 @@ mod tests {
                     allow_hidden: false,
                     respect_gitignore: false,
                     max_file_bytes: None,
+                    embed_ignore: vec![],
+                    embed_max_bytes: None,
                 },
             )
             .unwrap();
