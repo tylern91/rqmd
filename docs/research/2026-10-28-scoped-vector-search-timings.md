@@ -177,7 +177,9 @@ count reaches 20 at once) and costs milliseconds, as the 2026-10-04 note found.
   `crates/rqmd-core/src/db.rs`.
 - Measuring reranker or expansion latency (they are reported here only as shares).
 
-## Draft follow-up issue (not filed)
+## Follow-up issue (filed as tylern91/rqmd#237)
+
+The text below is the draft as filed.
 
 **Title:** perf(query): one-collection scoped vector search walks the collection per hit
 
