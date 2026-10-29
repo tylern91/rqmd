@@ -17,11 +17,11 @@ use sha2::{Digest, Sha256};
 use crate::{
     chunking::{chunk_document_for_path, first_chunk},
     db::{
-        self, content_hash, doc_chunk_for_vid_in, doc_for_vid_meta, doc_for_vid_meta_in,
-        docid_from_hash, get_context_for_path, open_db, upsert_content, upsert_document,
-        upsert_vector_meta,
+        self, content_hash, doc_chunk_for_vid_in_excluding, docid_from_hash, get_context_for_path,
+        open_db, upsert_content, upsert_document, upsert_vector_meta,
     },
     deadline::Deadline,
+    embed_exclusion::EmbedExclusions,
     fts::FtsIndex,
     hnsw::VectorIndex,
     query::parse_query,
@@ -717,10 +717,24 @@ impl Store {
     pub fn reclaim_orphaned_vectors(&mut self) -> Result<usize> {
         let orphaned_hashes =
             crate::db::orphaned_vector_hashes(&self.db).context("list orphaned hashes")?;
-        if orphaned_hashes.is_empty() {
+        self.reclaim_vectors_of(&orphaned_hashes)
+    }
+
+    /// Evict and delete the vectors kept for documents in `excluded` only
+    /// (embed-excluded documents, #147), keeping any hash a non-excluded
+    /// document still uses. `rqmd embed --cleanup` calls this; a plain
+    /// `rqmd embed` keeps those vectors. Returns the rows deleted.
+    pub fn reclaim_excluded_vectors(&mut self, excluded: &HashSet<i64>) -> Result<usize> {
+        let hashes = crate::db::excluded_only_vector_hashes(&self.db, excluded)
+            .context("list excluded-only hashes")?;
+        self.reclaim_vectors_of(&hashes)
+    }
+
+    fn reclaim_vectors_of(&mut self, hashes: &[String]) -> Result<usize> {
+        if hashes.is_empty() {
             return Ok(0);
         }
-        for hash in &orphaned_hashes {
+        for hash in hashes {
             let vids = crate::db::vids_for_hash(&self.db, hash)?;
             self.evict_hnsw_vectors(&vids)?;
         }
@@ -729,7 +743,7 @@ impl Store {
         self.flush()?;
         let mut swept = 0usize;
         let tx = self.db.transaction()?;
-        for hash in &orphaned_hashes {
+        for hash in hashes {
             swept += crate::db::delete_vectors_for_hash(&tx, hash)?;
         }
         tx.commit().context("commit orphaned vector sweep")?;
@@ -987,6 +1001,8 @@ impl Store {
         // widening pass (rqmd#86).
         let mut by_doc: HashMap<String, (crate::types::Document, Vec<(f32, usize)>)> =
             HashMap::new();
+        // A vector never resolves to an embed-excluded document (#147).
+        let exclusions = EmbedExclusions::load(&self.db)?;
 
         loop {
             let raw = self.hnsw.search(&embedding, k)?;
@@ -996,7 +1012,12 @@ impl Store {
                 // hash shared across collections must resolve to the
                 // in-scope row here, not to an arbitrary one that then gets
                 // discarded by a post-hoc filter (qmd#933 parity, rqmd#86).
-                let Some((doc, pos)) = doc_chunk_for_vid_in(&self.db, vid, effective.as_deref())?
+                let Some((doc, pos)) = doc_chunk_for_vid_in_excluding(
+                    &self.db,
+                    vid,
+                    effective.as_deref(),
+                    &exclusions,
+                )?
                 else {
                     continue;
                 };
@@ -1109,11 +1130,14 @@ impl Store {
         // Same rationale as `search_vec_multi`: rank by identity only
         // (`doc_for_vid_meta`), fetch bodies once for the final survivors.
         let mut by_doc: HashMap<String, (f32, crate::types::Document)> = HashMap::new();
+        let exclusions = EmbedExclusions::load(&self.db)?;
         for vid in vids {
             let embedding = self.hnsw.get_vector(vid)?;
             let hits = self.hnsw.search(&embedding, k)?;
             for (hit_vid, sim) in hits {
-                let Some(doc) = doc_for_vid_meta(&self.db, hit_vid)? else {
+                let Some((doc, _)) =
+                    doc_chunk_for_vid_in_excluding(&self.db, hit_vid, None, &exclusions)?
+                else {
                     continue;
                 };
                 let filepath = format!("{}/{}", doc.collection, doc.path);
@@ -2044,12 +2068,13 @@ impl Store {
     ) -> Result<Vec<RankedResult>> {
         let total_vectors = self.hnsw.size();
         let mut k = fetch_size;
+        let exclusions = EmbedExclusions::load(&self.db)?;
         loop {
             let search = self.tick();
             let hits = self.hnsw.search(embedding, k)?;
             let ann = search.map(|start| start.elapsed());
             let fetched = hits.len();
-            let (results, lookup) = self.vec_hits_to_ranked(hits, collections)?;
+            let (results, lookup) = self.vec_hits_to_ranked(hits, collections, &exclusions)?;
             if let (Some(ann), Some(lookup), Some(timings)) = (ann, lookup, &self.timings) {
                 let mut timings = timings.borrow_mut();
                 let phase = timings.phase;
@@ -2076,6 +2101,7 @@ impl Store {
         &self,
         hits: Vec<(u64, f32)>,
         collections: Option<&[String]>,
+        exclusions: &EmbedExclusions,
     ) -> Result<(Vec<RankedResult>, Option<Duration>)> {
         let timed = self.timings.is_some();
         let mut lookup = Duration::ZERO;
@@ -2086,12 +2112,14 @@ impl Store {
             // applied after the fact — a hash shared across collections
             // must resolve to the in-scope row here, not to an arbitrary one
             // that then gets discarded (qmd#933 parity, rqmd#86).
+            // An embed-excluded document is never reached through a vector,
+            // even one shared with identical non-excluded content (#147).
             let start = timed.then(Instant::now);
-            let found = doc_for_vid_meta_in(&self.db, vid, collections)?;
+            let found = doc_chunk_for_vid_in_excluding(&self.db, vid, collections, exclusions)?;
             if let Some(start) = start {
                 lookup += start.elapsed();
             }
-            if let Some(doc) = found {
+            if let Some((doc, _)) = found {
                 results.push(RankedResult {
                     filepath: format!("{}/{}", doc.collection, doc.path),
                     title: doc.title,
@@ -4970,5 +4998,93 @@ mod tests {
 
         assert_eq!(observed.rerank, RerankStatus::DeadlineExpired);
         assert_eq!(files_and_scores(&observed), files_and_scores(&fusion));
+    }
+
+    /// #147, AC-6: two collections hold identical text, so they share one
+    /// content hash and its vectors. Once `a` excludes its copy from
+    /// embedding, no vector route (scoped or unscoped `vsearch`, the vector
+    /// side of a hybrid `query`, `similar`) returns `a`'s copy; with no rule
+    /// the same lookups do return it.
+    #[test]
+    fn excluded_document_is_never_returned_through_a_shared_vector() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = open_stub_store(
+            dir.path(),
+            StubBackend {
+                name: "stub-org/stub-embed.gguf".to_string(),
+                caps: rqmd_llm::BackendCapabilities {
+                    embed: true,
+                    rerank: false,
+                    generate: false,
+                },
+            },
+        );
+        let same = "The lighthouse keeper watched ships cross the harbor.";
+        store
+            .index_document("a", "gen/same.md", "Same", same)
+            .unwrap();
+        store.index_document("b", "same.md", "Same", same).unwrap();
+        store
+            .index_document("a", "other.md", "Other", "bread and flour")
+            .unwrap();
+        store.flush().unwrap();
+        let set_rules = |store: &Store, ignore: Vec<String>| {
+            for name in ["a", "b"] {
+                db::upsert_collection(
+                    &store.db,
+                    &crate::types::Collection {
+                        name: name.into(),
+                        path: format!("/{name}"),
+                        pattern: "**/*.md".into(),
+                        ignore: vec![],
+                        include_by_default: true,
+                        update_command: None,
+                        allow_hidden: false,
+                        respect_gitignore: false,
+                        max_file_bytes: None,
+                        embed_ignore: if name == "a" { ignore.clone() } else { vec![] },
+                        embed_max_bytes: None,
+                    },
+                )
+                .unwrap();
+            }
+        };
+        let files = |r: Vec<SearchResult>| r.into_iter().map(|r| r.file).collect::<Vec<_>>();
+        let scope_a = vec!["a".to_string()];
+        let excluded = "rqmd://a/gen/same.md".to_string();
+
+        // No rule: the shared vector resolves to a's copy (the premise).
+        set_rules(&store, vec![]);
+        let vs = files(store.search_vec_multi("zzq", 10, Some(&scope_a)).unwrap());
+        assert!(vs.contains(&excluded), "premise, vsearch: {vs:?}");
+        let hq = files(
+            store
+                .hybrid_query_multi("zzq", None, 10, Some(&scope_a), true, true)
+                .unwrap(),
+        );
+        assert!(hq.contains(&excluded), "premise, query: {hq:?}");
+
+        set_rules(&store, vec!["gen/**".to_string()]);
+        let vs = files(store.search_vec_multi("zzq", 10, Some(&scope_a)).unwrap());
+        assert!(!vs.contains(&excluded), "scoped vsearch: {vs:?}");
+        assert!(vs.contains(&"rqmd://a/other.md".to_string()), "{vs:?}");
+        let vs = files(store.search_vec_multi("zzq", 10, None).unwrap());
+        assert!(!vs.contains(&excluded), "unscoped vsearch: {vs:?}");
+        assert!(vs.contains(&"rqmd://b/same.md".to_string()), "{vs:?}");
+        for scope in [Some(scope_a.as_slice()), None] {
+            let hq = files(
+                store
+                    .hybrid_query_multi("zzq", None, 10, scope, true, true)
+                    .unwrap(),
+            );
+            assert!(!hq.contains(&excluded), "query {scope:?}: {hq:?}");
+        }
+        let sim = files(
+            store
+                .similar_to_hash(&content_hash("bread and flour"), "a", "other.md", 10)
+                .unwrap(),
+        );
+        assert!(!sim.contains(&excluded), "similar: {sim:?}");
+        assert!(sim.contains(&"rqmd://b/same.md".to_string()), "{sim:?}");
     }
 }

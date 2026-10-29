@@ -4,6 +4,7 @@
 mod ast_languages;
 mod collection;
 mod daemon_idle_exit;
+mod embed_exclusion;
 mod embed_reuse;
 mod eval_judgements;
 mod exclusion_visibility;

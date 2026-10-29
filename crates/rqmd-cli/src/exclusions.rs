@@ -18,17 +18,9 @@ const BUILTIN_EXCLUDED_DIRS: &[&str] = &[
 /// bad one keeps updating; `collection add` rejects them up front
 /// ([`validate_ignore_patterns`]) and `update` warns ([`invalid_ignore_patterns`]).
 /// This leniency must NOT be reused for *include* patterns; see [`build_include_set`].
-pub fn build_ignore_set(patterns: &[String]) -> GlobSet {
-    let mut builder = GlobSetBuilder::new();
-    for pat in patterns {
-        if let Ok(g) = Glob::new(pat) {
-            builder.add(g);
-        }
-    }
-    builder
-        .build()
-        .unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap())
-}
+/// Lives in `rqmd-core` so the embed-exclusion rules (`collection set
+/// --embed-ignore`) match paths with exactly the same syntax.
+pub use rqmd_core::embed_exclusion::build_ignore_set;
 
 /// Every pattern in `patterns` that is not a valid glob, with the parser's reason.
 pub fn invalid_ignore_patterns(patterns: &[String]) -> Vec<(String, String)> {

@@ -34,6 +34,30 @@ pub fn run(index_dir: &Path, cmd: CollectionCommand) -> Result<()> {
         CollectionCommand::UpdateCmd { name, cmd } => update_cmd(index_dir, &name, cmd.as_deref()),
         CollectionCommand::Include { name } => set_include(index_dir, &name, true),
         CollectionCommand::Exclude { name } => set_include(index_dir, &name, false),
+        CollectionCommand::Set {
+            name,
+            embed_ignore,
+            clear_embed_ignore,
+            embed_max_bytes,
+            clear_embed_max_bytes,
+        } => set(
+            index_dir,
+            &name,
+            EmbedRuleChange {
+                ignore: if clear_embed_ignore {
+                    Some(Vec::new())
+                } else if embed_ignore.is_empty() {
+                    None
+                } else {
+                    Some(embed_ignore)
+                },
+                max_bytes: if clear_embed_max_bytes {
+                    Some(None)
+                } else {
+                    embed_max_bytes.map(Some)
+                },
+            },
+        ),
     }
 }
 
@@ -99,8 +123,9 @@ fn add(
     );
 
     let mut s = store::open_store_no_backend(index_dir, false)?;
-    // Re-adding a name keeps what `add` has no flag for: the update hook and the
-    // include-by-default setting. Walk settings come from this invocation.
+    // Re-adding a name keeps what `add` has no flag for: the update hook, the
+    // include-by-default setting and the embed-exclusion rules (`collection
+    // set`). Walk settings come from this invocation.
     let existing = db::list_collections(&s.db)?
         .into_iter()
         .find(|c| c.name == collection_name);
@@ -122,10 +147,15 @@ fn add(
         pattern: pattern.clone(),
         ignore,
         include_by_default: existing.as_ref().is_none_or(|c| c.include_by_default),
-        update_command: existing.and_then(|c| c.update_command),
+        update_command: existing.as_ref().and_then(|c| c.update_command.clone()),
         allow_hidden: hidden,
         respect_gitignore,
         max_file_bytes,
+        embed_ignore: existing
+            .as_ref()
+            .map(|c| c.embed_ignore.clone())
+            .unwrap_or_default(),
+        embed_max_bytes: existing.as_ref().and_then(|c| c.embed_max_bytes),
     };
     db::upsert_collection(&s.db, &col)?;
 
@@ -358,9 +388,63 @@ fn show(index_dir: &Path, name: &str) -> Result<()> {
         col.max_file_bytes
             .unwrap_or(document::DEFAULT_MAX_FILE_BYTES)
     );
+    // Shown only when set, so a collection without embed rules prints exactly
+    // what it printed before they existed.
+    if !col.embed_ignore.is_empty() {
+        println!("  Embed ignore: {}", col.embed_ignore.join(", "));
+    }
+    if let Some(cap) = col.embed_max_bytes {
+        println!("  Embed max:    {cap} bytes (indexed text)");
+    }
     if let Some(ref cmd) = col.update_command {
         println!("  Hook:     {cmd}");
     }
+    Ok(())
+}
+
+/// What `collection set` changes. `None` leaves a setting as stored.
+struct EmbedRuleChange {
+    ignore: Option<Vec<String>>,
+    max_bytes: Option<Option<u64>>,
+}
+
+/// `collection set`: change the embed-exclusion rules of an existing
+/// collection. Takes effect at the next `rqmd embed`; nothing is re-embedded
+/// and no vector is deleted here (`rqmd embed --cleanup` drops the vectors
+/// of documents that became excluded).
+fn set(index_dir: &Path, name: &str, change: EmbedRuleChange) -> Result<()> {
+    if change.ignore.is_none() && change.max_bytes.is_none() {
+        bail!(
+            "nothing to set: pass --embed-ignore, --clear-embed-ignore, --embed-max-bytes or --clear-embed-max-bytes"
+        );
+    }
+    if let Some(ref patterns) = change.ignore {
+        exclusions::validate_ignore_patterns(patterns)
+            .with_context(|| format!("collection '{name}'"))?;
+    }
+    if !store::index_exists(index_dir) {
+        bail!("collection '{name}' not found");
+    }
+    let s = store::open_store_no_backend(index_dir, true)?;
+    let col = db::list_collections(&s.db)?
+        .into_iter()
+        .find(|c| c.name == name)
+        .with_context(|| format!("collection '{name}' not found"))?;
+    let ignore = change.ignore.unwrap_or(col.embed_ignore);
+    let max_bytes = change.max_bytes.unwrap_or(col.embed_max_bytes);
+    db::set_collection_embed_rules(&s.db, name, &ignore, max_bytes)?;
+
+    let ignore_text = if ignore.is_empty() {
+        "(none)".to_string()
+    } else {
+        ignore.join(", ")
+    };
+    let cap_text = max_bytes.map_or("(none)".to_string(), |n| format!("{n} bytes"));
+    println!("Collection '{name}': embed ignore {ignore_text}; embed max {cap_text}.");
+    println!(
+        "Applies from the next `rqmd embed`. Vectors already stored for newly excluded \
+         documents are kept until `rqmd embed --cleanup`."
+    );
     Ok(())
 }
 
@@ -418,6 +502,8 @@ mod tests {
                 allow_hidden: false,
                 respect_gitignore: false,
                 max_file_bytes: None,
+                embed_ignore: vec![],
+                embed_max_bytes: None,
             },
         )
         .unwrap();

@@ -24,6 +24,16 @@ pub struct Collection {
     /// built-in default cap.
     #[serde(default)]
     pub max_file_bytes: Option<u64>,
+    /// Globs (same syntax as `ignore`, matched on the collection-relative
+    /// path) whose documents stay in the full-text index but are never
+    /// encoded by `rqmd embed`. Empty means no rule. Not part of the embed
+    /// fingerprint: changing it never re-embeds anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embed_ignore: Vec<String>,
+    /// Documents whose indexed text (what the embedder sees, not the raw file)
+    /// is longer than this many bytes are not embedded. `None` means no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
