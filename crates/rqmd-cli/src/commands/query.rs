@@ -57,6 +57,8 @@ pub struct QueryOptions<'a> {
     pub timeout_strict: bool,
     /// Weight scores by file age.
     pub recency: Option<Recency>,
+    /// Use the opt-in query cache (`--cache` / `RQMD_QUERY_CACHE`).
+    pub cache: bool,
     /// After the results, print per-stage durations and counts to stderr.
     pub timings: bool,
 }
@@ -242,6 +244,11 @@ pub fn run_query(index_dir: &Path, query: &str, opts: QueryOptions) -> Result<()
         if let Some(recency) = &opts.recency {
             eprintln!("rqmd: {}", recency.notice());
         }
+        if opts.cache
+            && let Some(line) = enable_query_cache(s, index_dir)
+        {
+            eprintln!("{line}");
+        }
         s.set_query_timings(opts.timings);
         let progress = Progress::new(ProgressMode::detect());
         let outcome = query_with_progress(s, query, &opts, progress)?;
@@ -256,6 +263,23 @@ pub fn run_query(index_dir: &Path, query: &str, opts: QueryOptions) -> Result<()
         eprint!("{}", render_timings(&timings));
     }
     Ok(())
+}
+
+/// Turn on the query cache in `index_dir`. A cache file that cannot be created
+/// or read never fails the query: the returned line, for stderr, says so and
+/// the query runs without it. A cache another process is writing to is skipped
+/// without a line: the lock passes on its own.
+fn enable_query_cache(s: &mut Store, index_dir: &Path) -> Option<String> {
+    let err = s
+        .enable_model_cache(&rqmd_core::model_cache::path_in(index_dir))
+        .err()?;
+    if rqmd_core::model_cache::is_busy(&err) {
+        return None;
+    }
+    Some(format!(
+        "rqmd: warning: query cache unavailable, results are computed instead ({err:#}); \
+         `rqmd embed --clear-cache` deletes it"
+    ))
 }
 
 /// Say on stderr that results are weighted by file age, as `query` does.
@@ -436,6 +460,7 @@ mod tests {
             timeout: None,
             timeout_strict: false,
             recency: None,
+            cache: false,
             timings: false,
         }
     }
@@ -627,5 +652,73 @@ mod tests {
             shown.starts_with("Loading model / embedding query\n"),
             "{shown:?}"
         );
+    }
+
+    /// The cache file in the stub store's index directory.
+    fn cache_file(dir: &Path) -> std::path::PathBuf {
+        rqmd_core::model_cache::path_in(dir)
+    }
+
+    /// AC-1 at the command level: with the cache off (the default) a query
+    /// creates no cache file and reranks every time; with it on, the second
+    /// identical query does not call the reranker and ranks identically.
+    #[test]
+    fn ac_1_the_cache_is_off_by_default_and_on_reuses_rerank_scores() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut s, calls, _) = nine_doc_store(dir.path());
+
+        let off = run(&mut s, ProgressMode::Off).0.unwrap();
+        run(&mut s, ProgressMode::Off).0.unwrap();
+        assert!(
+            !cache_file(dir.path()).exists(),
+            "default off creates no file"
+        );
+        assert_eq!(*calls.lock().unwrap(), [9, 9]);
+
+        assert_eq!(enable_query_cache(&mut s, dir.path()), None);
+        let first = run(&mut s, ProgressMode::Off).0.unwrap();
+        let second = run(&mut s, ProgressMode::Off).0.unwrap();
+        assert_eq!(*calls.lock().unwrap(), [9, 9, 9], "the second is cached");
+        assert_eq!(ranked(&first), ranked(&off));
+        assert_eq!(ranked(&second), ranked(&off));
+    }
+
+    /// The file the command creates is readable by its owner only.
+    #[cfg(unix)]
+    #[test]
+    fn ac_6_the_cache_file_the_command_creates_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut s, ..) = nine_doc_store(dir.path());
+        assert_eq!(enable_query_cache(&mut s, dir.path()), None);
+        let mode = std::fs::metadata(cache_file(dir.path()))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// A corrupt cache file gives one warning line and the query still returns
+    /// the uncached ranking; the file is left as it was.
+    #[test]
+    fn ac_7_a_corrupt_cache_gives_one_warning_and_the_query_still_runs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut s, calls, _) = nine_doc_store(dir.path());
+        let expected = run(&mut s, ProgressMode::Off).0.unwrap();
+        let garbage = b"not a sqlite database ".repeat(200);
+        std::fs::write(cache_file(dir.path()), &garbage).unwrap();
+
+        let line = enable_query_cache(&mut s, dir.path()).expect("a warning");
+        let got = run(&mut s, ProgressMode::Off).0.unwrap();
+
+        assert!(
+            line.starts_with("rqmd: warning: query cache unavailable"),
+            "{line}"
+        );
+        assert!(!line.contains('\n') && !line.contains('\x1b'), "{line:?}");
+        assert!(!s.model_cache_enabled());
+        assert_eq!(ranked(&got), ranked(&expected));
+        assert_eq!(*calls.lock().unwrap(), [9, 9]);
+        assert_eq!(std::fs::read(cache_file(dir.path())).unwrap(), garbage);
     }
 }

@@ -80,6 +80,9 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
     if let Some(ref ts) = last_modified {
         println!("  Updated:  {}", fmt::format_time_ago(ts));
     }
+    if let Some(line) = query_cache_status_line(index_dir) {
+        println!("{line}");
+    }
     store::warn_if_raw_backfill_pending(&s);
 
     // ── AST Chunking (qmd.ts:539-563) ─────────────────────────────────────────────
@@ -803,6 +806,44 @@ fn embed_collections(
         p.bold(&elapsed)
     );
     finish_embed(&run, &end)
+}
+
+/// The `rqmd status` line for the opt-in query cache, or `None` when no cache
+/// file exists, so the status of an index that never used it is unchanged.
+fn query_cache_status_line(index_dir: &Path) -> Option<String> {
+    let path = rqmd_core::model_cache::path_in(index_dir);
+    let detail = match rqmd_core::model_cache::row_count_at(&path) {
+        Ok(None) => return None,
+        Ok(Some(rows)) => format!(
+            "{rows} of {} row(s) (rqmd query --cache)",
+            rqmd_core::model_cache::MAX_ROWS
+        ),
+        Err(_) => "unreadable (run 'rqmd embed --clear-cache')".to_string(),
+    };
+    Some(format!("  Cache:    {detail}"))
+}
+
+/// `rqmd embed --clear-cache`: delete the query cache file. Loads no model and
+/// does not touch the index, so it takes no index lock.
+pub fn run_clear_cache(index_dir: &Path) -> Result<()> {
+    let path = rqmd_core::model_cache::path_in(index_dir);
+    let p = fmt::Paint::stdout();
+    match rqmd_core::model_cache::clear_at(&path)? {
+        rqmd_core::model_cache::Cleared::Nothing => println!("No query cache to clear."),
+        rqmd_core::model_cache::Cleared::Removed(Some(rows)) => {
+            println!(
+                "{} Removed {rows} row(s).",
+                p.green("✓ Query cache cleared.")
+            )
+        }
+        rqmd_core::model_cache::Cleared::Removed(None) => {
+            println!(
+                "{} The file was unreadable.",
+                p.green("✓ Query cache cleared.")
+            )
+        }
+    }
+    Ok(())
 }
 
 /// `rqmd embed --cleanup`: reclaim space without loading a model or touching

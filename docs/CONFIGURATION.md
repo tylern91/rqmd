@@ -184,6 +184,7 @@ With no rule and no cap on any collection, the output of `status`, `doctor`,
 | `RQMD_MODEL_IDLE_TTL` | seconds | `300` | MCP daemon: unload an idle model after this many seconds of no use; `0` disables eviction |
 | `RQMD_MCP_IDLE_EXIT_SECS` | seconds | *(unset)* | MCP HTTP server and daemon: exit after this many seconds with no request. Unset means the server runs until it is stopped. The value must be a positive whole number; `0` or anything else is an error and the server does not start. Only requests to `/mcp` count; open event streams and health checks (`/health`, `rqmd mcp status`) do not. A request that is still being answered keeps the server up. See [Idle exit](MCP.md#idle-exit) |
 | `RQMD_NO_EXPAND` | `1` | *(unset)* | Equivalent to always passing `--no-expand` to `rqmd query` |
+| `RQMD_QUERY_CACHE` | `1`, `true`, `yes`, `on` (or `0`, `false`, `no`, `off`) | *(unset)* | Equivalent to always passing `--cache` to `rqmd query`: reuse expansion output and rerank scores from `model_cache.sqlite` in the index directory. `--no-cache` overrides it for one run. The file keeps query-derived text and scores on disk; see [Query cache](CLI.md#query-cache) |
 | `RQMD_VERBOSE` | `1` | *(unset)* | Verbose ORT backend logging |
 | `NO_COLOR` | any value | *(unset)* | Turn off ANSI colour on a terminal. See [Colour and progress output](CLI.md#colour-and-progress-output) |
 | `TERM` | `dumb` | *(from the terminal)* | `dumb` turns off colour and prints progress as plain newline-terminated lines instead of redrawing one |
@@ -199,6 +200,7 @@ Paths below use the Linux default; on macOS the base is `~/Library/Caches/` inst
 | Index + collections (SQLite) | `~/.cache/rqmd/index.sqlite` |
 | BM25 index (Tantivy) | `~/.cache/rqmd/tantivy/` |
 | Vector index (usearch) | `~/.cache/rqmd/hnsw.usearch` |
+| Query cache (opt-in, `rqmd query --cache`) | `~/.cache/rqmd/model_cache.sqlite` |
 | Model cache (HuggingFace) | `~/.cache/huggingface/hub/` |
 | Project-local index | `.rqmd/` (created by `rqmd init`) |
 

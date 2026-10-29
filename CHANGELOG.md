@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### Added
+- `rqmd query --cache` (or `RQMD_QUERY_CACHE=1`) reuses query-expansion output and rerank scores
+  from earlier queries, so a repeated query calls neither the generation model nor the reranker
+  and returns the same results. Off by default: without it `query` creates no file and its output
+  is unchanged. The cache is a separate `model_cache.sqlite` beside the index (mode `0600` on
+  Unix); `index.sqlite`, the embed fingerprint, chunking and the index format are untouched, and
+  no re-embed is needed. Keys cover the query, intent, chunk text, model name with its weights
+  file's size and modification time, and prompt version, so an edited note or a replaced model
+  misses. Only real model output is stored, never a failed, skipped or timed-out rerank or
+  expansion. It holds at most 10,000 rows, evicting the least recently used;
+  `rqmd embed --clear-cache` deletes it, `rqmd status` shows its row count when it exists, and
+  `--no-cache` turns it off for one run. The file keeps query-derived text and scores on disk. See
+  [docs/CLI.md](docs/CLI.md#query-cache).
 - `rqmd collection set <name>` keeps documents out of `rqmd embed` while they stay searchable by
   keyword (#147). `--embed-ignore PATTERN` (repeatable, the `--ignore` glob syntax, matched on the
   collection-relative path) and `--embed-max-bytes BYTES` (measured on the indexed text, not the

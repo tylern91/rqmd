@@ -14,6 +14,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rqmd_llm::{BackendKind, InferenceBackend};
 use sha2::{Digest, Sha256};
 
+mod query_cache;
+
 use crate::{
     chunking::{chunk_document_for_path, first_chunk},
     db::{
@@ -148,6 +150,8 @@ pub struct Store {
     hnsw_dirty: bool,
     /// Told which stage a hybrid query has reached; see [`Store::set_query_observer`].
     query_observer: Option<Box<dyn FnMut(QueryStage) + Send>>,
+    /// The opt-in query cache; `None` unless [`Store::enable_model_cache`] was called.
+    model_cache: Option<crate::model_cache::ModelCache>,
     /// Per-stage timings of hybrid queries; `None` (the default) means nothing
     /// is measured. See [`Store::set_query_timings`].
     timings: Option<RefCell<QueryTimings>>,
@@ -296,6 +300,7 @@ impl Store {
             hnsw_dirty: false,
             staged_vectors: HashMap::new(),
             query_observer: None,
+            model_cache: None,
             timings: None,
         })
     }
@@ -1601,7 +1606,7 @@ impl Store {
                     self.emit_stage(QueryStage::Expanding);
                     let prompt = build_expansion_prompt(expand_text, effective_intent);
                     let generate = self.tick();
-                    let generated = self.backend.generate(&prompt);
+                    let generated = self.generate_expansion(&prompt);
                     self.tock(generate, |t, d| t.expansion_generate = d);
                     match generated {
                         Ok(expansion) => {
@@ -1732,7 +1737,7 @@ impl Store {
             (None, RerankStatus::Unsupported)
         } else {
             // Use the intent-prepended rerank query for better cross-encoder scoring.
-            match self.rerank_candidates(rerank_query, &chunk_refs, soft_deadline) {
+            match self.rerank_candidates_cached(rerank_query, &chunk_refs, soft_deadline) {
                 Ok(Some(scores))
                     if scores.len() == chunk_refs.len() && scores.iter().any(|s| s.is_finite()) =>
                 {
@@ -1754,6 +1759,9 @@ impl Store {
                 }
             }
         };
+        if let Some(scores) = &rerank_scores {
+            self.remember_rerank_scores(rerank_query, &chunk_refs, scores);
+        }
 
         if !matches!(status, RerankStatus::NotRun | RerankStatus::Unsupported) {
             self.tock(rerank, |t, d| {

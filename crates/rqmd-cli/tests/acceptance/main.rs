@@ -15,6 +15,7 @@ mod hook_signals;
 mod index_rebuild;
 mod mcp_refresh;
 mod mcp_stop_force;
+mod model_cache;
 mod multi_get;
 mod output_plain;
 mod per_file;
