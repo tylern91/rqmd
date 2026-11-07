@@ -62,6 +62,15 @@
   [#152](https://github.com/tylern91/rqmd/issues/152) are in
   [docs/research/2026-10-28-scoped-vector-search-timings.md](docs/research/2026-10-28-scoped-vector-search-timings.md).
 
+### Changed
+- Perf: a vector search scoped to one or more collections no longer walks the collection for every
+  nearest-neighbour hit ([#237](https://github.com/tylern91/rqmd/issues/237)). The per-hit lookup
+  that maps a vector to its document now probes `idx_documents_hash` whatever the scope, where
+  SQLite had searched the `(collection, path)` index once a collection filter was present (516 us
+  against 5.4 us per lookup in the measurements). Results, their order and scores are unchanged, including which
+  collection a hash shared across collections resolves to; the index, the embed fingerprint and
+  chunking are untouched and no re-embed is needed.
+
 ### Removed
 - The `eval` example of `rqmd-core` (`cargo run --example eval -p rqmd-core`), which read a
   `test/eval-docs` directory that is not in the repository and could not run.
