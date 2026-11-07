@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- A measurement for #126, whether merging a very short chunk into its neighbour is worth doing:
+  an `#[ignore]` test in `crates/rqmd-core/tests/chunk_merge_measurement.rs` that a maintainer
+  runs by hand with `RQMD_MEASURE_INDEX` set to an `index.sqlite`. It opens the index read-only,
+  runs the real splitter on every distinct active document and reports, overall and per
+  collection, how many chunks fall below 200, 400 and 800 characters, how many documents and
+  chunks a merge would change, and the size of the merged chunks against the chunk size and an
+  estimated token limit. CI runs only its model-free merge-simulation tests. No runtime
+  behaviour, fingerprint, chunking or index format changes, and no re-embed is needed.
 - `rqmd query --cache` (or `RQMD_QUERY_CACHE=1`) reuses query-expansion output and rerank scores
   from earlier queries, so a repeated query calls neither the generation model nor the reranker
   and returns the same results. Off by default: without it `query` creates no file and its output
