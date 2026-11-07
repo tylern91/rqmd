@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -18,7 +18,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use rqmd_core::{Collection, IndexLock, db};
 
-use super::index::{UpdateRun, update_one_collection};
+use super::index::{ExternalWarnings, UpdateRun, update_one_collection};
 use crate::exit::Interrupted;
 use crate::hook::HookConfig;
 use crate::{document, exclusions, format as fmt, signals, store};
@@ -40,7 +40,12 @@ enum Deferral {
     RebuildPending,
 }
 
-pub fn run_watch(index_dir: &Path, collection: Option<&str>, interval: Duration) -> Result<()> {
+pub fn run_watch(
+    index_dir: &Path,
+    collection: Option<&str>,
+    interval: Duration,
+    project_root: Option<PathBuf>,
+) -> Result<()> {
     let cols = {
         let s = store::open_store_no_backend(index_dir, true)?;
         select(db::list_collections(&s.db)?, collection)?
@@ -66,6 +71,7 @@ pub fn run_watch(index_dir: &Path, collection: Option<&str>, interval: Duration)
         seen: HashMap::new(),
         deferred: None,
         deferrals: 0,
+        external: ExternalWarnings::new(project_root),
     };
     loop {
         let wait = if watcher.tick()? {
@@ -86,6 +92,8 @@ struct Watcher<'a> {
     deferred: Option<Deferral>,
     /// Consecutive deferred passes, for the backoff.
     deferrals: u32,
+    /// Which collections outside the project have been warned about.
+    external: ExternalWarnings,
 }
 
 impl Watcher<'_> {
@@ -151,10 +159,12 @@ impl Watcher<'_> {
                     hooks_allowed: false,
                     full: false,
                     hook_config: HookConfig::from_env(),
+                    project_root: self.external.root_for(&col),
                 },
                 &|| lock.heartbeat(),
                 &signals::pending,
             )?;
+            self.external.note(&col);
             if let Some(report) = &outcome.report {
                 println!("{report}");
             }

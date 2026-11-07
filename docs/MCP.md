@@ -292,6 +292,10 @@ added, edited files replaced and deleted files removed. It differs in what it le
   behind are reached by no query and are swept by the next `rqmd update` or `rqmd watch` pass.
 - **Hooks never run.** A collection's `update_command` is not run by a refresh, whatever the
   index's origin: a search tool is not what the hook was set up for.
+- **Outside the project.** On a project-local `.rqmd/` index, a collection whose directory
+  resolves outside the project directory is named once on stderr (never stdout), the first time a
+  refresh walks it, and still indexed; see
+  [Collections outside the project](../SECURITY.md#collections-outside-the-project).
 - **Bounded.** The pass stops between files once `RQMD_MCP_TOOL_TIMEOUT_SECS` (default 120) has
   passed since it began, keeps what it indexed and prunes nothing. A `query` then has its full
   timeout for itself. The directory walk of one collection is not interrupted.

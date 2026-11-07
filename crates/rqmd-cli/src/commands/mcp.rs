@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use rqmd_mcp::RqmdServer;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::refresh;
@@ -15,6 +15,7 @@ pub fn run_mcp(
     is_daemon: bool,
     allow_non_loopback: bool,
     refresh_allowed: bool,
+    project_root: Option<PathBuf>,
 ) -> Result<()> {
     if http && !daemon::is_loopback(host) && !allow_non_loopback {
         bail!(
@@ -40,7 +41,7 @@ pub fn run_mcp(
 
     if !http {
         eprintln!("Initialising RQMD MCP server...");
-        let server = build_server(index_dir, refresh_allowed)?;
+        let server = build_server(index_dir, refresh_allowed, project_root)?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -50,7 +51,7 @@ pub fn run_mcp(
     daemon::check_port_free(host, port).context("cannot start MCP server")?;
 
     eprintln!("Initialising RQMD MCP server...");
-    let server = build_server(index_dir, refresh_allowed)?;
+    let server = build_server(index_dir, refresh_allowed, project_root)?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -67,7 +68,11 @@ pub fn run_mcp(
 
 /// The server, with a refresher only when `refresh_allowed`; without one a
 /// `refresh: true` call is answered with a note and the index is not touched.
-fn build_server(index_dir: &Path, refresh_allowed: bool) -> Result<RqmdServer> {
+fn build_server(
+    index_dir: &Path,
+    refresh_allowed: bool,
+    project_root: Option<PathBuf>,
+) -> Result<RqmdServer> {
     if !store::index_exists(index_dir) {
         // The server still starts and creates nothing; each tool gives the
         // same answer until an index exists.
@@ -79,7 +84,7 @@ fn build_server(index_dir: &Path, refresh_allowed: bool) -> Result<RqmdServer> {
     let server =
         RqmdServer::new(index_dir.to_path_buf()).context("failed to create RQMD server")?;
     if refresh_allowed {
-        return Ok(server.with_refresher(refresh::refresher()));
+        return Ok(server.with_refresher(refresh::refresher(project_root)));
     }
     eprintln!(
         "refresh is off for this index; pass --allow-refresh to enable it for a project-local index"

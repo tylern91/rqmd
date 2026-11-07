@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
@@ -906,6 +906,7 @@ pub fn run_update(
     collection: Option<&str>,
     hooks_allowed: bool,
     full: bool,
+    project_root: Option<&Path>,
 ) -> Result<()> {
     run_update_with(
         index_dir,
@@ -913,6 +914,7 @@ pub fn run_update(
         hooks_allowed,
         full,
         HookConfig::from_env(),
+        project_root,
     )
 }
 
@@ -924,6 +926,7 @@ fn run_update_with(
     hooks_allowed: bool,
     full: bool,
     hook_config: HookConfig,
+    project_root: Option<&Path>,
 ) -> Result<()> {
     // Shares IndexLock with run_embed: an `update` mutating `documents` rows
     // mid-way through a concurrent `embed`'s snapshot is a separate hazard
@@ -996,6 +999,7 @@ fn run_update_with(
                 hooks_allowed,
                 full,
                 hook_config,
+                project_root,
             },
             &|| lock.heartbeat(),
             &signals::pending,
@@ -1107,11 +1111,57 @@ pub(super) struct CollectionOutcome {
 /// caller opted in — see `store::hooks_allowed`.
 /// Per-invocation settings shared by every collection in one `rqmd update`.
 #[derive(Clone, Copy)]
-pub(super) struct UpdateRun {
+pub(super) struct UpdateRun<'a> {
     pub(super) progress_mode: fmt::ProgressMode,
     pub(super) hooks_allowed: bool,
     pub(super) full: bool,
     pub(super) hook_config: HookConfig,
+    /// The project directory of a project-local index (`store::project_root`),
+    /// or `None` for any other index, or to skip the outside-the-project check.
+    pub(super) project_root: Option<&'a Path>,
+}
+
+/// Whether `col`'s directory exists and resolves outside `root`. A relative
+/// stored path is read against `root` first, and a symlinked root is judged by
+/// its target. A path that cannot be resolved is not outside: the caller's
+/// `directory not found` warning covers it.
+pub(super) fn is_outside_project(col: &Collection, root: &Path) -> bool {
+    root.join(&col.path)
+        .canonicalize()
+        .is_ok_and(|dir| !dir.starts_with(root))
+}
+
+/// The outside-the-project warning for a command that passes over the same
+/// collections again and again (`watch`, the MCP refresh): each collection is
+/// named once, the first time its pass finds it outside.
+pub(super) struct ExternalWarnings {
+    root: Option<PathBuf>,
+    warned: HashSet<String>,
+}
+
+impl ExternalWarnings {
+    pub(super) fn new(root: Option<PathBuf>) -> Self {
+        Self {
+            root,
+            warned: HashSet::new(),
+        }
+    }
+
+    /// The root to hand to `UpdateRun` for `col`: `None` once it has been warned about.
+    pub(super) fn root_for(&self, col: &Collection) -> Option<&Path> {
+        self.root
+            .as_deref()
+            .filter(|_| !self.warned.contains(&col.name))
+    }
+
+    /// Record, after `col`'s pass, whether that pass warned about it.
+    pub(super) fn note(&mut self, col: &Collection) {
+        if let Some(root) = self.root_for(col)
+            && is_outside_project(col, root)
+        {
+            self.warned.insert(col.name.clone());
+        }
+    }
 }
 
 pub(super) fn update_one_collection(
@@ -1126,6 +1176,7 @@ pub(super) fn update_one_collection(
         hooks_allowed,
         full,
         hook_config,
+        project_root,
     } = run;
     let mut progress = fmt::Progress::new(progress_mode);
     let dir = Path::new(&col.path);
@@ -1137,6 +1188,23 @@ pub(super) fn update_one_collection(
             interrupted: None,
             report: None,
         });
+    }
+    // Stage 1 of #227: a project-local index can name a directory outside the
+    // project, so say so; the collection is still indexed.
+    if let Some(root) = project_root
+        && is_outside_project(col, root)
+    {
+        // Name and path come from the index file, which may not be ours.
+        let plain = |text: &str| -> String {
+            text.chars()
+                .map(|c| if c.is_control() { '?' } else { c })
+                .collect()
+        };
+        eprintln!(
+            "  WARN: collection '{}' ({}) is outside the project directory; it is still indexed, and a future release will skip it",
+            plain(&col.name),
+            plain(&col.path)
+        );
     }
 
     // Run the collection's pre-update hook (e.g. `git fetch && git pull ...`)
@@ -1641,6 +1709,7 @@ mod tests {
         hooks_allowed: true,
         full: false,
         hook_config: TEST_HOOKS,
+        project_root: None,
     };
 
     #[test]
@@ -2279,7 +2348,7 @@ mod tests {
             own_process_group: true,
         };
 
-        let err = run_update_with(index_dir.path(), None, true, false, config).unwrap_err();
+        let err = run_update_with(index_dir.path(), None, true, false, config, None).unwrap_err();
 
         let partial = err
             .downcast_ref::<PartialFailure>()
@@ -2308,7 +2377,7 @@ mod tests {
             let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
             db::upsert_collection(&s.db, &test_collection("c", src.path())).unwrap();
         }
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
 
         // Make the index look like one built by the previous tokenizer: no
         // version marker, and the document absent from Tantivy. The file is
@@ -2322,7 +2391,7 @@ mod tests {
             assert!(s.fts_rebuild_pending().unwrap());
         }
 
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
 
         let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
         assert_eq!(s.search_fts("東京都", 10, None).unwrap().len(), 1);
@@ -2371,10 +2440,10 @@ mod tests {
             let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
             store::mark_raw_split_backfilled(&s).unwrap();
         }
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
         make_full_text_index_legacy(index_dir.path());
 
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
 
         let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
         assert_eq!(s.search_fts("東京都", 10, None).unwrap().len(), 1);
@@ -2384,10 +2453,10 @@ mod tests {
     #[test]
     fn a_legacy_index_with_an_unclean_pass_still_defers_the_rebuild() {
         let (index_dir, _src) = index_with_a_missing_collection_dir();
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
         make_full_text_index_legacy(index_dir.path());
 
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
 
         let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
         assert!(!store::raw_split_backfilled(&s));
@@ -2408,7 +2477,7 @@ mod tests {
             db::upsert_collection(&s.db, &test_collection("c", src.path())).unwrap();
         }
 
-        run_update_with(index_dir.path(), Some("c"), true, false, TEST_HOOKS).unwrap();
+        run_update_with(index_dir.path(), Some("c"), true, false, TEST_HOOKS, None).unwrap();
 
         let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
         assert!(s.fts_rebuild_pending().unwrap());
@@ -2424,7 +2493,7 @@ mod tests {
             db::upsert_collection(&s.db, &hook_collection("c", src.path(), Some("exit 0")))
                 .unwrap();
         }
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
     }
 
     // ── Chunk-vector reuse across `update` → `embed` ─────────────────────────
@@ -2515,7 +2584,7 @@ mod tests {
         }
 
         fn update(&self) {
-            run_update_with(self.index_dir.path(), None, true, false, TEST_HOOKS).unwrap();
+            run_update_with(self.index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
         }
 
         /// The embed pass `rqmd embed` runs, against the counting backend.
