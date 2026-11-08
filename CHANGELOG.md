@@ -71,6 +71,13 @@
   2026-11-07, so the bytes are unchanged; the embed fingerprint is unchanged and nothing is
   re-embedded. Downloads now honour `HF_HOME` and `HF_ENDPOINT`, as the GGUF path does. See
   [docs/MODELS.md](docs/MODELS.md#ortbackend-ort-backend-feature).
+- Perf: a vector search scoped to one or more collections no longer walks the collection for every
+  nearest-neighbour hit ([#237](https://github.com/tylern91/rqmd/issues/237)). The per-hit lookup
+  that maps a vector to its document now probes `idx_documents_hash` whatever the scope, where
+  SQLite had searched the `(collection, path)` index once a collection filter was present (516 us
+  against 5.4 us per lookup in a standalone SQLite check on a large collection). Results, their order and scores are unchanged, including which
+  collection a hash shared across collections resolves to; the index, the embed fingerprint and
+  chunking are untouched and no re-embed is needed.
 
 ### Removed
 - The `eval` example of `rqmd-core` (`cargo run --example eval -p rqmd-core`), which read a
