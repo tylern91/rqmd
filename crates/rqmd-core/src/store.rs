@@ -3696,6 +3696,88 @@ mod tests {
         assert!(store.take_query_timings().is_none());
     }
 
+    /// Three collections that share content hashes: `a`, `b` and `c` each hold
+    /// the same four notes under different paths, and `c` adds one of its own.
+    fn shared_hash_store(dir: &std::path::Path) -> Store {
+        let mut store = open_stub_store_with(dir, Box::new(TwoTopicBackend));
+        for (coll, prefix) in [("a", "s"), ("b", "t"), ("c", "u")] {
+            for n in 0..4 {
+                store
+                    .index_document(
+                        coll,
+                        &format!("{prefix}-{n}.md"),
+                        "Star",
+                        &format!("telescope galaxy nebula {}", "orbit ".repeat(n)),
+                    )
+                    .unwrap();
+            }
+        }
+        store
+            .index_document("c", "drum.md", "Drum", "telescope marimba mallets")
+            .unwrap();
+        store.flush().unwrap();
+        store
+    }
+
+    /// rqmd#237: the per-hit lookup resolves a hash shared across collections
+    /// to the same document, in the same order and with the same scores, for
+    /// a one-collection scope, a multi-collection scope and no scope.
+    #[test]
+    fn search_vec_scoped_resolves_shared_hashes_the_same_for_every_scope() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = shared_hash_store(dir.path());
+        let emb = TwoTopicBackend.embed("telescope galaxy").unwrap();
+        let run = |scope: Option<&[String]>| -> Vec<(String, u32)> {
+            store
+                .search_vec_scoped(&emb, 10, scope)
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.filepath, r.backend_score.to_bits()))
+                .collect()
+        };
+        let only_b = run(Some(&["b".to_string()]));
+        let b_and_c = run(Some(&["b".to_string(), "c".to_string()]));
+        let everything = run(None);
+
+        // Recorded on the per-scope WHERE lookup before #237, so the order,
+        // the scores (as bits) and the collection a shared hash resolves to
+        // are the old behaviour: the first collection by name wins.
+        let expect = |rows: &[(&str, u32)]| {
+            rows.iter()
+                .map(|(p, s)| (p.to_string(), *s))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            only_b,
+            expect(&[
+                ("b/t-0.md", 1065352680),
+                ("b/t-1.md", 1065351574),
+                ("b/t-2.md", 1065349865),
+                ("b/t-3.md", 1065347556),
+            ])
+        );
+        assert_eq!(
+            b_and_c,
+            expect(&[
+                ("b/t-0.md", 1065352680),
+                ("c/drum.md", 1065352537),
+                ("b/t-1.md", 1065351574),
+                ("b/t-2.md", 1065349865),
+                ("b/t-3.md", 1065347556),
+            ])
+        );
+        assert_eq!(
+            everything,
+            expect(&[
+                ("a/s-0.md", 1065352680),
+                ("c/drum.md", 1065352537),
+                ("a/s-1.md", 1065351574),
+                ("a/s-2.md", 1065349865),
+                ("a/s-3.md", 1065347556),
+            ])
+        );
+    }
+
     /// A backend whose `generate` returns a fixed, caller-supplied expansion
     /// string — `StubBackend::generate` panics unconditionally, so this
     /// exists only to give `parse_and_run_expansion` a controllable output to
