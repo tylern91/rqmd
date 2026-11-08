@@ -79,6 +79,29 @@ pub const DEFAULT_GENERATE_REVISION: &str = "daeb8e2d528a760970442092f6bf1e55c3b
 pub const DEFAULT_GENERATE_SHA256: &str =
     "9860780f3a1fab1f8f909a1b549ea3e62c22d19ab1a492b3a1026b38c5bd3ec3";
 
+// ORT embedding model pin (`ort-backend` feature). Declared here, not in
+// `ort_backend`, so the well-formedness tests compile in the default build —
+// CI runs tests only without `ort-backend`. Same pinning and verification
+// path as the GGUF models above (`get_verified`).
+//
+// `BAAI/bge-base-en-v1.5` has no tagged releases; the revision is the `main`
+// commit (`GET https://huggingface.co/api/models/BAAI/bge-base-en-v1.5`, `sha`
+// field, last modified 2024-02-21), fetched 2026-11-07. `onnx/model.onnx` is an
+// LFS file, so its hash is HF's published `lfs.sha256`. `tokenizer.json` is a
+// plain git blob with no published sha256 (only the git blob id
+// 688882a79f44442ddc1f60d70334a7ff5df0fb47), so its hash was computed locally
+// from the bytes served at this commit. Bump all three together, deliberately.
+// The embed fingerprint (`"{repo}/{file}"`) does not include the revision.
+
+pub const DEFAULT_ORT_EMBED_REPO: &str = "BAAI/bge-base-en-v1.5";
+pub const DEFAULT_ORT_EMBED_FILE: &str = "onnx/model.onnx";
+pub const DEFAULT_ORT_TOKENIZER_FILE: &str = "tokenizer.json";
+pub const DEFAULT_ORT_EMBED_REVISION: &str = "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a";
+pub const DEFAULT_ORT_EMBED_SHA256: &str =
+    "9bc579acdba21c253c62a9bf866891355a63ffa3442b52c8a37d75b2ccb91848";
+pub const DEFAULT_ORT_TOKENIZER_SHA256: &str =
+    "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66";
+
 // Embedding dimension for embeddinggemma-300M (confirmed in spike: dim=768)
 pub const EMBED_DIM: usize = 768;
 
@@ -404,7 +427,7 @@ fn check_hf_endpoint_scheme(endpoint: &str) -> Result<()> {
 /// with no scheme check, so left unvalidated it lets anyone with control of
 /// the process environment silently redirect every model download to an
 /// arbitrary `http://` host — no TLS, no certificate, no warning.
-fn validate_hf_endpoint() -> Result<()> {
+pub(crate) fn validate_hf_endpoint() -> Result<()> {
     if let Ok(endpoint) = std::env::var("HF_ENDPOINT") {
         check_hf_endpoint_scheme(&endpoint)?;
     }
@@ -448,6 +471,10 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
+/// Cached files up to this size are hashed on every `resolve_cached` hit (see
+/// there); larger ones (the GGUFs, the ONNX model) keep trust-on-first-use.
+const ALWAYS_VERIFY_MAX_BYTES: u64 = 16 << 20;
+
 /// Resolve `filename` from the local cache, tolerating caches populated
 /// before revision pinning existed. hf-hub's own `CacheRepo::get` only
 /// consults `refs/<revision>` (a file containing a commit hash), so a
@@ -466,9 +493,15 @@ fn resolve_cached(
 
     // Fast path: refs/<revision> already exists. That file was written either
     // by a prior download (verified then — see `get_verified`'s trust-on-
-    // first-use note) or by a previous run of this healing step, so it is
-    // never re-hashed here.
+    // first-use note) or by a previous run of this healing step, so a large
+    // file is never re-hashed here. The ref is per revision, not per file,
+    // though: healing one file of a multi-file repo (the ORT model, then its
+    // tokenizer) makes the ref exist for the others, which were never hashed.
+    // A small file costs nothing to hash, so it is always verified.
     if let Some(path) = cache_repo.get(filename) {
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() <= ALWAYS_VERIFY_MAX_BYTES) {
+            verify_sha256(&path, expected_sha256)?;
+        }
         return Ok(Some(path));
     }
 
@@ -594,7 +627,7 @@ async fn get_with_auth_fallback(
 /// every process start would be a real latency cost (this is the same
 /// trust-on-first-use model `git-lfs` itself uses — it checks the blob hash
 /// on checkout, not on every subsequent read).
-async fn get_verified(
+pub(crate) async fn get_verified(
     api: &Api,
     anon_api: Option<&Api>,
     cache: &Cache,
@@ -626,9 +659,33 @@ async fn get_verified(
     let path = get_with_auth_fallback(api, anon_api, cache, repo_id, &repo, filename)
         .await
         .with_context(|| format!("download {repo_id}/{filename}@{revision}"))?;
-    verify_sha256(&path, expected_sha256)
-        .with_context(|| format!("{repo_id}/{filename}@{revision}"))?;
+    if let Err(e) = verify_sha256(&path, expected_sha256) {
+        // hf-hub has already written refs/<revision>, which the next run's fast
+        // path in `resolve_cached` trusts for a large file, so a bad download
+        // left in place would be accepted unverified then. Remove it.
+        discard_bad_download(&path);
+        return Err(e.context(format!("{repo_id}/{filename}@{revision}")));
+    }
     Ok(path)
+}
+
+/// Best-effort removal of a downloaded cache file that failed its checksum:
+/// the blob the snapshot entry points at, then the entry itself.
+fn discard_bad_download(path: &Path) {
+    let blob = std::fs::canonicalize(path).ok();
+    for target in blob.iter().map(PathBuf::as_path).chain([path]) {
+        match std::fs::remove_file(target) {
+            Ok(()) => {}
+            // The entry was a regular file, already removed as its own blob.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    "could not remove corrupt download {}: {e}",
+                    target.display()
+                )
+            }
+        }
+    }
 }
 
 /// Build the primary hf-hub API client and, when a credential is in play, an
@@ -637,7 +694,7 @@ async fn get_verified(
 /// `HUGGING_FACE_HUB_TOKEN` env vars override hf-hub's own cache-file token
 /// (which `ApiBuilder::from_env` already picks up via `Cache::token()`); with
 /// neither, no token is sent.
-fn build_hf_api_clients(cache: &Cache) -> Result<(Api, Option<Api>)> {
+pub(crate) fn build_hf_api_clients(cache: &Cache) -> Result<(Api, Option<Api>)> {
     let env_token = env_hf_token();
     let mut builder = ApiBuilder::from_env();
     if let Some(tok) = env_token.clone() {
@@ -1688,18 +1745,22 @@ mod tests {
         assert!(cache.repo(repo.clone()).get("model.gguf").is_some());
     }
 
-    /// A ref that already exists must short-circuit before any hashing —
-    /// proven here by planting content that does *not* match the expected
+    /// A ref that already exists must short-circuit before any hashing for a
+    /// large file — proven here by planting a sparse file just over
+    /// `ALWAYS_VERIFY_MAX_BYTES` whose content does *not* match the expected
     /// hash and asserting `resolve_cached` still succeeds (trust-on-first-use
     /// for content that hf-hub itself already considers cached).
     #[test]
-    fn resolve_cached_fast_path_does_not_rehash() {
+    fn resolve_cached_fast_path_does_not_rehash_large_file() {
         let dir = tempfile::TempDir::new().unwrap();
         let cache = Cache::new(dir.path().join("hub"));
         let repo = test_repo("deadbeef");
         let pointer = cache.repo(repo.clone()).pointer_path(repo.revision());
         std::fs::create_dir_all(&pointer).unwrap();
-        std::fs::write(pointer.join("model.gguf"), b"not-abc-at-all").unwrap();
+        std::fs::File::create(pointer.join("model.gguf"))
+            .unwrap()
+            .set_len(ALWAYS_VERIFY_MAX_BYTES + 1)
+            .unwrap();
         cache
             .repo(repo.clone())
             .create_ref(repo.revision())
@@ -1707,6 +1768,53 @@ mod tests {
 
         let resolved = resolve_cached(&cache, &repo, "model.gguf", ABC_SHA256).unwrap();
         assert!(resolved.is_some());
+    }
+
+    /// The ref is per revision, so healing one file of a multi-file repo (the
+    /// ORT model, then its tokenizer) must not make the other file trusted
+    /// unhashed: a small file under an existing ref is still verified.
+    #[test]
+    fn resolve_cached_verifies_small_file_under_existing_ref() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = Cache::new(dir.path().join("hub"));
+        let repo = test_repo("deadbeef");
+        let pointer = cache.repo(repo.clone()).pointer_path(repo.revision());
+        std::fs::create_dir_all(&pointer).unwrap();
+        std::fs::write(pointer.join("model.gguf"), b"abc").unwrap();
+        std::fs::write(pointer.join("tokenizer.json"), b"{}").unwrap();
+
+        // Verifying the first file heals refs/<rev> for the whole repo.
+        assert!(
+            resolve_cached(&cache, &repo, "model.gguf", ABC_SHA256)
+                .unwrap()
+                .is_some()
+        );
+        let err = resolve_cached(&cache, &repo, "tokenizer.json", ABC_SHA256).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("tokenizer.json"), "{msg}");
+        assert!(msg.contains(ABC_SHA256), "{msg}");
+    }
+
+    /// A download that failed its checksum is removed (blob and snapshot
+    /// entry), so the next run cannot trust it through the ref hf-hub wrote.
+    #[test]
+    fn discard_bad_download_removes_blob_and_snapshot_entry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let blob = dir.path().join("blob");
+        std::fs::write(&blob, b"bad").unwrap();
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("entry");
+            std::os::unix::fs::symlink(&blob, &link).unwrap();
+            discard_bad_download(&link);
+            assert!(!blob.exists());
+            assert!(std::fs::symlink_metadata(&link).is_err());
+        }
+        #[cfg(not(unix))]
+        {
+            discard_bad_download(&blob);
+            assert!(!blob.exists());
+        }
     }
 
     /// A legacy-layout snapshot with the wrong bytes (corruption/tampering)
@@ -1755,6 +1863,91 @@ mod tests {
             "model.gguf"
         ));
         assert!(cache.repo(repo.clone()).get("model.gguf").is_none());
+    }
+
+    // ── ORT embedding pin ───────────────────────────────────────────────────
+    //
+    // The ORT backend itself only builds with `ort-backend`, which CI does not
+    // test, so the pin constants and the verification path it relies on are
+    // checked here, in the default build.
+
+    fn is_lower_hex(s: &str, len: usize) -> bool {
+        s.len() == len
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
+    #[test]
+    fn ort_pin_constants_are_well_formed() {
+        assert!(is_lower_hex(DEFAULT_ORT_EMBED_REVISION, 40));
+        assert!(is_lower_hex(DEFAULT_ORT_EMBED_SHA256, 64));
+        assert!(is_lower_hex(DEFAULT_ORT_TOKENIZER_SHA256, 64));
+        assert_ne!(DEFAULT_ORT_EMBED_SHA256, DEFAULT_ORT_TOKENIZER_SHA256);
+        // The embed fingerprint is `"{repo}/{file}"` and must not move with the pin.
+        assert_eq!(
+            format!("{DEFAULT_ORT_EMBED_REPO}/{DEFAULT_ORT_EMBED_FILE}"),
+            "BAAI/bge-base-en-v1.5/onnx/model.onnx"
+        );
+    }
+
+    /// A cached ORT file whose bytes differ from the pin must fail through
+    /// `get_verified` (the call `OrtBackend::new` makes), naming the file and
+    /// the expected hash, and must never be returned.
+    #[test]
+    fn get_verified_rejects_substituted_ort_file_naming_file_and_hash() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = Cache::new(dir.path().join("hub"));
+        let repo = test_repo(DEFAULT_ORT_EMBED_REVISION);
+        let pointer = cache.repo(repo.clone()).pointer_path(repo.revision());
+        std::fs::create_dir_all(pointer.join("onnx")).unwrap();
+        std::fs::write(pointer.join("onnx/model.onnx"), b"substituted bytes").unwrap();
+
+        let (api, anon_api) = build_hf_api_clients(&cache).unwrap();
+        let err = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(get_verified(
+                &api,
+                anon_api.as_ref(),
+                &cache,
+                "some/repo",
+                DEFAULT_ORT_EMBED_REVISION,
+                DEFAULT_ORT_EMBED_FILE,
+                DEFAULT_ORT_EMBED_SHA256,
+            ))
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("onnx/model.onnx"), "{msg}");
+        assert!(msg.contains(DEFAULT_ORT_EMBED_SHA256), "{msg}");
+        assert!(msg.contains("integrity check failed"), "{msg}");
+        // Not healed: nothing may trust the bad file later.
+        assert!(cache.repo(repo).get(DEFAULT_ORT_EMBED_FILE).is_none());
+    }
+
+    /// Matching bytes at the pinned revision are accepted from the cache with
+    /// no network call (the snapshot is adopted and its ref healed).
+    #[test]
+    fn get_verified_accepts_matching_cached_snapshot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = Cache::new(dir.path().join("hub"));
+        let repo = test_repo("deadbeef");
+        let pointer = cache.repo(repo.clone()).pointer_path(repo.revision());
+        std::fs::create_dir_all(&pointer).unwrap();
+        std::fs::write(pointer.join("tokenizer.json"), b"abc").unwrap();
+
+        let (api, anon_api) = build_hf_api_clients(&cache).unwrap();
+        let path = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(get_verified(
+                &api,
+                anon_api.as_ref(),
+                &cache,
+                "some/repo",
+                "deadbeef",
+                "tokenizer.json",
+                ABC_SHA256,
+            ))
+            .unwrap();
+        assert!(path.ends_with("tokenizer.json"));
     }
 
     // ── auth fallback / offline predicates ──────────────────────────────────

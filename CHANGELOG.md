@@ -63,6 +63,14 @@
   [docs/research/2026-10-28-scoped-vector-search-timings.md](docs/research/2026-10-28-scoped-vector-search-timings.md).
 
 ### Changed
+- The ORT embedding backend (`--features ort-backend`) now downloads `BAAI/bge-base-en-v1.5` at a
+  pinned commit and verifies `onnx/model.onnx` and `tokenizer.json` against SHA-256 hashes, through
+  the same cache, `HF_HUB_OFFLINE` and integrity path as the GGUF models
+  ([#149](https://github.com/tylern91/rqmd/issues/149)). A mismatch fails with the file name and
+  the expected hash, and the bytes are never loaded. The pin is the `main` head as fetched on
+  2026-11-07, so the bytes are unchanged; the embed fingerprint is unchanged and nothing is
+  re-embedded. Downloads now honour `HF_HOME` and `HF_ENDPOINT`, as the GGUF path does. See
+  [docs/MODELS.md](docs/MODELS.md#ortbackend-ort-backend-feature).
 - Perf: a vector search scoped to one or more collections no longer walks the collection for every
   nearest-neighbour hit ([#237](https://github.com/tylern91/rqmd/issues/237)). The per-hit lookup
   that maps a vector to its document now probes `idx_documents_hash` whatever the scope, where

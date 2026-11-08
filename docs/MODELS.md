@@ -53,6 +53,19 @@ RQMD_INFERENCE_BACKEND=ort RQMD_ORT_EP=coreml rqmd embed
 rqmd --backend ort --ort-ep coreml embed
 ```
 
+**Pinned revision and checksums.** The ORT backend downloads `BAAI/bge-base-en-v1.5` at a fixed commit and verifies both files against SHA-256 hashes, the same way the GGUF models are:
+
+| File | SHA-256 |
+|------|---------|
+| `onnx/model.onnx` | `9bc579acdba21c253c62a9bf866891355a63ffa3442b52c8a37d75b2ccb91848` |
+| `tokenizer.json` | `d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66` |
+
+The revision is `a5beb1e3e68b9ab74eb54cfd186867f64f240e1a`, the `main` branch head as fetched on 2026-11-07 (last modified 2024-02-21), so the pinned bytes are the ones `main` served before the pin. The model hash is HuggingFace's published LFS SHA-256. `tokenizer.json` is not an LFS file and HuggingFace publishes no SHA-256 for it (only the git blob id `688882a79f44442ddc1f60d70334a7ff5df0fb47`), so its hash was computed locally from the bytes served at that commit. A file that does not match fails with an error naming the file, the expected hash and the hash found; the unverified bytes are never loaded. `HF_HUB_OFFLINE=1` is honoured, and the cache lives where the GGUF models do (`$HF_HOME/hub/`, otherwise `~/.cache/huggingface/hub/`). A model snapshot cached before the pin is hashed once and then reused; the small tokenizer is hashed on every start, and a download that fails its check is deleted from the cache so the next run fetches it again.
+
+The pin does not change the embed fingerprint. The fingerprint is `BAAI/bge-base-en-v1.5/onnx/model.onnx` and carries no revision, so an existing ORT index stays valid and nothing is re-embedded.
+
+To bump the model deliberately: read the new commit from `https://huggingface.co/api/models/BAAI/bge-base-en-v1.5` (the `sha` field) and the model's `lfs.sha256` from the same URL with `?blobs=true`, download `tokenizer.json` at that commit (`https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/<commit>/tokenizer.json`) and hash it with `shasum -a 256`, then update `DEFAULT_ORT_EMBED_REVISION`, `DEFAULT_ORT_EMBED_SHA256` and `DEFAULT_ORT_TOKENIZER_SHA256` in `crates/rqmd-llm/src/lib.rs` together. If the new weights embed differently, the fingerprint must change too, so that indexes built with the old weights are flagged for re-embedding.
+
 ---
 
 ## Models
