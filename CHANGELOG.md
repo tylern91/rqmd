@@ -95,6 +95,15 @@
   collection a hash shared across collections resolves to; the index, the embed fingerprint and
   chunking are untouched and no re-embed is needed.
 
+### Fixed
+- `rqmd mcp --daemon --allow-refresh` on a project-local `.rqmd/` index now warns on stderr, in the
+  daemon log, about a collection that resolves outside the project directory, once per collection
+  per process (#227). The daemon's child process runs with an explicit `--index-dir`, so it never
+  knew the project directory and the warning added for `update`, `watch` and the stdio MCP server
+  did not fire there. The launching process now passes its project directory on through a hidden
+  `--external-root` option. Runs that are not a daemon, and explicit and global indexes, are
+  unchanged.
+
 ### Removed
 - The `eval` example of `rqmd-core` (`cargo run --example eval -p rqmd-core`), which read a
   `test/eval-docs` directory that is not in the repository and could not run.

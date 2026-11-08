@@ -282,6 +282,10 @@ enum Commands {
         /// Answer `refresh: true` with a note instead of re-indexing, for any index.
         #[arg(long)]
         no_refresh: bool,
+        /// Set by `--daemon` for its child, which gets an explicit `--index-dir`
+        /// and so cannot find the project directory itself.
+        #[arg(long, hide = true)]
+        external_root: Option<std::path::PathBuf>,
         #[command(subcommand)]
         action: Option<McpAction>,
     },
@@ -605,6 +609,7 @@ fn run() -> Result<()> {
             daemon,
             allow_refresh,
             no_refresh,
+            external_root,
             action,
         } => match action {
             Some(McpAction::Status) => commands::mcp::run_mcp_status(&index_dir),
@@ -617,7 +622,7 @@ fn run() -> Result<()> {
                 daemon,
                 allow_non_loopback,
                 !no_refresh && store::refresh_allowed(index_source, allow_refresh),
-                store::project_root(index_source),
+                external_root.or_else(|| store::project_root(index_source)),
             ),
         },
     }

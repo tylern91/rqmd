@@ -490,3 +490,101 @@ fn ac_9_mcp_refresh_warns_once_on_stderr() {
     assert_eq!(warnings(&stderr).len(), 1, "stderr: {stderr}");
     assert!(!stderr.contains("allow-external-paths"));
 }
+
+/// Stops a background daemon left behind by the test, pass or fail.
+struct StopDaemon(PathBuf);
+
+impl Drop for StopDaemon {
+    fn drop(&mut self) {
+        let _ = rqmd(&self.0).args(["mcp", "stop", "--force"]).output();
+    }
+}
+
+/// A `--daemon` child has an explicit `--index-dir`, so it gets the project
+/// directory from the launching process. Its refresh names an outside
+/// collection once in the daemon log, however many refreshes follow.
+#[test]
+fn ac_10_daemon_refresh_warns_once_in_the_daemon_log() {
+    let project = Project::new();
+    let outside = fixture_collection("ext", "firstword\n");
+    age(&outside.path.join("doc.md"));
+    project.add("ext", &outside.path);
+    project.settle();
+    std::fs::write(outside.path.join("fresh.md"), "quaggaword arrives\n").expect("write doc");
+    std::fs::write(outside.path.join("later.md"), "zebraword arrives\n").expect("write doc");
+
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("bind port 0")
+        .local_addr()
+        .expect("local addr")
+        .port();
+    let _stop = StopDaemon(project.index());
+    let launch = rqmd_in_cwd(&project.dir())
+        .args([
+            "mcp",
+            "--daemon",
+            "--allow-refresh",
+            "--port",
+            &port.to_string(),
+        ])
+        .env_remove("RQMD_MCP_HOST")
+        .env_remove("RQMD_MCP_PORT")
+        .env_remove("RQMD_MCP_IDLE_EXIT_SECS")
+        .output()
+        .expect("run rqmd mcp --daemon");
+    assert!(launch.status.success(), "daemon launch failed: {launch:?}");
+
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let http = reqwest::blocking::Client::builder()
+        .timeout(LIMIT)
+        .build()
+        .expect("client");
+    let post = |session: Option<&str>, body: Value| {
+        let mut request = http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(body.to_string());
+        if let Some(session) = session {
+            request = request.header("Mcp-Session-Id", session);
+        }
+        request.send().expect("request reaches the daemon")
+    };
+    let init = post(
+        None,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1.0"}
+        }}),
+    );
+    let session = init
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .expect("initialize returned a session id");
+    let _ = init.text();
+    post(
+        Some(&session),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    );
+    let search = |id: u64, term: &str| {
+        post(
+            Some(&session),
+            json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
+                "name": "search", "arguments": {"query": term, "refresh": true}
+            }}),
+        )
+        .text()
+        .expect("search reply")
+    };
+    let first = search(2, "quaggaword");
+    let second = search(3, "zebraword");
+
+    assert!(first.contains("ext/fresh.md"), "{first}");
+    assert!(second.contains("ext/later.md"), "{second}");
+    let log = std::fs::read_to_string(project.index().join("mcp.log")).unwrap_or_default();
+    assert_eq!(warnings(&log).len(), 1, "daemon log: {log}");
+    assert!(!log.contains("allow-external-paths"));
+}

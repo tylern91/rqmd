@@ -294,7 +294,8 @@ added, edited files replaced and deleted files removed. It differs in what it le
   index's origin: a search tool is not what the hook was set up for.
 - **Outside the project.** On a project-local `.rqmd/` index, a collection whose directory
   resolves outside the project directory is named once on stderr (never stdout), the first time a
-  refresh walks it, and still indexed; see
+  refresh walks it, and still indexed. A daemon (`--daemon`) does the same in its log file,
+  `mcp.log` in the index directory; see
   [Collections outside the project](../SECURITY.md#collections-outside-the-project).
 - **Bounded.** The pass stops between files once `RQMD_MCP_TOOL_TIMEOUT_SECS` (default 120) has
   passed since it began, keeps what it indexed and prunes nothing. A `query` then has its full
