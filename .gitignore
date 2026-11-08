@@ -12,6 +12,9 @@
 # Claude Code config (local, not project state)
 .claude/
 
+# Agent skill library (local, not project state)
+.agents/skills/
+
 # Local project index
 .rqmd/
 
