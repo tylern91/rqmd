@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-11-08
+
 ### Added
 - A measurement for #126, whether merging a very short chunk into its neighbour is worth doing:
   an `#[ignore]` test in `crates/rqmd-core/tests/chunk_merge_measurement.rs` that a maintainer
