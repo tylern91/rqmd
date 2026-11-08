@@ -16,6 +16,7 @@ pub fn run_mcp(
     allow_non_loopback: bool,
     refresh_allowed: bool,
     project_root: Option<PathBuf>,
+    allow_external_paths: bool,
 ) -> Result<()> {
     if http && !daemon::is_loopback(host) && !allow_non_loopback {
         bail!(
@@ -43,6 +44,7 @@ pub fn run_mcp(
             allow_non_loopback,
             refresh_allowed,
             project_root.as_deref(),
+            allow_external_paths,
         );
     }
 
@@ -114,6 +116,7 @@ fn spawn_daemon(
     allow_non_loopback: bool,
     refresh_allowed: bool,
     project_root: Option<&Path>,
+    allow_external_paths: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(index_dir)
         .with_context(|| format!("failed to create index dir at {}", index_dir.display()))?;
@@ -176,9 +179,13 @@ fn spawn_daemon(
         cmd.arg("--no-refresh");
     }
     // Likewise the child cannot find the project directory, which the
-    // outside-the-project warning needs.
+    // outside-the-project skip needs; with `--allow-external-paths` there is
+    // nothing to skip, and the child is told so.
     if let Some(root) = project_root {
         cmd.arg("--external-root").arg(root);
+    }
+    if allow_external_paths {
+        cmd.arg("--allow-external-paths");
     }
     cmd.stdin(std::process::Stdio::null())
         .stdout(log_out)

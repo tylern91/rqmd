@@ -77,6 +77,17 @@ pub fn project_root(source: IndexSource) -> Option<PathBuf> {
     }
 }
 
+/// The project directory that `update`, `watch` and the MCP refresh enforce:
+/// `project_root`, or `None` when `--allow-external-paths` was passed. A
+/// collection outside the returned directory is skipped.
+pub fn enforced_root(source: IndexSource, allow_external_paths: bool) -> Option<PathBuf> {
+    if allow_external_paths {
+        None
+    } else {
+        project_root(source)
+    }
+}
+
 /// `read_only` opens the HNSW index as a memory-mapped view instead of
 /// loading it fully into RAM. Pass `true` for query-only callers (search,
 /// get, status); `false` for callers that index (embed, update, collection
@@ -326,6 +337,14 @@ mod tests {
     fn hooks_allowed_requires_the_flag_for_project_local() {
         assert!(!hooks_allowed(IndexSource::ProjectLocal, false));
         assert!(hooks_allowed(IndexSource::ProjectLocal, true));
+    }
+
+    #[test]
+    fn enforced_root_is_the_project_root_unless_external_paths_are_allowed() {
+        assert!(enforced_root(IndexSource::ProjectLocal, false).is_some());
+        assert_eq!(enforced_root(IndexSource::ProjectLocal, true), None);
+        assert_eq!(enforced_root(IndexSource::Explicit, false), None);
+        assert_eq!(enforced_root(IndexSource::Global, false), None);
     }
 
     #[test]

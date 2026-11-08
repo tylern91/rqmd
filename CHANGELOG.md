@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+- **Breaking for a project-local index over notes outside the project.** `rqmd update`, `rqmd watch`
+  and the MCP `refresh: true` pass now skip a collection of a project-local `.rqmd/` index whose
+  directory resolves outside the project directory (#227, stage 2 of the design in #148; stage 1
+  only warned in 0.34.0). The skipped collection is named once per process on stderr
+  (`WARN: skipping collection '<name>' (<path>): outside the project directory; pass
+  --allow-external-paths to index it`), nothing is read from it and nothing is pruned, so its
+  existing documents stay searchable. The run goes on with the other collections and exits as it
+  does for a missing directory (status 0). Pass `--allow-external-paths` to `rqmd update`,
+  `rqmd watch` or `rqmd mcp` to index it for that invocation; `--allow-refresh` does not imply it,
+  and a `--daemon` keeps the decision of the command that started it. An explicit `--index-dir` and
+  the global index are unchanged. `rqmd collection list` and `collection show` mark such a
+  collection `(outside project; skipped)`, `rqmd doctor` marks it and warns, and `rqmd status`
+  prints a count. To keep an intentional outside collection, run `rqmd update --allow-external-paths`
+  or move it to `--index-dir` or the global index; see
+  [Migrating](docs/MIGRATING.md) and [SECURITY.md](SECURITY.md#collections-outside-the-project).
+
 ## [0.34.0] - 2026-11-08
 
 ### Added

@@ -206,6 +206,12 @@ enum Commands {
         /// mtime that normally let unchanged files be skipped
         #[arg(long)]
         full: bool,
+        /// Index a collection of a project-local `.rqmd/` index even when its
+        /// directory resolves outside the project directory. Without it such a
+        /// collection is skipped (nothing is read, nothing is pruned), because
+        /// the index file may come from a repo someone else authored.
+        #[arg(long)]
+        allow_external_paths: bool,
     },
     /// Keep the full-text index current while files change (never embeds, never runs hooks)
     Watch {
@@ -215,6 +221,12 @@ enum Commands {
         #[arg(long, value_name = "SECS", default_value = "5",
               value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
+        /// Index a collection of a project-local `.rqmd/` index even when its
+        /// directory resolves outside the project directory. Without it such a
+        /// collection is skipped (nothing is read, nothing is pruned), because
+        /// the index file may come from a repo someone else authored.
+        #[arg(long)]
+        allow_external_paths: bool,
     },
     /// Diagnose config, index, model, and device issues
     Doctor,
@@ -282,6 +294,12 @@ enum Commands {
         /// Answer `refresh: true` with a note instead of re-indexing, for any index.
         #[arg(long)]
         no_refresh: bool,
+        /// Let `refresh: true` index a collection of a project-local `.rqmd/`
+        /// index whose directory is outside the project directory. Separate from
+        /// `--allow-refresh`, which does not imply it. A `--daemon` keeps this
+        /// decision.
+        #[arg(long)]
+        allow_external_paths: bool,
         /// Set by `--daemon` for its child, which gets an explicit `--index-dir`
         /// and so cannot find the project directory itself.
         #[arg(long, hide = true)]
@@ -528,10 +546,16 @@ fn run() -> Result<()> {
             format,
         ),
         Commands::Ls { path } => commands::get::run_ls(&index_dir, path.as_deref()),
-        Commands::Collection(cmd) => commands::collection::run(&index_dir, cmd),
+        Commands::Collection(cmd) => commands::collection::run(
+            &index_dir,
+            cmd,
+            store::project_root(index_source).as_deref(),
+        ),
         Commands::Context(cmd) => commands::context::run(&index_dir, cmd),
         Commands::Init => commands::index::run_init(),
-        Commands::Status => commands::index::run_status(&index_dir),
+        Commands::Status => {
+            commands::index::run_status(&index_dir, store::project_root(index_source).as_deref())
+        }
         Commands::Embed {
             collection,
             rebuild,
@@ -557,23 +581,27 @@ fn run() -> Result<()> {
             collection,
             run_hooks,
             full,
+            allow_external_paths,
         } => commands::index::run_update(
             &index_dir,
             collection.as_deref(),
             store::hooks_allowed(index_source, run_hooks),
             full,
-            store::project_root(index_source).as_deref(),
+            store::enforced_root(index_source, allow_external_paths).as_deref(),
         ),
         Commands::Watch {
             collection,
             interval,
+            allow_external_paths,
         } => commands::watch::run_watch(
             &index_dir,
             collection.as_deref(),
             std::time::Duration::from_secs(interval),
-            store::project_root(index_source),
+            store::enforced_root(index_source, allow_external_paths),
         ),
-        Commands::Doctor => commands::index::run_doctor(&index_dir),
+        Commands::Doctor => {
+            commands::index::run_doctor(&index_dir, store::project_root(index_source).as_deref())
+        }
         Commands::Bench { rounds } => commands::bench::run_bench(&index_dir, rounds),
         Commands::Eval {
             mode,
@@ -609,6 +637,7 @@ fn run() -> Result<()> {
             daemon,
             allow_refresh,
             no_refresh,
+            allow_external_paths,
             external_root,
             action,
         } => match action {
@@ -622,7 +651,12 @@ fn run() -> Result<()> {
                 daemon,
                 allow_non_loopback,
                 !no_refresh && store::refresh_allowed(index_source, allow_refresh),
-                external_root.or_else(|| store::project_root(index_source)),
+                if allow_external_paths {
+                    None
+                } else {
+                    external_root.or_else(|| store::project_root(index_source))
+                },
+                allow_external_paths,
             ),
         },
     }

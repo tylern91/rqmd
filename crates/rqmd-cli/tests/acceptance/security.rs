@@ -36,9 +36,11 @@ fn ac_1_project_local_index_skips_update_hook_without_run_hooks_flag() {
         .success();
 
     // No --index-dir: `resolve_index_dir` must pick up `.rqmd/` from `cwd`
-    // implicitly, and treat its hooks as untrusted by default.
+    // implicitly, and treat its hooks as untrusted by default. The collection
+    // lives outside the project, a separate gate that `--allow-external-paths`
+    // lifts so that the hook gate is what is under test.
     rqmd_in_cwd(project_dir.path())
-        .arg("update")
+        .args(["update", "--allow-external-paths"])
         .assert()
         .success()
         .stderr(contains("skipping update hook"));
@@ -48,7 +50,7 @@ fn ac_1_project_local_index_skips_update_hook_without_run_hooks_flag() {
     );
 
     rqmd_in_cwd(project_dir.path())
-        .args(["update", "--run-hooks"])
+        .args(["update", "--run-hooks", "--allow-external-paths"])
         .assert()
         .success();
     assert!(
