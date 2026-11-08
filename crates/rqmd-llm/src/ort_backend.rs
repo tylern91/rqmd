@@ -12,13 +12,14 @@
 use anyhow::{Context, Result};
 use ndarray::Ix3;
 
-use crate::{InferenceBackend, l2_normalize};
+use crate::{
+    DEFAULT_ORT_EMBED_REVISION, DEFAULT_ORT_EMBED_SHA256, DEFAULT_ORT_TOKENIZER_SHA256,
+    InferenceBackend, l2_normalize,
+};
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-pub const DEFAULT_ORT_EMBED_REPO: &str = "BAAI/bge-base-en-v1.5";
-pub const DEFAULT_ORT_EMBED_FILE: &str = "onnx/model.onnx";
-pub const DEFAULT_ORT_TOKENIZER_FILE: &str = "tokenizer.json";
+// The repo/file/revision/sha256 pin constants live in the crate root so their
+// tests compile in the default build; re-exported to keep this module's path.
+pub use crate::{DEFAULT_ORT_EMBED_FILE, DEFAULT_ORT_EMBED_REPO, DEFAULT_ORT_TOKENIZER_FILE};
 
 // ── Execution provider ────────────────────────────────────────────────────────
 
@@ -57,6 +58,14 @@ pub struct OrtConfig {
     pub embed_repo: String,
     pub embed_file: String,
     pub tokenizer_file: String,
+    /// Commit the model and tokenizer are downloaded at. Not part of the embed
+    /// fingerprint (`embed_repo/embed_file`).
+    pub embed_revision: String,
+    /// Expected SHA-256 of `embed_file` at `embed_revision`. A download or cached
+    /// snapshot that does not match is an error, never used.
+    pub embed_sha256: String,
+    /// Expected SHA-256 of `tokenizer_file` at `embed_revision`.
+    pub tokenizer_sha256: String,
     pub ep: OrtEp,
     /// Embedding dimension; must match the ONNX model's output.
     pub embed_dim: usize,
@@ -69,6 +78,9 @@ impl Default for OrtConfig {
             embed_repo: DEFAULT_ORT_EMBED_REPO.to_string(),
             embed_file: DEFAULT_ORT_EMBED_FILE.to_string(),
             tokenizer_file: DEFAULT_ORT_TOKENIZER_FILE.to_string(),
+            embed_revision: DEFAULT_ORT_EMBED_REVISION.to_string(),
+            embed_sha256: DEFAULT_ORT_EMBED_SHA256.to_string(),
+            tokenizer_sha256: DEFAULT_ORT_TOKENIZER_SHA256.to_string(),
             ep: OrtEp::Auto,
             embed_dim: 768,
             max_seq_len: 512,
@@ -91,23 +103,39 @@ pub struct OrtBackend {
 
 impl OrtBackend {
     pub fn new(config: OrtConfig) -> Result<Self> {
-        use hf_hub::api::tokio::Api;
-
-        // Download model and tokenizer via hf-hub (async, but new() is sync).
-        // Spawning a new Runtime inside an existing tokio context (e.g. `rqmd mcp`
-        // over HTTP) panics; detect and use block_in_place (which yields the
-        // thread to the scheduler) instead. Mirrors LlamaCppBackend::new().
+        // Download model and tokenizer via hf-hub (async, but new() is sync),
+        // pinned to `embed_revision` and SHA-256 verified through the same
+        // `get_verified` path as the GGUF models (cache lookup, HF_HUB_OFFLINE,
+        // auth fallback). Spawning a new Runtime inside an existing tokio context
+        // (e.g. `rqmd mcp` over HTTP) panics; detect and use block_in_place (which
+        // yields the thread to the scheduler) instead. Mirrors
+        // LlamaCppBackend::new().
         let download = || async {
-            let api = Api::new().context("hf-hub API")?;
-            let repo = api.model(config.embed_repo.clone());
-            let model = repo
-                .get(&config.embed_file)
-                .await
-                .context("model download")?;
-            let tok = repo
-                .get(&config.tokenizer_file)
-                .await
-                .context("tokenizer download")?;
+            crate::validate_hf_endpoint()?;
+            let cache = hf_hub::Cache::from_env();
+            let (api, anon_api) = crate::build_hf_api_clients(&cache)?;
+            let model = crate::get_verified(
+                &api,
+                anon_api.as_ref(),
+                &cache,
+                &config.embed_repo,
+                &config.embed_revision,
+                &config.embed_file,
+                &config.embed_sha256,
+            )
+            .await
+            .context("model download")?;
+            let tok = crate::get_verified(
+                &api,
+                anon_api.as_ref(),
+                &cache,
+                &config.embed_repo,
+                &config.embed_revision,
+                &config.tokenizer_file,
+                &config.tokenizer_sha256,
+            )
+            .await
+            .context("tokenizer download")?;
             Ok::<_, anyhow::Error>((model, tok))
         };
         let (model_path, tokenizer_path) = match tokio::runtime::Handle::try_current() {
