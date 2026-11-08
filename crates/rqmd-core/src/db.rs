@@ -1166,7 +1166,7 @@ pub fn doc_for_vid_meta_in(
 ///
 /// The join is pinned to `idx_documents_hash`. Left to itself the planner
 /// searches the `(collection, path)` unique index once a collection filter is
-/// present and walks the whole collection for every ANN hit (516 us against 5.4 us, see
+/// present and walks the whole collection for every ANN hit (516 us against 5.4 us in a standalone SQLite check, see
 /// docs/research/2026-10-28-scoped-vector-search-timings.md, #237). A hash is
 /// shared by few documents, so the hash probe is cheap whatever the scope,
 /// and the collection filter and the `ORDER BY` tie-break run on its handful

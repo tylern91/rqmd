@@ -75,7 +75,7 @@
   nearest-neighbour hit ([#237](https://github.com/tylern91/rqmd/issues/237)). The per-hit lookup
   that maps a vector to its document now probes `idx_documents_hash` whatever the scope, where
   SQLite had searched the `(collection, path)` index once a collection filter was present (516 us
-  against 5.4 us per lookup in the measurements). Results, their order and scores are unchanged, including which
+  against 5.4 us per lookup in a standalone SQLite check on a large collection). Results, their order and scores are unchanged, including which
   collection a hash shared across collections resolves to; the index, the embed fingerprint and
   chunking are untouched and no re-embed is needed.
 
