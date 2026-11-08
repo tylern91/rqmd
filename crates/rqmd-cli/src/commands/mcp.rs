@@ -36,7 +36,14 @@ pub fn run_mcp(
     };
 
     if is_daemon {
-        return spawn_daemon(index_dir, host, port, allow_non_loopback, refresh_allowed);
+        return spawn_daemon(
+            index_dir,
+            host,
+            port,
+            allow_non_loopback,
+            refresh_allowed,
+            project_root.as_deref(),
+        );
     }
 
     if !http {
@@ -106,6 +113,7 @@ fn spawn_daemon(
     port: u16,
     allow_non_loopback: bool,
     refresh_allowed: bool,
+    project_root: Option<&Path>,
 ) -> Result<()> {
     std::fs::create_dir_all(index_dir)
         .with_context(|| format!("failed to create index dir at {}", index_dir.display()))?;
@@ -166,6 +174,11 @@ fn spawn_daemon(
     // so the parent's decision is passed on rather than recomputed.
     if !refresh_allowed {
         cmd.arg("--no-refresh");
+    }
+    // Likewise the child cannot find the project directory, which the
+    // outside-the-project warning needs.
+    if let Some(root) = project_root {
+        cmd.arg("--external-root").arg(root);
     }
     cmd.stdin(std::process::Stdio::null())
         .stdout(log_out)
