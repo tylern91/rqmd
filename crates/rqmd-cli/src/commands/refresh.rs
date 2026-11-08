@@ -7,22 +7,27 @@
 //! reported, never an error. Nothing is printed to stdout, which is the
 //! protocol stream of a stdio server.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::Result;
 
 use rqmd_core::{Collection, Deadline, IndexLock, db};
 use rqmd_mcp::{RefreshOutcome, Refresher};
 
-use super::index::{UpdateRun, update_one_collection};
+use super::index::{ExternalWarnings, UpdateRun, update_one_collection};
 use crate::format::ProgressMode;
 use crate::hook::HookConfig;
 use crate::store;
 
-/// The refresher to give the MCP server.
-pub fn refresher() -> Refresher {
-    Arc::new(refresh_index)
+/// The refresher to give the MCP server. `project_root` is that of a
+/// project-local index (`store::project_root`); a collection outside it is
+/// named once on stderr, the first time a refresh passes over it.
+pub fn refresher(project_root: Option<PathBuf>) -> Refresher {
+    let external = Mutex::new(ExternalWarnings::new(project_root));
+    Arc::new(move |index_dir, requested, deadline| {
+        refresh_index(index_dir, requested, deadline, &external)
+    })
 }
 
 /// Bring the full-text index up to date for `requested` collections (all when
@@ -31,10 +36,11 @@ pub fn refresher() -> Refresher {
 ///
 /// The collection walk is not interrupted, only the indexing between files, so
 /// a very large collection can overrun the deadline by one walk.
-pub fn refresh_index(
+fn refresh_index(
     index_dir: &Path,
     requested: Option<&[String]>,
     deadline: Deadline,
+    external: &Mutex<ExternalWarnings>,
 ) -> Result<RefreshOutcome> {
     let cols: Vec<Collection> = {
         let s = store::open_store_no_backend(index_dir, true)?;
@@ -67,6 +73,11 @@ pub fn refresh_index(
         // No hook ever runs from a search tool: the command is a collection
         // author's, not something a query agreed to.
         col.update_command = None;
+        let project_root = external
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .root_for(&col)
+            .map(Path::to_path_buf);
         let outcome = update_one_collection(
             &mut s,
             &col,
@@ -75,11 +86,16 @@ pub fn refresh_index(
                 hooks_allowed: false,
                 full: false,
                 hook_config: HookConfig::from_env(),
+                project_root: project_root.as_deref(),
             },
             &|| lock.heartbeat(),
             // The walk stops on any `Some`; the value is only a stand-in for a signal.
             &|| deadline.is_expired().then_some(0),
         )?;
+        external
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .note(&col);
         if outcome.interrupted.is_some() {
             return Ok(RefreshOutcome::TimedOut);
         }
@@ -94,6 +110,20 @@ mod tests {
     use rqmd_core::store::{FTS_TOKENIZER_CONFIG_KEY, FTS_TOKENIZER_VERSION};
 
     use super::*;
+
+    /// A refresh of a project-less index, which warns about nothing.
+    fn refresh_index(
+        index_dir: &Path,
+        requested: Option<&[String]>,
+        deadline: Deadline,
+    ) -> Result<RefreshOutcome> {
+        super::refresh_index(
+            index_dir,
+            requested,
+            deadline,
+            &Mutex::new(ExternalWarnings::new(None)),
+        )
+    }
 
     fn collection(name: &str, dir: &Path, update_command: Option<String>) -> Collection {
         Collection {

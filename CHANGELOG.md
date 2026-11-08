@@ -11,6 +11,14 @@
   chunks a merge would change, and the size of the merged chunks against the chunk size and an
   estimated token limit. CI runs only its model-free merge-simulation tests. No runtime
   behaviour, fingerprint, chunking or index format changes, and no re-embed is needed.
+- `rqmd update`, `rqmd watch` and the MCP `refresh: true` pass now warn on stderr when a collection
+  of a project-local `.rqmd/` index resolves outside the project directory (#227, stage 1 of the
+  design in #148). The collection is still indexed; the warning says a future release will skip it.
+  A relative stored path is read against the project directory, a symlinked root is judged by its
+  target, a path that does not exist keeps only its `directory not found` warning, and control
+  characters in the printed name and path are replaced. `watch` and the MCP server warn once per
+  collection per process. An explicit `--index-dir` and the global index print nothing new. See
+  [SECURITY.md](SECURITY.md#collections-outside-the-project).
 - `rqmd query --cache` (or `RQMD_QUERY_CACHE=1`) reuses query-expansion output and rerank scores
   from earlier queries, so a repeated query calls neither the generation model nor the reranker
   and returns the same results. Off by default: without it `query` creates no file and its output

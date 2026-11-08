@@ -66,6 +66,17 @@ pub fn refresh_allowed(source: IndexSource, allow_refresh_flag: bool) -> bool {
     hooks_allowed(source, allow_refresh_flag)
 }
 
+/// The project directory for an index resolved from `source`: the canonical
+/// current directory, which is where `.rqmd/` was found. `None` for any other
+/// source, and when the directory cannot be resolved. A `.rqmd` that is itself
+/// a symlink does not move the root: it is the directory containing it.
+pub fn project_root(source: IndexSource) -> Option<PathBuf> {
+    match source {
+        IndexSource::ProjectLocal => std::env::current_dir().ok()?.canonicalize().ok(),
+        IndexSource::Explicit | IndexSource::Global => None,
+    }
+}
+
 /// `read_only` opens the HNSW index as a memory-mapped view instead of
 /// loading it fully into RAM. Pass `true` for query-only callers (search,
 /// get, status); `false` for callers that index (embed, update, collection

@@ -8,6 +8,7 @@ mod embed_exclusion;
 mod embed_reuse;
 mod eval_judgements;
 mod exclusion_visibility;
+mod external_paths;
 mod fts_exact_delete;
 mod graceful_interrupt;
 mod helpers;

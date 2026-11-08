@@ -67,3 +67,27 @@ The same rule gates the MCP `refresh: true` option, which walks every path an
 index's collections name: it is answered with a note for an implicit
 project-local `.rqmd/` unless `rqmd mcp --allow-refresh` is passed, and a refresh
 never runs a hook for any index.
+
+## Collections outside the project
+
+A project-local `.rqmd/index.sqlite` also stores each collection's `path`, and
+`rqmd update`, `rqmd watch` and the MCP `refresh: true` option copy the matching
+files under that path into the index, wherever it points. In a repo someone else
+authored, that can name a directory such as your home directory, and a later
+`search`, `get` or MCP call returns what was copied.
+
+On a project-local index, these three now print one warning on stderr for each
+collection whose directory resolves outside the project directory (the current
+directory that holds `.rqmd/`), and still index it:
+
+```
+  WARN: collection '<name>' (<path>) is outside the project directory; it is still indexed, and a future release will skip it
+```
+
+A relative stored path is read against the project directory, a symlinked root
+is judged by its target, and a path that does not exist keeps only its
+`directory not found` warning. `rqmd watch` and the MCP server name a collection
+once per process. An explicit `--index-dir` and the global index are chosen by
+you and print nothing new. A future release will skip these collections by
+default; design and threat model:
+[docs/research/2026-10-27-external-collection-paths.md](docs/research/2026-10-27-external-collection-paths.md).

@@ -558,6 +558,7 @@ fn run() -> Result<()> {
             collection.as_deref(),
             store::hooks_allowed(index_source, run_hooks),
             full,
+            store::project_root(index_source).as_deref(),
         ),
         Commands::Watch {
             collection,
@@ -566,6 +567,7 @@ fn run() -> Result<()> {
             &index_dir,
             collection.as_deref(),
             std::time::Duration::from_secs(interval),
+            store::project_root(index_source),
         ),
         Commands::Doctor => commands::index::run_doctor(&index_dir),
         Commands::Bench { rounds } => commands::bench::run_bench(&index_dir, rounds),
@@ -615,6 +617,7 @@ fn run() -> Result<()> {
                 daemon,
                 allow_non_loopback,
                 !no_refresh && store::refresh_allowed(index_source, allow_refresh),
+                store::project_root(index_source),
             ),
         },
     }
