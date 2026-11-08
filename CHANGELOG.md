@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- A measurement for #126, whether merging a very short chunk into its neighbour is worth doing:
+  an `#[ignore]` test in `crates/rqmd-core/tests/chunk_merge_measurement.rs` that a maintainer
+  runs by hand with `RQMD_MEASURE_INDEX` set to an `index.sqlite`. It opens the index read-only,
+  runs the real splitter on every distinct active document and reports, overall and per
+  collection, how many chunks fall below 200, 400 and 800 characters, how many documents and
+  chunks a merge would change, and the size of the merged chunks against the chunk size and an
+  estimated token limit. CI runs only its model-free merge-simulation tests. No runtime
+  behaviour, fingerprint, chunking or index format changes, and no re-embed is needed.
 - `rqmd update`, `rqmd watch` and the MCP `refresh: true` pass now warn on stderr when a collection
   of a project-local `.rqmd/` index resolves outside the project directory (#227, stage 1 of the
   design in #148). The collection is still indexed; the warning says a future release will skip it.
@@ -69,6 +77,23 @@
   `take_query_timings` expose the same figures as `QueryTimings`. The numbers behind
   [#152](https://github.com/tylern91/rqmd/issues/152) are in
   [docs/research/2026-10-28-scoped-vector-search-timings.md](docs/research/2026-10-28-scoped-vector-search-timings.md).
+
+### Changed
+- The ORT embedding backend (`--features ort-backend`) now downloads `BAAI/bge-base-en-v1.5` at a
+  pinned commit and verifies `onnx/model.onnx` and `tokenizer.json` against SHA-256 hashes, through
+  the same cache, `HF_HUB_OFFLINE` and integrity path as the GGUF models
+  ([#149](https://github.com/tylern91/rqmd/issues/149)). A mismatch fails with the file name and
+  the expected hash, and the bytes are never loaded. The pin is the `main` head as fetched on
+  2026-11-07, so the bytes are unchanged; the embed fingerprint is unchanged and nothing is
+  re-embedded. Downloads now honour `HF_HOME` and `HF_ENDPOINT`, as the GGUF path does. See
+  [docs/MODELS.md](docs/MODELS.md#ortbackend-ort-backend-feature).
+- Perf: a vector search scoped to one or more collections no longer walks the collection for every
+  nearest-neighbour hit ([#237](https://github.com/tylern91/rqmd/issues/237)). The per-hit lookup
+  that maps a vector to its document now probes `idx_documents_hash` whatever the scope, where
+  SQLite had searched the `(collection, path)` index once a collection filter was present (516 us
+  against 5.4 us per lookup in a standalone SQLite check on a large collection). Results, their order and scores are unchanged, including which
+  collection a hash shared across collections resolves to; the index, the embed fingerprint and
+  chunking are untouched and no re-embed is needed.
 
 ### Removed
 - The `eval` example of `rqmd-core` (`cargo run --example eval -p rqmd-core`), which read a

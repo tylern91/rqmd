@@ -1159,6 +1159,43 @@ pub fn doc_for_vid_meta_in(
     Ok(doc_chunk_for_vid_in(conn, vid, collections)?.map(|(doc, _)| doc))
 }
 
+/// The SQL behind [`doc_chunk_for_vid_in`] (`excluding` false: one best row)
+/// and [`doc_chunk_for_vid_in_excluding`] (`excluding` true: every candidate
+/// in tie-break order, with the content size). `n_cols` collection names are
+/// bound after `?1` (the vid); 0 means no scope.
+///
+/// The join is pinned to `idx_documents_hash`. Left to itself the planner
+/// searches the `(collection, path)` unique index once a collection filter is
+/// present and walks the whole collection for every ANN hit (516 us against 5.4 us in a standalone SQLite check, see
+/// docs/research/2026-10-28-scoped-vector-search-timings.md, #237). A hash is
+/// shared by few documents, so the hash probe is cheap whatever the scope,
+/// and the collection filter and the `ORDER BY` tie-break run on its handful
+/// of rows.
+fn vid_lookup_sql(n_cols: usize, excluding: bool) -> String {
+    let scope = if n_cols == 0 {
+        String::new()
+    } else {
+        format!("AND d.collection IN ({})", vec!["?"; n_cols].join(","))
+    };
+    let (size, limit) = if excluding {
+        (
+            ",\n               (SELECT octet_length(c.doc) FROM content c WHERE c.hash = cv.hash)",
+            "",
+        )
+    } else {
+        ("", "\n        LIMIT 1")
+    };
+    format!(
+        r#"
+        SELECT d.id, d.collection, d.path, d.title, d.hash, d.active, cv.pos{size}
+        FROM content_vectors cv
+        JOIN documents d INDEXED BY idx_documents_hash ON d.hash = cv.hash AND d.active = 1
+        WHERE cv.vid = ?1 {scope}
+        ORDER BY d.collection, d.path{limit}
+        "#
+    )
+}
+
 /// [`doc_for_vid_meta_in`] that also returns the stored start offset
 /// (`content_vectors.pos`) of the chunk the vector belongs to, so a caller can
 /// show the chunk that matched.
@@ -1168,21 +1205,7 @@ pub fn doc_chunk_for_vid_in(
     collections: Option<&[String]>,
 ) -> Result<Option<(Document, usize)>> {
     let cols = collections.filter(|c| !c.is_empty()).unwrap_or(&[]);
-    let scope = if cols.is_empty() {
-        String::new()
-    } else {
-        format!("AND d.collection IN ({})", vec!["?"; cols.len()].join(","))
-    };
-    let sql = format!(
-        r#"
-        SELECT d.id, d.collection, d.path, d.title, d.hash, d.active, cv.pos
-        FROM content_vectors cv
-        JOIN documents d ON d.hash = cv.hash AND d.active = 1
-        WHERE cv.vid = ?1 {scope}
-        ORDER BY d.collection, d.path
-        LIMIT 1
-        "#
-    );
+    let sql = vid_lookup_sql(cols.len(), false);
     let vid_i64 = vid as i64;
     let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + cols.len());
     bind.push(&vid_i64);
@@ -1213,21 +1236,7 @@ pub fn doc_chunk_for_vid_in_excluding(
         return doc_chunk_for_vid_in(conn, vid, collections);
     }
     let cols = collections.filter(|c| !c.is_empty()).unwrap_or(&[]);
-    let scope = if cols.is_empty() {
-        String::new()
-    } else {
-        format!("AND d.collection IN ({})", vec!["?"; cols.len()].join(","))
-    };
-    let sql = format!(
-        r#"
-        SELECT d.id, d.collection, d.path, d.title, d.hash, d.active, cv.pos,
-               (SELECT octet_length(c.doc) FROM content c WHERE c.hash = cv.hash)
-        FROM content_vectors cv
-        JOIN documents d ON d.hash = cv.hash AND d.active = 1
-        WHERE cv.vid = ?1 {scope}
-        ORDER BY d.collection, d.path
-        "#
-    );
+    let sql = vid_lookup_sql(cols.len(), true);
     let vid_i64 = vid as i64;
     let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + cols.len());
     bind.push(&vid_i64);
@@ -2213,6 +2222,94 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    /// rqmd#237: a hash shared across collections and paths resolves by
+    /// `ORDER BY collection, path` whatever the scope and the insertion
+    /// order, through the excluding variant too.
+    #[test]
+    fn shared_hash_tie_break_is_collection_then_path() {
+        let now = "2026-01-01T00:00:00Z";
+        let docs = [("c", "a.md"), ("b", "z.md"), ("b", "m.md"), ("a", "q.md")];
+        for order in [docs, [docs[3], docs[2], docs[1], docs[0]]] {
+            let conn = test_conn();
+            upsert_content(&conn, "shared_hash", "shared body", now).unwrap();
+            for (coll, path) in order {
+                upsert_document(&conn, coll, path, "t", "shared_hash", now).unwrap();
+            }
+            upsert_vector_meta(&conn, "shared_hash", 0, 0, "m", "fp", 1, 7, now).unwrap();
+            for coll in ["a", "b", "c"] {
+                rules_for(&conn, coll, &[], None);
+            }
+
+            let resolve = |scope: Option<&[&str]>| {
+                let scope = scope.map(|s| s.iter().map(|c| c.to_string()).collect::<Vec<_>>());
+                let (doc, _) = doc_chunk_for_vid_in(&conn, 7, scope.as_deref())
+                    .unwrap()
+                    .unwrap();
+                format!("{}/{}", doc.collection, doc.path)
+            };
+            assert_eq!(resolve(None), "a/q.md", "{order:?}");
+            assert_eq!(resolve(Some(&["b", "c"])), "b/m.md", "{order:?}");
+            assert_eq!(resolve(Some(&["b"])), "b/m.md", "{order:?}");
+            assert_eq!(resolve(Some(&["c"])), "c/a.md", "{order:?}");
+
+            // The excluding variant walks the same order and skips excluded
+            // candidates, one rule at a time.
+            let resolve_ex = |scope: Option<&[&str]>| {
+                let scope = scope.map(|s| s.iter().map(|c| c.to_string()).collect::<Vec<_>>());
+                let rules = crate::embed_exclusion::EmbedExclusions::load(&conn).unwrap();
+                doc_chunk_for_vid_in_excluding(&conn, 7, scope.as_deref(), &rules)
+                    .unwrap()
+                    .map(|(doc, _)| format!("{}/{}", doc.collection, doc.path))
+            };
+            rules_for(&conn, "a", &["q.md"], None);
+            assert_eq!(resolve_ex(None).as_deref(), Some("b/m.md"), "{order:?}");
+            assert_eq!(resolve_ex(Some(&["a"])), None, "{order:?}");
+            rules_for(&conn, "b", &["m.md"], None);
+            assert_eq!(resolve_ex(None).as_deref(), Some("b/z.md"), "{order:?}");
+            assert_eq!(
+                resolve_ex(Some(&["b", "c"])).as_deref(),
+                Some("b/z.md"),
+                "{order:?}"
+            );
+            assert_eq!(
+                resolve_ex(Some(&["c"])).as_deref(),
+                Some("c/a.md"),
+                "{order:?}"
+            );
+        }
+    }
+
+    /// rqmd#237: the lookup probes `idx_documents_hash` for no scope, one
+    /// collection and several, in both variants. Without the pin the planner
+    /// searches the `(collection, path)` unique index once a collection
+    /// filter is present.
+    #[test]
+    fn vid_lookup_uses_the_hash_index_for_every_scope() {
+        let conn = test_conn();
+        for excluding in [false, true] {
+            for n_cols in [0usize, 1, 3] {
+                let sql = format!("EXPLAIN QUERY PLAN {}", vid_lookup_sql(n_cols, excluding));
+                let mut bind: Vec<rusqlite::types::Value> = vec![7i64.into()];
+                bind.extend((0..n_cols).map(|i| format!("c{i}").into()));
+                let mut stmt = conn.prepare(&sql).unwrap();
+                let plan: Vec<String> = stmt
+                    .query_map(params_from_iter(bind), |row| row.get::<_, String>(3))
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                assert!(
+                    plan.iter()
+                        .any(|d| d.contains("documents") && d.contains("idx_documents_hash")),
+                    "excluding={excluding} n_cols={n_cols}: {plan:?}"
+                );
+                assert!(
+                    plan.iter().all(|d| !d.contains("(collection=?")),
+                    "excluding={excluding} n_cols={n_cols}: {plan:?}"
+                );
+            }
+        }
     }
 
     /// #147: an embed-excluded document never resolves through a vector it
