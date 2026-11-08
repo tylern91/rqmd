@@ -1432,4 +1432,68 @@ mod tests {
             1
         );
     }
+
+    /// Golden tokens captured on tantivy 0.26.1. A tantivy bump must not change
+    /// them: an index built before the bump is queried with the analyzer after
+    /// it, so any drift silently breaks matching.
+    #[test]
+    fn analyzer_tokens_match_the_golden_corpus() {
+        use tantivy::tokenizer::TokenStream;
+
+        let e20 = "É".repeat(20);
+        let e19_a = format!("{}A", "É".repeat(19));
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "Hello, World! Rust-lang 2024: it's FAST_and_Loose.",
+                &[
+                    "hello", "world", "rust", "lang", "2024", "it", "s", "fast", "and", "loose",
+                ],
+            ),
+            (
+                "全文検索エンジンを作る",
+                &[
+                    "全文", "文検", "検索", "索エ", "エン", "ンジ", "ジン", "ンを", "を作", "作る",
+                ],
+            ),
+            ("中文分词测试", &["中文", "文分", "分词", "词测", "测试"]),
+            (
+                "한국어 형태소 분석",
+                &["한국", "국어", "형태", "태소", "분석"],
+            ),
+            (
+                "私は昨日東京都庁を訪れました",
+                &[
+                    "私は", "は昨", "昨日", "日東", "東京", "京都", "都庁", "庁を", "を訪", "訪れ",
+                    "れま", "まし", "した",
+                ],
+            ),
+            (
+                "Rust製ツール v2 と 東京Tower",
+                &["rust", "製ツ", "ツー", "ール", "v2", "と", "東京", "tower"],
+            ),
+            (
+                "docs/Guides/Getting-Started_v2.md",
+                &["docs", "guides", "getting", "started", "v2", "md"],
+            ),
+            // RemoveLongFilter::limit(40) keeps a token only below 40 UTF-8
+            // bytes: 39 survives (lowercased), 40 is dropped.
+            (
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLM",
+                &["abcdefghijklmnopqrstuvwxyzabcdefghijklm"],
+            ),
+            ("abcdefghijklmnopqrstuvwxyzabcdefghijklmn", &[]),
+            // The limit counts bytes, not chars: 20 chars of 2 bytes is 40 and
+            // goes, 19 of them plus an ASCII letter is 39 and stays.
+            (&e20, &[]),
+            (&e19_a, &["éééééééééééééééééééa"]),
+        ];
+
+        for (text, expected) in cases {
+            let mut analyzer = analyzer();
+            let mut stream = analyzer.token_stream(text);
+            let mut tokens = Vec::new();
+            stream.process(&mut |t| tokens.push(t.text.clone()));
+            assert_eq!(&tokens, expected, "tokens for {text:?}");
+        }
+    }
 }
