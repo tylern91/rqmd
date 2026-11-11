@@ -82,10 +82,13 @@ ignore = [
     # CVE-2026-119375, CVSS 4.0 local): opening a database together with a
     # `-wal` file whose page size differs can return uninitialized memory.
     # This one IS reachable: rqmd opens `index.sqlite` in WAL mode
-    # (crates/rqmd-core/src/db.rs:25) with the bundled SQLite. It needs a
-    # crafted database plus WAL pair placed in an index directory the user
-    # then opens, so the exposure is local and needs the user to trust a
-    # file from someone else. Accepted until the bump, not dismissed.
+    # (crates/rqmd-core/src/db.rs:25) with the bundled SQLite. A repo can ship
+    # a crafted `.rqmd/index.sqlite` plus `-wal` pair, and any rqmd command run
+    # inside that clone opens it implicitly (`resolve_index_dir`,
+    # crates/rqmd-cli/src/store.rs:36-39), with no flag as there is for hooks.
+    # The leak is process memory returned by ordinary queries, and the attack
+    # is local, but it needs no step beyond running rqmd in a cloned repo.
+    # Accepted until the bump, not dismissed.
     # The patched libsqlite3-sys 0.39 comes with rusqlite 0.41, which is on
     # the hand-only bump list (it can change stored data).
     # lean: remove with the reviewed rusqlite 0.41 bump; rusqlite 0.41.0 and
