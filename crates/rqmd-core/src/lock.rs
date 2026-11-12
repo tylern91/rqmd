@@ -115,6 +115,9 @@ impl IndexLock {
             }
         }
         write_metadata(&dir)?;
+        // Holding the lock means no other writer can be mid-checkpoint, so
+        // every temp file of another pid is an orphan.
+        sweep_stale_temps(index_dir);
         Ok(Ok(Self {
             index_dir: index_dir.to_path_buf(),
             dir,
@@ -143,6 +146,57 @@ impl Drop for IndexLock {
         let _guard = Guard::lock(&self.index_dir).ok();
         let _ = fs::remove_dir_all(&self.dir);
     }
+}
+
+const TEMP_PREFIX: &str = ".hnsw.usearch.tmp-";
+
+/// Parses `.hnsw.usearch.tmp-<digits>` (the file `VectorIndex::save_atomic`
+/// writes next to the index) and returns its pid.
+fn temp_pid(name: &str) -> Option<u32> {
+    let digits = name.strip_prefix(TEMP_PREFIX)?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Regular files directly in `index_dir` named like an hnsw checkpoint temp
+/// file, as `(path, pid, bytes)`. Symlinks and directories are skipped.
+fn temp_files(index_dir: &Path) -> Vec<(PathBuf, u32, u64)> {
+    let Ok(rd) = fs::read_dir(index_dir) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .filter_map(|e| {
+            let pid = temp_pid(e.file_name().to_str()?)?;
+            // DirEntry::metadata does not follow symlinks.
+            let md = e.metadata().ok()?;
+            md.is_file().then(|| (e.path(), pid, md.len()))
+        })
+        .collect()
+}
+
+/// Count and total bytes of orphaned hnsw temp files in `index_dir`
+/// (every temp file not owned by this process).
+pub fn orphan_temp_stats(index_dir: &Path) -> (usize, u64) {
+    let me = std::process::id();
+    temp_files(index_dir)
+        .into_iter()
+        .filter(|(_, pid, _)| *pid != me)
+        .fold((0, 0), |(n, b), (_, _, len)| (n + 1, b + len))
+}
+
+/// Remove hnsw temp files left by crashed or killed writers. Call only while
+/// holding the [`IndexLock`] for `index_dir`: lock ownership, not pid
+/// liveness, is what proves a temp file is not being written. This process's
+/// own temp file is kept. Returns the number removed.
+pub fn sweep_stale_temps(index_dir: &Path) -> usize {
+    let me = std::process::id();
+    temp_files(index_dir)
+        .into_iter()
+        .filter(|(_, pid, _)| *pid != me)
+        .filter(|(path, _, _)| fs::remove_file(path).is_ok())
+        .count()
 }
 
 /// Inspect the lock for `index_dir` without modifying it.
@@ -347,6 +401,94 @@ mod tests {
     fn age_file(path: &Path, by: Duration) {
         let f = fs::File::open(path).unwrap();
         f.set_modified(SystemTime::now() - by).unwrap();
+    }
+
+    fn plant_temp(dir: &Path, pid: u32, bytes: usize) -> PathBuf {
+        let p = dir.join(format!("{TEMP_PREFIX}{pid}"));
+        fs::write(&p, vec![0u8; bytes]).unwrap();
+        p
+    }
+
+    #[test]
+    fn acquire_sweeps_dead_pid_temp_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dead = plant_temp(tmp.path(), 4_000_000, 10);
+        let _lock = IndexLock::acquire(tmp.path()).unwrap();
+        assert!(!dead.exists());
+    }
+
+    #[test]
+    fn acquire_sweeps_a_live_but_unrelated_pid_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // pid 1 is alive; liveness must not protect it, lock ownership does.
+        let live = plant_temp(tmp.path(), 1, 10);
+        let _lock = IndexLock::acquire(tmp.path()).unwrap();
+        assert!(!live.exists());
+    }
+
+    #[test]
+    fn acquire_keeps_this_process_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mine = plant_temp(tmp.path(), std::process::id(), 10);
+        let _lock = IndexLock::acquire(tmp.path()).unwrap();
+        assert!(mine.exists());
+    }
+
+    #[test]
+    fn sweep_touches_only_matching_regular_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        fs::create_dir(d.join("tantivy")).unwrap();
+        fs::write(d.join("tantivy").join(format!("{TEMP_PREFIX}99")), b"x").unwrap();
+        fs::write(d.join("index.sqlite-wal"), b"w").unwrap();
+        fs::write(d.join("model_cache.sqlite"), b"m").unwrap();
+        fs::write(d.join("hnsw.usearch"), b"h").unwrap();
+        fs::write(d.join(format!("{TEMP_PREFIX}abc")), b"x").unwrap();
+        fs::write(d.join(TEMP_PREFIX), b"x").unwrap();
+        fs::create_dir(d.join(format!("{TEMP_PREFIX}77"))).unwrap();
+        let target = d.join("target-file");
+        fs::write(&target, b"t").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, d.join(format!("{TEMP_PREFIX}88"))).unwrap();
+        let junk = plant_temp(d, 4_000_000, 10);
+
+        assert_eq!(sweep_stale_temps(d), 1);
+
+        assert!(!junk.exists());
+        assert!(d.join("tantivy").join(format!("{TEMP_PREFIX}99")).exists());
+        assert!(d.join("index.sqlite-wal").exists());
+        assert!(d.join("model_cache.sqlite").exists());
+        assert!(d.join("hnsw.usearch").exists());
+        assert!(d.join(format!("{TEMP_PREFIX}abc")).exists());
+        assert!(d.join(TEMP_PREFIX).exists());
+        assert!(d.join(format!("{TEMP_PREFIX}77")).is_dir());
+        assert!(target.exists());
+        #[cfg(unix)]
+        assert!(
+            d.join(format!("{TEMP_PREFIX}88"))
+                .symlink_metadata()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn no_sweep_when_the_lock_is_held_by_someone_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let held = IndexLock::acquire(tmp.path()).unwrap();
+        let orphan = plant_temp(tmp.path(), 4_000_000, 10);
+        let second = IndexLock::try_acquire(tmp.path()).unwrap();
+        assert!(second.is_err());
+        assert!(orphan.exists(), "swept without owning the lock");
+        drop(held);
+    }
+
+    #[test]
+    fn orphan_temp_stats_counts_files_and_bytes_excluding_own_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        plant_temp(tmp.path(), 4_000_000, 100);
+        plant_temp(tmp.path(), 4_000_001, 50);
+        plant_temp(tmp.path(), std::process::id(), 7);
+        assert_eq!(orphan_temp_stats(tmp.path()), (2, 150));
     }
 
     #[test]

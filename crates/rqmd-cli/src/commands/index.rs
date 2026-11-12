@@ -1467,6 +1467,14 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         "  HNSW file:     {}",
         index_dir.join("hnsw.usearch").display()
     );
+    let (orphans, orphan_bytes) = rqmd_core::lock::orphan_temp_stats(index_dir);
+    if orphans == 0 {
+        println!("  Orphan temps:  0");
+    } else {
+        println!(
+            "  Orphan temps:  {orphans} (.hnsw.usearch.tmp-*, {orphan_bytes} bytes), removed by the next `rqmd embed` or `rqmd update`"
+        );
+    }
     println!();
 
     // Check models cache — delegate to rqmd-llm so the path and repo IDs always
