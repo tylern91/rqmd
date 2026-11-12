@@ -17,8 +17,9 @@
   database (RUSTSEC-2026-0459, SQLite before 3.54.0 can return uninitialized memory for such a
   pair). A cloned repo can ship a crafted `.rqmd/index.sqlite` and `-wal`, and any command run
   inside it opens that index, so the check runs in `open_db` and in the read-only open of
-  `rqmd watch`, before SQLite sees the files. An honest index always agrees with its log, so
-  nothing changes for one. The error names the two page sizes and the `-wal` file to delete if the
+  `rqmd watch`, before SQLite sees the files. A symlinked `index.sqlite` is followed to its
+  target, where SQLite looks for the log. An honest index always agrees with its log, so nothing
+  changes for one. The error names the two page sizes and the `-wal` file to delete if the
   database is trusted. This closes the one advisory's trigger only: other crafted indexes still
   open, and the full fix is the rusqlite 0.41 bump.
 

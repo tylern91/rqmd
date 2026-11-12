@@ -199,3 +199,37 @@ fn ac_6_project_local_index_with_matching_wal_page_size_still_opens() {
         .assert()
         .success();
 }
+
+/// AC-7: SQLite resolves a symlinked `index.sqlite` and looks for the `-wal`
+/// beside the real file, and git can ship such a symlink, so the page-size
+/// check must follow it too or a crafted pair slips past AC-5.
+#[test]
+#[cfg(unix)]
+fn ac_7_symlinked_project_local_index_with_mismatched_wal_page_size_is_refused() {
+    let project_dir = TempDir::new().expect("tempdir");
+    let data_dir = project_dir.path().join("data");
+    let src = TempDir::new().expect("tempdir");
+    std::fs::write(src.path().join("doc.md"), "hello\n").expect("write fixture doc");
+    rqmd(&data_dir)
+        .args(["collection", "add"])
+        .arg(src.path())
+        .args(["--name", "c"])
+        .assert()
+        .success();
+
+    let real_db = data_dir.join("index.sqlite");
+    let wrong = db_page_size(&real_db) * 2;
+    std::fs::write(data_dir.join("index.sqlite-wal"), wal_header(wrong))
+        .expect("write crafted wal beside the real database");
+
+    let local = project_dir.path().join(".rqmd");
+    std::fs::create_dir_all(&local).expect("mkdir .rqmd");
+    std::os::unix::fs::symlink(&real_db, local.join("index.sqlite")).expect("symlink index");
+
+    rqmd_in_cwd(project_dir.path())
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(contains("write-ahead log"))
+        .stderr(contains("page size"));
+}

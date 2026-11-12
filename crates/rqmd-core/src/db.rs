@@ -35,6 +35,11 @@ const WAL_MAGICS: [u32; 2] = [0x377f_0682, 0x377f_0683];
 pub fn check_wal_matches_db(db_path: &Path) -> Result<()> {
     use std::io::Read;
 
+    // SQLite resolves symlinks and looks for the log beside the real file, so
+    // a symlinked `index.sqlite` must be checked at its target.
+    let resolved = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    let db_path = resolved.as_path();
+
     let mut wal_path = db_path.as_os_str().to_owned();
     wal_path.push("-wal");
     let wal_path = std::path::PathBuf::from(wal_path);
@@ -2518,6 +2523,18 @@ mod tests {
         std::fs::write(&db, db_with_page_size(4096)).unwrap();
         std::fs::write(dir.path().join("index.sqlite-wal"), vec![0u8; 64]).unwrap();
         assert!(check_wal_matches_db(&db).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn wal_guard_follows_a_symlinked_database_to_its_real_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.sqlite");
+        std::fs::write(&real, db_with_page_size(4096)).unwrap();
+        std::fs::write(dir.path().join("real.sqlite-wal"), wal_with(8192, 32)).unwrap();
+        let link = dir.path().join("index.sqlite");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(check_wal_matches_db(&link).is_err());
     }
 
     #[test]
