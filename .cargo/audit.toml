@@ -89,7 +89,11 @@ ignore = [
     # crates/rqmd-cli/src/store.rs:36-39), with no flag as there is for hooks.
     # The leak is process memory returned by ordinary queries, and the attack
     # is local, but it needs no step beyond running rqmd in a cloned repo.
-    # Accepted until the bump, not dismissed.
+    # Mitigated for the advisory's trigger only: `check_wal_matches_db`
+    # (crates/rqmd-core/src/db.rs, called from `open_db` and from the
+    # read-only open in crates/rqmd-cli/src/commands/watch.rs) refuses a
+    # `-wal` whose page size differs from the database's. Other crafted
+    # indexes still open. Accepted until the bump, not dismissed.
     # The patched libsqlite3-sys 0.39 comes with rusqlite 0.41, which is on
     # the hand-only bump list (it can change stored data).
     # lean: remove with the reviewed rusqlite 0.41 bump; rusqlite 0.41.0 and

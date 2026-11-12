@@ -126,3 +126,110 @@ fn ac_4_empty_docid_and_deactivated_document_are_not_served() {
         .assert()
         .failure();
 }
+
+/// A project-local `.rqmd/` index built with `collection add`, so it holds a
+/// real `index.sqlite`; the caller then drops a `-wal` file beside it.
+fn project_with_index() -> TempDir {
+    let project_dir = TempDir::new().expect("tempdir");
+    let src = TempDir::new().expect("tempdir");
+    std::fs::write(src.path().join("doc.md"), "hello\n").expect("write fixture doc");
+    rqmd(&project_dir.path().join(".rqmd"))
+        .args(["collection", "add"])
+        .arg(src.path())
+        .args(["--name", "c"])
+        .assert()
+        .success();
+    project_dir
+}
+
+/// The 32-byte header of a SQLite write-ahead log declaring `page_size`.
+fn wal_header(page_size: u32) -> Vec<u8> {
+    let mut h = Vec::with_capacity(32);
+    h.extend_from_slice(&0x377f_0682_u32.to_be_bytes());
+    h.extend_from_slice(&3_007_000_u32.to_be_bytes());
+    h.extend_from_slice(&page_size.to_be_bytes());
+    h.resize(32, 0);
+    h
+}
+
+/// The page size recorded in the database header (bytes 16-17, big-endian).
+fn db_page_size(db: &std::path::Path) -> u32 {
+    let head = std::fs::read(db).expect("read index.sqlite");
+    u32::from(u16::from_be_bytes([head[16], head[17]]))
+}
+
+/// AC-5: a cloned repo's `.rqmd/index.sqlite` is opened implicitly by any
+/// command run inside it. A `-wal` file whose page size differs from the
+/// database's is the RUSTSEC-2026-0459 trigger, so rqmd must refuse the pair
+/// instead of opening it.
+#[test]
+fn ac_5_project_local_index_with_mismatched_wal_page_size_is_refused() {
+    let project_dir = project_with_index();
+    let db = project_dir.path().join(".rqmd/index.sqlite");
+    let wrong = db_page_size(&db) * 2;
+    std::fs::write(
+        project_dir.path().join(".rqmd/index.sqlite-wal"),
+        wal_header(wrong),
+    )
+    .expect("write crafted wal");
+
+    rqmd_in_cwd(project_dir.path())
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(contains("write-ahead log"))
+        .stderr(contains("page size"));
+}
+
+/// AC-6: a `-wal` file that agrees with the database's page size is what an
+/// honest crashed or running rqmd leaves behind, so it must still open.
+#[test]
+fn ac_6_project_local_index_with_matching_wal_page_size_still_opens() {
+    let project_dir = project_with_index();
+    let db = project_dir.path().join(".rqmd/index.sqlite");
+    let same = db_page_size(&db);
+    std::fs::write(
+        project_dir.path().join(".rqmd/index.sqlite-wal"),
+        wal_header(same),
+    )
+    .expect("write matching wal");
+
+    rqmd_in_cwd(project_dir.path())
+        .arg("status")
+        .assert()
+        .success();
+}
+
+/// AC-7: SQLite resolves a symlinked `index.sqlite` and looks for the `-wal`
+/// beside the real file, and git can ship such a symlink, so the page-size
+/// check must follow it too or a crafted pair slips past AC-5.
+#[test]
+#[cfg(unix)]
+fn ac_7_symlinked_project_local_index_with_mismatched_wal_page_size_is_refused() {
+    let project_dir = TempDir::new().expect("tempdir");
+    let data_dir = project_dir.path().join("data");
+    let src = TempDir::new().expect("tempdir");
+    std::fs::write(src.path().join("doc.md"), "hello\n").expect("write fixture doc");
+    rqmd(&data_dir)
+        .args(["collection", "add"])
+        .arg(src.path())
+        .args(["--name", "c"])
+        .assert()
+        .success();
+
+    let real_db = data_dir.join("index.sqlite");
+    let wrong = db_page_size(&real_db) * 2;
+    std::fs::write(data_dir.join("index.sqlite-wal"), wal_header(wrong))
+        .expect("write crafted wal beside the real database");
+
+    let local = project_dir.path().join(".rqmd");
+    std::fs::create_dir_all(&local).expect("mkdir .rqmd");
+    std::os::unix::fs::symlink(&real_db, local.join("index.sqlite")).expect("symlink index");
+
+    rqmd_in_cwd(project_dir.path())
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(contains("write-ahead log"))
+        .stderr(contains("page size"));
+}

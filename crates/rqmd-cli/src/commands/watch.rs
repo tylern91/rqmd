@@ -195,6 +195,7 @@ impl Watcher<'_> {
     /// watching is picked up. A read-only connection: no lock, no schema work.
     fn current_collections(&self) -> Result<Vec<Collection>> {
         let path = self.index_dir.join("index.sqlite");
+        db::check_wal_matches_db(&path)?;
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("open {}", path.display()))?;
         conn.busy_timeout(Duration::from_secs(30))?;
