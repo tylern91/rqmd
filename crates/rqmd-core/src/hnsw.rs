@@ -133,6 +133,12 @@ impl VectorIndex {
             std::process::id()
         ));
 
+        // Unlink the temp file on every early exit (a failed save, fsync or
+        // rename); disarmed once the rename has moved it into place.
+        let mut cleanup = TempCleanup {
+            path: Some(tmp_path.clone()),
+        };
+
         self.save(&tmp_path)?;
 
         std::fs::File::open(&tmp_path)
@@ -141,6 +147,7 @@ impl VectorIndex {
 
         std::fs::rename(&tmp_path, path)
             .map_err(|e| anyhow!("rename {} -> {}: {e}", tmp_path.display(), path.display()))?;
+        cleanup.path = None;
 
         std::fs::File::open(parent)
             .and_then(|f| f.sync_all())
@@ -270,6 +277,19 @@ impl VectorIndex {
             bail!("no vector found for vid {vid}");
         }
         Ok(buf)
+    }
+}
+
+/// Removes `path` on drop unless disarmed by setting it to `None`.
+struct TempCleanup {
+    path: Option<std::path::PathBuf>,
+}
+
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        if let Some(p) = self.path.take() {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
 
@@ -408,6 +428,28 @@ mod tests {
         for (a, b) in fetched.iter().zip(embedding.iter()) {
             assert!((a - b).abs() < 1e-4, "expected {b}, got {a}");
         }
+    }
+
+    #[test]
+    fn save_atomic_removes_its_temp_file_when_the_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        // A non-empty directory at the target makes rename(2) fail after the
+        // temp file was fully written and fsynced.
+        let path = dir.path().join("hnsw.usearch");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("blocker"), b"x").unwrap();
+
+        let mut index = VectorIndex::new().unwrap();
+        let embedding: Vec<f32> = (0..EMBED_DIM).map(|i| i as f32 * 0.001).collect();
+        index.add(&embedding).unwrap();
+        assert!(index.save_atomic(&path).is_err());
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "leaked temp files: {leftovers:?}");
     }
 
     #[test]

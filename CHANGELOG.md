@@ -12,6 +12,15 @@
   the terminal emulator is named. The exit code, the resume hint and the second-signal behaviour
   are unchanged.
 
+### Fixed
+- An interrupted `rqmd embed` no longer leaks a multi-hundred-megabyte `.hnsw.usearch.tmp-<pid>` file
+  in the index directory. The checkpoint writer now deletes its temp file on any failed save, fsync
+  or rename, and every writer (`embed`, `update`, `watch`, `collection`) sweeps temp files that a
+  killed or crashed run left behind as soon as it takes the write lock. Only regular files directly
+  in the index directory that match `.hnsw.usearch.tmp-<digits>` are removed, never one owned by the
+  running process, and `tantivy/`, the SQLite files and symlinks are untouched. One hundred such
+  orphans had grown to 44 GB. `rqmd doctor` now reports the orphan count and size.
+
 ### Security
 - rqmd now refuses to open an index whose `-wal` file declares a different page size than the
   database (RUSTSEC-2026-0459, SQLite before 3.54.0 can return uninitialized memory for such a
