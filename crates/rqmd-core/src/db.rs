@@ -15,8 +15,80 @@ use crate::types::{Collection, Document};
 
 // ── Schema init ───────────────────────────────────────────────────────────────
 
+/// Length of the fixed SQLite database header, and of a write-ahead log header.
+const DB_HEADER_LEN: usize = 100;
+const WAL_HEADER_LEN: usize = 32;
+/// The two magic numbers a valid write-ahead log begins with (big-endian).
+const WAL_MAGICS: [u32; 2] = [0x377f_0682, 0x377f_0683];
+
+/// Refuse a database whose `-wal` file declares a different page size.
+///
+/// SQLite before 3.54.0 can return uninitialized memory when it opens a
+/// database next to a write-ahead log with another page size
+/// (RUSTSEC-2026-0459). A cloned repo can ship such a pair as `.rqmd/`, and
+/// any command run inside it opens that index, so the pair is checked before
+/// SQLite sees it. An honest index always agrees with its log, so this never
+/// refuses one. A log without a valid magic number is ignored by SQLite and
+/// passes here too.
+// lean: covers this one advisory only, remove with the rusqlite 0.41 bump
+// (libsqlite3-sys 0.39 bundles SQLite 3.54).
+pub fn check_wal_matches_db(db_path: &Path) -> Result<()> {
+    use std::io::Read;
+
+    let mut wal_path = db_path.as_os_str().to_owned();
+    wal_path.push("-wal");
+    let wal_path = std::path::PathBuf::from(wal_path);
+
+    let Ok(mut wal) = std::fs::File::open(&wal_path) else {
+        return Ok(());
+    };
+    let wal_len = wal.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut wal_head = [0u8; WAL_HEADER_LEN];
+    if wal.read_exact(&mut wal_head).is_err() {
+        return Ok(());
+    }
+    let be32 = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+    if !WAL_MAGICS.contains(&be32(&wal_head[0..4])) {
+        return Ok(());
+    }
+    let wal_page_size = be32(&wal_head[8..12]);
+
+    let mut db_head = [0u8; DB_HEADER_LEN];
+    let have_db_header = std::fs::File::open(db_path)
+        .and_then(|mut f| f.read_exact(&mut db_head))
+        .is_ok();
+    if !have_db_header {
+        // A fresh index has no log frames; a log with frames and no database
+        // to match is never one rqmd wrote.
+        if wal_len > WAL_HEADER_LEN as u64 {
+            anyhow::bail!(
+                "refusing to open {}: its write-ahead log {} has data but the database has no header",
+                db_path.display(),
+                wal_path.display()
+            );
+        }
+        return Ok(());
+    }
+    // Bytes 16-17 hold the page size; the value 1 stands for 65536.
+    let db_page_size = match u16::from_be_bytes([db_head[16], db_head[17]]) {
+        1 => 65_536,
+        n => u32::from(n),
+    };
+    if wal_page_size != db_page_size {
+        anyhow::bail!(
+            "refusing to open {}: its write-ahead log declares page size {wal_page_size} but the \
+             database page size is {db_page_size}; a mismatched pair can expose uninitialized \
+             memory (RUSTSEC-2026-0459). Delete {} only if you trust the database",
+            db_path.display(),
+            wal_path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Open (or create) the SQLite database and ensure schema is current.
 pub fn open_db(path: &Path) -> Result<Connection> {
+    check_wal_matches_db(path)?;
     let conn = Connection::open(path).context("open sqlite db")?;
     conn.execute_batch(
         // busy_timeout of 30s tolerates a long `rqmd embed` batch holding a write
@@ -2391,5 +2463,70 @@ mod tests {
             count_excluded_only_vectors(&conn, &HashSet::new()).unwrap(),
             0
         );
+    }
+
+    fn wal_with(page_size: u32, len: usize) -> Vec<u8> {
+        let mut w = Vec::new();
+        w.extend_from_slice(&0x377f_0682_u32.to_be_bytes());
+        w.extend_from_slice(&3_007_000_u32.to_be_bytes());
+        w.extend_from_slice(&page_size.to_be_bytes());
+        w.resize(len, 0);
+        w
+    }
+
+    fn db_with_page_size(field: u16) -> Vec<u8> {
+        let mut d = vec![0u8; DB_HEADER_LEN];
+        d[16..18].copy_from_slice(&field.to_be_bytes());
+        d
+    }
+
+    #[test]
+    fn wal_guard_passes_without_a_wal_and_with_a_matching_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        std::fs::write(&db, db_with_page_size(4096)).unwrap();
+        assert!(check_wal_matches_db(&db).is_ok());
+        std::fs::write(dir.path().join("index.sqlite-wal"), wal_with(4096, 32)).unwrap();
+        assert!(check_wal_matches_db(&db).is_ok());
+    }
+
+    #[test]
+    fn wal_guard_refuses_a_page_size_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        std::fs::write(&db, db_with_page_size(4096)).unwrap();
+        std::fs::write(dir.path().join("index.sqlite-wal"), wal_with(8192, 32)).unwrap();
+        let err = check_wal_matches_db(&db).unwrap_err().to_string();
+        assert!(err.contains("8192") && err.contains("4096"), "{err}");
+    }
+
+    #[test]
+    fn wal_guard_reads_header_value_one_as_65536() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        std::fs::write(&db, db_with_page_size(1)).unwrap();
+        std::fs::write(dir.path().join("index.sqlite-wal"), wal_with(65_536, 32)).unwrap();
+        assert!(check_wal_matches_db(&db).is_ok());
+        std::fs::write(dir.path().join("index.sqlite-wal"), wal_with(4096, 32)).unwrap();
+        assert!(check_wal_matches_db(&db).is_err());
+    }
+
+    #[test]
+    fn wal_guard_ignores_a_log_without_the_magic_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        std::fs::write(&db, db_with_page_size(4096)).unwrap();
+        std::fs::write(dir.path().join("index.sqlite-wal"), vec![0u8; 64]).unwrap();
+        assert!(check_wal_matches_db(&db).is_ok());
+    }
+
+    #[test]
+    fn wal_guard_refuses_a_log_with_data_and_no_database_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        std::fs::write(dir.path().join("index.sqlite-wal"), wal_with(4096, 64)).unwrap();
+        assert!(check_wal_matches_db(&db).is_err());
+        std::fs::write(dir.path().join("index.sqlite-wal"), wal_with(4096, 32)).unwrap();
+        assert!(check_wal_matches_db(&db).is_ok());
     }
 }
