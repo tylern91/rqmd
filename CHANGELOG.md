@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+- The interrupt message of `rqmd embed`, `update` and `watch` now names the process that sent the
+  signal: `rqmd: interrupted by SIGTERM from pid 4242 (zsh)`. A stray `kill` or `pkill` that stops
+  a long run can now be traced. The name is read while the sender is still alive
+  (`/proc/<pid>/comm` on Linux, `proc_name` on macOS); a sender that has already exited is shown by
+  pid alone. A signal the kernel raises itself, such as Ctrl-C at a Linux terminal, prints the
+  message as before; on macOS the kernel reports the process that wrote the key to the terminal, so
+  the terminal emulator is named. The exit code, the resume hint and the second-signal behaviour
+  are unchanged.
+
 ## [0.34.0] - 2026-11-08
 
 ### Added

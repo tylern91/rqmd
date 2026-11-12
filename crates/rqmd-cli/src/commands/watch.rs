@@ -101,7 +101,7 @@ impl Watcher<'_> {
     /// means a pass was due but deferred, so the next try should back off.
     fn tick(&mut self) -> Result<bool> {
         if let Some(signal) = signals::pending() {
-            return Err(Interrupted(signal).into());
+            return Err(Interrupted::caught(signal).into());
         }
         let cols = self.current_collections()?;
         self.seen
@@ -169,7 +169,7 @@ impl Watcher<'_> {
                 println!("{report}");
             }
             if let Some(signal) = outcome.interrupted {
-                return Err(Interrupted(signal).into());
+                return Err(Interrupted::caught(signal).into());
             }
             // A file stamped within the last moments is not trusted by the
             // stat-skip yet, so it is looked at again next tick.
@@ -260,7 +260,7 @@ fn sleep_until_signal(wait: Duration) -> Result<()> {
     let deadline = Instant::now() + wait;
     loop {
         if let Some(signal) = signals::pending() {
-            return Err(Interrupted(signal).into());
+            return Err(Interrupted::caught(signal).into());
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
