@@ -8,11 +8,16 @@
   a long run can now be traced. The name is read while the sender is still alive
   (`/proc/<pid>/comm` on Linux, `proc_name` on macOS); a sender that has already exited is shown by
   pid alone. A signal the kernel raises itself, such as Ctrl-C at a Linux terminal, prints the
-  message as before; on macOS the kernel reports the process that wrote the key to the terminal, so
-  the terminal emulator is named. The exit code, the resume hint and the second-signal behaviour
-  are unchanged.
+  message as before, and so does Ctrl-C at a macOS terminal (see Fixed). The exit code, the resume
+  hint and the second-signal behaviour are unchanged.
 
 ### Fixed
+- Ctrl-C at a macOS terminal now prints `rqmd: interrupted by SIGINT` without naming the terminal
+  emulator. macOS reports the process that wrote the key to the terminal as the sender; that
+  process owns the pty and has no controlling terminal itself, so a SIGINT whose sender has none
+  while rqmd has one is treated as the terminal's own. A `kill -INT` from a shell still names its
+  sender, as does every other signal. Limit: a `kill -INT` from a process with no controlling
+  terminal (a launchd job, for example) is not named either, because it looks the same as Ctrl-C.
 - An interrupted `rqmd embed` no longer leaks a multi-hundred-megabyte `.hnsw.usearch.tmp-<pid>` file
   in the index directory. The checkpoint writer now deletes its temp file on any failed save, fsync
   or rename, and every writer (`embed`, `update`, `watch`, `collection`) sweeps temp files that a

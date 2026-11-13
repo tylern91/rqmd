@@ -33,7 +33,8 @@ impl Interrupted {
     pub fn caught(signal: i32) -> Self {
         Self {
             signal,
-            sender: signals::sender(),
+            sender: signals::sender()
+                .filter(|&pid| !(signal == libc::SIGINT && sent_by_tty_driver(pid))),
         }
     }
 }
@@ -56,6 +57,42 @@ impl fmt::Display for Interrupted {
         }
         Ok(())
     }
+}
+
+/// Whether `pid` is the terminal emulator that turned a Ctrl-C into this
+/// SIGINT. macOS reports the process that wrote the key to the pty as the
+/// sender; it owns the pty master and has no controlling terminal itself,
+/// while a `kill` run from a shell has one. A sender that cannot be looked up
+/// (it already exited) is kept, so it is still named by pid.
+#[cfg(target_vendor = "apple")]
+fn sent_by_tty_driver(pid: i32) -> bool {
+    fn tty_device(pid: i32) -> Option<u32> {
+        // SAFETY: `info` is plain C data and is valid for the size passed;
+        // `proc_pidinfo` writes at most that many bytes and returns the number
+        // written, or 0 on failure.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                std::ptr::addr_of_mut!(info).cast(),
+                size,
+            )
+        };
+        (written == size).then_some(info.e_tdev)
+    }
+    let own = i32::try_from(std::process::id()).ok();
+    match (tty_device(pid), own.and_then(tty_device)) {
+        (Some(sender), Some(ours)) => sender == u32::MAX && ours != u32::MAX,
+        _ => false,
+    }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn sent_by_tty_driver(_pid: i32) -> bool {
+    false
 }
 
 /// The command name of `pid`, or `None` when it has exited or cannot be read.
@@ -159,6 +196,13 @@ mod tests {
         };
         assert_eq!(report(Err(no_index.into())), ExitCode::FAILURE);
         assert_eq!(report(Err(anyhow::anyhow!("boom"))), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn a_sender_that_cannot_be_looked_up_is_not_the_tty_driver() {
+        // i32::MAX exceeds every kernel's pid limit, so the lookup fails and
+        // the sender stays named.
+        assert!(!sent_by_tty_driver(i32::MAX));
     }
 
     #[test]
