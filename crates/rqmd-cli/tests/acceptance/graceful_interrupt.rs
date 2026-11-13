@@ -347,13 +347,10 @@ fn ac_6_a_live_sender_is_named_by_pid_and_command() {
     assert!(named, "sender {sender} not named in {line:?}");
 }
 
-/// A terminal key's signal never reports `pid 0`. The Linux kernel raises it
-/// itself, with no sending process, so the message is the old one; macOS
-/// reports the process that wrote the key to the pty, here this test. Ctrl-C
-/// written to a pty reaches the update as a terminal-generated SIGINT.
-#[test]
-fn ac_7_a_terminal_signal_never_reports_pid_0() {
-    let setup = setup();
+/// A pty pair with echo off: nothing reads the master, so the echo of `^C`
+/// would sit unread in the output queue and the child's exit would wait on it
+/// (it hangs on macOS).
+fn open_pty() -> (OwnedFd, std::fs::File) {
     let (mut master, mut slave) = (0, 0);
     // SAFETY: the out-pointers are valid; the null name, termios and winsize
     // ask for defaults. (Apple declares the last two `*mut`, glibc `*const`.)
@@ -370,8 +367,6 @@ fn ac_7_a_terminal_signal_never_reports_pid_0() {
     // SAFETY: `openpty` returned these two descriptors and nothing else owns them.
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
     let slave = std::fs::File::from(slave);
-    // Nothing reads the master, so the echo of `^C` would sit unread in the
-    // output queue and the child's exit would wait on it (it hangs on macOS).
     // SAFETY: `termios` is plain C data; `slave` is a valid terminal descriptor.
     unsafe {
         let mut attrs: libc::termios = std::mem::zeroed();
@@ -379,19 +374,85 @@ fn ac_7_a_terminal_signal_never_reports_pid_0() {
         attrs.c_lflag &= !(libc::ECHO | libc::ECHOCTL);
         assert_eq!(libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &attrs), 0);
     }
+    (master, slave)
+}
 
+/// A terminal key's signal never reports `pid 0`, and on macOS never names the
+/// terminal emulator either. The Linux kernel raises it itself, with no sending
+/// process. macOS reports the process that wrote the key to the pty, which for
+/// a real terminal emulator has no controlling terminal; here that is a
+/// `setsid` helper, so the result does not depend on whether the test runner
+/// has a terminal. Ctrl-C written to a pty reaches the update as a
+/// terminal-generated SIGINT.
+#[test]
+fn ac_7_a_terminal_ctrl_c_names_no_sender() {
+    let setup = setup();
+    let (master, slave) = open_pty();
+
+    let mut writer = None;
     let run = run_update(&setup, Stdio::from(slave), true, false, |_| {
-        // SAFETY: writes one byte from a valid buffer to the pty master this test owns.
-        let written = unsafe { libc::write(master.as_raw_fd(), b"\x03".as_ptr().cast(), 1) };
-        assert_eq!(written, 1, "could not type Ctrl-C");
+        let master_fd = master.as_raw_fd();
+        let mut command = Command::new("sh");
+        // The helper stays alive on its stdin, as a terminal emulator does, so
+        // rqmd can still look it up when it formats the message.
+        command
+            .args(["-c", "printf '\\003' >&3; read _"])
+            .stdin(Stdio::piped());
+        // SAFETY: only `dup2` and `setsid`, which are async-signal-safe, run
+        // between fork and exec; `master_fd` is open in the parent.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(master_fd, 3) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::setsid();
+                Ok(())
+            });
+        }
+        writer = Some(Reap(command.spawn().expect("spawn the key writer")));
     });
+    drop(writer);
     assert_eq!(run.code, Some(130), "stderr: {}", run.stderr);
     let line = interrupted_line(&run);
     assert!(!line.contains("from pid 0"), "{line:?}");
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", target_vendor = "apple")) {
         assert_eq!(line, "rqmd: interrupted by SIGINT");
-    } else if cfg!(target_vendor = "apple") {
-        let writer = format!("from pid {}", std::process::id());
-        assert!(line.contains(&writer), "{line:?} lacks {writer:?}");
     }
+}
+
+/// A `kill -INT` from a shell that has its own terminal is still named, on
+/// macOS and Linux: only the pty writer is dropped.
+#[test]
+fn ac_8_a_kill_int_from_a_shell_with_a_terminal_names_it() {
+    let setup = setup();
+    let (_master, shell_tty) = open_pty();
+    let marker = setup.index_dir.path().join("sender.done");
+
+    let mut sender = None;
+    let mut shell_tty = Some(shell_tty);
+    let run = run_update(&setup, Stdio::null(), false, false, |pid| {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "kill -INT \"$1\"; : > \"$2\"; read _", "sh"])
+            .arg(pid.to_string())
+            .arg(&marker)
+            .stdin(Stdio::from(shell_tty.take().expect("tty")));
+        // SAFETY: only `setsid` and `ioctl`, which are async-signal-safe, run
+        // between fork and exec; fd 0 is the pty slave given as stdin.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+                Ok(())
+            });
+        }
+        sender = Some(Reap(command.spawn().expect("spawn the shell")));
+    });
+    let sender = sender.expect("sender ran").0.id();
+    assert_eq!(run.code, Some(130), "stderr: {}", run.stderr);
+    let line = interrupted_line(&run);
+    let named = ["sh", "bash", "dash", "busybox"]
+        .iter()
+        .any(|shell| *line == *format!("rqmd: interrupted by SIGINT from pid {sender} ({shell})"));
+    assert!(named, "sender {sender} not named in {line:?}");
 }
