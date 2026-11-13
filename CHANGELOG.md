@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+### Added
+- YAML (`.yaml`, `.yml`), JSON (`.json`), Bash (`.sh`, `.bash`) and TOML (`.toml`) files are now
+  chunked at structural boundaries instead of as plain text, so `rqmd status` no longer lists them
+  after `Without:`. YAML and JSON chunk at top-level keys (YAML also at top-level list items), Bash
+  at function definitions, and TOML at tables and arrays of tables; a nested key, function or table
+  is not a boundary. Comments above a Bash function or the first TOML table stay with it. Each
+  language carries its own fingerprint marker, so only these files are re-embedded once, and a chunk
+  whose text is unchanged (every file of up to 3,600 bytes) reuses its stored vector. See
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#ast-chunking-source-code).
+- The interrupt message of `rqmd embed`, `update` and `watch` now names the process that sent the
+  signal: `rqmd: interrupted by SIGTERM from pid 4242 (zsh)`. A stray `kill` or `pkill` that stops
+  a long run can now be traced. The name is read while the sender is still alive
+  (`/proc/<pid>/comm` on Linux, `proc_name` on macOS); a sender that has already exited is shown by
+  pid alone. A signal the kernel raises itself, such as Ctrl-C at a Linux terminal, prints the
+  message as before, and so does Ctrl-C at a macOS terminal (see Fixed). The exit code, the resume
+  hint and the second-signal behaviour are unchanged.
+
+### Fixed
+- Ctrl-C at a macOS terminal now prints `rqmd: interrupted by SIGINT` without naming the terminal
+  emulator. macOS reports the process that wrote the key to the terminal as the sender; that
+  process owns the pty and has no controlling terminal itself, so a SIGINT whose sender has none
+  while rqmd has one is treated as the terminal's own. A `kill -INT` from a shell still names its
+  sender, as does every other signal. Limit: a `kill -INT` from a process with no controlling
+  terminal (a launchd job, for example) is not named either, because it looks the same as Ctrl-C.
+- An interrupted `rqmd embed` no longer leaks a multi-hundred-megabyte `.hnsw.usearch.tmp-<pid>` file
+  in the index directory. The checkpoint writer now deletes its temp file on any failed save, fsync
+  or rename, and every writer (`embed`, `update`, `watch`, `collection`) sweeps temp files that a
+  killed or crashed run left behind as soon as it takes the write lock. Only regular files directly
+  in the index directory that match `.hnsw.usearch.tmp-<digits>` are removed, never one owned by the
+  running process, and `tantivy/`, the SQLite files and symlinks are untouched. One hundred such
+  orphans had grown to 44 GB. `rqmd doctor` now reports the orphan count and size.
+
+### Security
+- rqmd now refuses to open an index whose `-wal` file declares a different page size than the
+  database (RUSTSEC-2026-0459, SQLite before 3.54.0 can return uninitialized memory for such a
+  pair). A cloned repo can ship a crafted `.rqmd/index.sqlite` and `-wal`, and any command run
+  inside it opens that index, so the check runs in `open_db` and in the read-only open of
+  `rqmd watch`, before SQLite sees the files. A symlinked `index.sqlite` is followed to its
+  target, where SQLite looks for the log. An honest index always agrees with its log, so nothing
+  changes for one. The error names the two page sizes and the `-wal` file to delete if the
+  database is trusted. This closes the one advisory's trigger only: other crafted indexes still
+  open, and the full fix is the rusqlite 0.41 bump.
+
 ### Changed
 - **Breaking for a project-local index over notes outside the project.** `rqmd update`, `rqmd watch`
   and the MCP `refresh: true` pass now skip a collection of a project-local `.rqmd/` index whose

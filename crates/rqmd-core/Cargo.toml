@@ -29,6 +29,10 @@ ast-chunking = [
     "ast-swift",
     "ast-hcl",
     "ast-sql",
+    "ast-yaml",
+    "ast-json",
+    "ast-bash",
+    "ast-toml",
 ]
 # The parser runtime and registry every language feature builds on.
 ast-registry = ["dep:tree-sitter"]
@@ -43,6 +47,10 @@ ast-kotlin = ["ast-registry", "dep:tree-sitter-kotlin-ng"]
 ast-swift = ["ast-registry", "dep:tree-sitter-swift"]
 ast-hcl = ["ast-registry", "dep:tree-sitter-hcl"]
 ast-sql = ["ast-registry", "dep:tree-sitter-sequel"]
+ast-yaml = ["ast-registry", "dep:tree-sitter-yaml"]
+ast-json = ["ast-registry", "dep:tree-sitter-json"]
+ast-bash = ["ast-registry", "dep:tree-sitter-bash"]
+ast-toml = ["ast-registry", "dep:tree-sitter-toml-ng"]
 
 [dependencies]
 anyhow = "1"
@@ -71,6 +79,10 @@ tree-sitter-kotlin-ng = { version = "1.1", optional = true }
 tree-sitter-swift = { version = "=0.7.3", optional = true }
 tree-sitter-hcl = { version = "1.1", optional = true }
 tree-sitter-sequel = { version = "0.3", optional = true }
+tree-sitter-yaml = { version = "0.7", optional = true }
+tree-sitter-json = { version = "0.24", optional = true }
+tree-sitter-bash = { version = "0.25", optional = true }
+tree-sitter-toml-ng = { version = "0.7", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

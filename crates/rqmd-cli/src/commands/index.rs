@@ -551,7 +551,7 @@ fn finish_embed(run: &EmbedRun, flow: &EmbedFlow) -> Result<()> {
         }
         EmbedFlow::Interrupted(signal) => {
             eprintln!("{EMBED_RESUME_HINT}");
-            Err(Interrupted(*signal).into())
+            Err(Interrupted::caught(*signal).into())
         }
         EmbedFlow::Continue if run.failures.is_empty() => Ok(()),
         EmbedFlow::Continue => Err(PartialFailure(format!(
@@ -1087,7 +1087,7 @@ fn run_update_with(
 /// was indexed so far is already saved, and a rerun skips it by stat.
 fn stopped_by_signal(signal: i32) -> anyhow::Error {
     eprintln!("Progress was saved; rerun `rqmd update` to continue.");
-    Interrupted(signal).into()
+    Interrupted::caught(signal).into()
 }
 
 /// What `update_one_collection` reports back to `run_update`.
@@ -1505,6 +1505,14 @@ pub fn run_doctor(index_dir: &Path, project_root: Option<&Path>) -> Result<()> {
         "  HNSW file:     {}",
         index_dir.join("hnsw.usearch").display()
     );
+    let (orphans, orphan_bytes) = rqmd_core::lock::orphan_temp_stats(index_dir);
+    if orphans == 0 {
+        println!("  Orphan temps:  0");
+    } else {
+        println!(
+            "  Orphan temps:  {orphans} (.hnsw.usearch.tmp-*, {orphan_bytes} bytes), removed by the next `rqmd embed` or `rqmd update`"
+        );
+    }
     println!();
 
     // Check models cache — delegate to rqmd-llm so the path and repo IDs always
@@ -2310,7 +2318,10 @@ mod tests {
             assert!(!db::hash_has_any_vector(&s.db, &docs[2].hash));
 
             let end = finish_embed(&run, &flow).unwrap_err();
-            assert_eq!(end.downcast_ref::<Interrupted>().map(|i| i.0), Some(signal));
+            assert_eq!(
+                end.downcast_ref::<Interrupted>().map(|i| i.signal),
+                Some(signal)
+            );
         }
     }
 

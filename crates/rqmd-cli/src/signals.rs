@@ -1,6 +1,7 @@
 //! Catch SIGINT, SIGTERM and SIGHUP so a command can stop at a safe point
-//! instead of being killed mid-write. The handler only records the signal;
-//! callers poll [`pending`] between units of work.
+//! instead of being killed mid-write. The handler only records the signal and
+//! the process that sent it; callers poll [`pending`] between units of work and
+//! read [`sender`] for the message.
 
 #[cfg(unix)]
 mod imp {
@@ -14,6 +15,10 @@ mod imp {
 
     /// The last signal received, or 0. Set by the handler.
     static RECEIVED: AtomicI32 = AtomicI32::new(0);
+    /// The pid that sent [`RECEIVED`], or 0 when the kernel raised it (a terminal
+    /// key) or the platform does not report one. Reset only when the outermost
+    /// [`Catch`] is installed, so it can still be read after the guard drops.
+    static SENDER: AtomicI32 = AtomicI32::new(0);
     /// How many signals the handler has seen since the outermost [`Catch`] was installed.
     static COUNT: AtomicU32 = AtomicU32::new(0);
     /// When set, the handler ends the process on the second signal.
@@ -25,7 +30,46 @@ mod imp {
         static HELD: Cell<bool> = const { Cell::new(false) };
     }
 
-    extern "C" fn on_signal(signal: libc::c_int) {
+    /// The pid in the `siginfo_t` of a signal sent with `kill(2)`, 0 when it carries none.
+    ///
+    /// # Safety
+    /// `info` must be null or the pointer `sigaction` hands an `SA_SIGINFO` handler.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd",
+    ))]
+    unsafe fn sender_pid(info: *const libc::siginfo_t) -> libc::pid_t {
+        // SAFETY: the caller's contract; `si_pid` only reads a plain integer field.
+        unsafe { info.as_ref() }.map_or(0, |info| unsafe { info.si_pid() })
+    }
+
+    /// No `si_pid` accessor on this platform: no sender is reported.
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd",
+    )))]
+    unsafe fn sender_pid(_info: *const libc::siginfo_t) -> libc::pid_t {
+        0
+    }
+
+    extern "C" fn on_signal(
+        signal: libc::c_int,
+        info: *mut libc::siginfo_t,
+        _context: *mut libc::c_void,
+    ) {
+        // SAFETY: `SA_SIGINFO` handlers receive that pointer. Stored before
+        // `RECEIVED` so a reader that sees the signal also sees its sender.
+        SENDER.store(unsafe { sender_pid(info) }, Ordering::SeqCst);
         RECEIVED.store(signal, Ordering::SeqCst);
         let earlier = COUNT.fetch_add(1, Ordering::SeqCst);
         if earlier > 0 && EXIT_ON_REPEAT.load(Ordering::SeqCst) {
@@ -44,6 +88,7 @@ mod imp {
         fn install() -> Self {
             let owner = OWNER.lock().unwrap_or_else(|e| e.into_inner());
             RECEIVED.store(0, Ordering::SeqCst);
+            SENDER.store(0, Ordering::SeqCst);
             COUNT.store(0, Ordering::SeqCst);
             let mut previous = Vec::new();
             for signal in CAUGHT {
@@ -59,14 +104,16 @@ mod imp {
                 }
                 // SAFETY: as above.
                 let mut new: libc::sigaction = unsafe { std::mem::zeroed() };
-                new.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                new.sa_sigaction = on_signal
+                    as extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void)
+                    as libc::sighandler_t;
                 // A signal that lands during a read or write resumes it instead of
-                // failing it with EINTR.
-                new.sa_flags = libc::SA_RESTART;
+                // failing it with EINTR. `SA_SIGINFO` passes the sender along.
+                new.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
                 // SAFETY: `new.sa_mask` is a valid sigset to initialise.
                 unsafe { libc::sigemptyset(&mut new.sa_mask) };
-                // SAFETY: the handler only touches atomics and calls `_exit`, both
-                // async-signal-safe.
+                // SAFETY: the handler only reads the `siginfo_t`, touches atomics and
+                // calls `_exit`, all async-signal-safe.
                 if unsafe { libc::sigaction(signal, &new, std::ptr::null_mut()) } == 0 {
                     previous.push((signal, old));
                 }
@@ -145,9 +192,50 @@ mod imp {
         }
     }
 
+    /// The pid that sent the last signal received, when the kernel reported one:
+    /// `None` for a signal it raised itself (Ctrl-C at the terminal) or on a
+    /// platform without the information. Still readable after the guard drops,
+    /// until the next outermost guard is installed.
+    pub fn sender() -> Option<i32> {
+        match SENDER.load(Ordering::SeqCst) {
+            pid if pid > 0 => Some(pid),
+            _ => None,
+        }
+    }
+
     /// How many signals have been received since the outermost guard was installed.
     pub fn count() -> u32 {
         COUNT.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_sender_of_0_is_no_sender_and_installing_clears_the_last_one() {
+            let guard = Catch::install();
+            SENDER.store(0, Ordering::SeqCst);
+            assert_eq!(sender(), None, "pid 0 means the kernel raised the signal");
+            SENDER.store(4242, Ordering::SeqCst);
+            assert_eq!(sender(), Some(4242));
+            // Dropping the guard keeps it, so a caller can read it afterwards.
+            drop(guard);
+            assert_eq!(sender(), Some(4242));
+            drop(Catch::install());
+            assert_eq!(sender(), None);
+        }
+
+        #[test]
+        fn the_handler_records_the_pid_that_sent_the_signal() {
+            let _guard = Catch::install();
+            // SAFETY: plain call; SIGHUP is caught by the guard above. `raise` aims
+            // the signal at this thread, so the handler has run when it returns.
+            assert_eq!(unsafe { libc::raise(libc::SIGHUP) }, 0);
+            assert_eq!(pending(), Some(libc::SIGHUP));
+            let own = i32::try_from(std::process::id()).unwrap();
+            assert_eq!(sender(), Some(own));
+        }
     }
 }
 
@@ -169,9 +257,13 @@ mod imp {
         None
     }
 
+    pub fn sender() -> Option<i32> {
+        None
+    }
+
     pub fn count() -> u32 {
         0
     }
 }
 
-pub use imp::{Catch, count, pending};
+pub use imp::{Catch, count, pending, sender};

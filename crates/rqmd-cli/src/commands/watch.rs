@@ -101,7 +101,7 @@ impl Watcher<'_> {
     /// means a pass was due but deferred, so the next try should back off.
     fn tick(&mut self) -> Result<bool> {
         if let Some(signal) = signals::pending() {
-            return Err(Interrupted(signal).into());
+            return Err(Interrupted::caught(signal).into());
         }
         let cols = self.current_collections()?;
         self.seen
@@ -168,7 +168,7 @@ impl Watcher<'_> {
                 println!("{report}");
             }
             if let Some(signal) = outcome.interrupted {
-                return Err(Interrupted(signal).into());
+                return Err(Interrupted::caught(signal).into());
             }
             // A file stamped within the last moments is not trusted by the
             // stat-skip yet, so it is looked at again next tick.
@@ -194,6 +194,7 @@ impl Watcher<'_> {
     /// watching is picked up. A read-only connection: no lock, no schema work.
     fn current_collections(&self) -> Result<Vec<Collection>> {
         let path = self.index_dir.join("index.sqlite");
+        db::check_wal_matches_db(&path)?;
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("open {}", path.display()))?;
         conn.busy_timeout(Duration::from_secs(30))?;
@@ -259,7 +260,7 @@ fn sleep_until_signal(wait: Duration) -> Result<()> {
     let deadline = Instant::now() + wait;
     loop {
         if let Some(signal) = signals::pending() {
-            return Err(Interrupted(signal).into());
+            return Err(Interrupted::caught(signal).into());
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {

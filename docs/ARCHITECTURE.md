@@ -159,10 +159,17 @@ language rather than exhaustive:
 | Kotlin, Swift | `.kt`, `.kts`, `.swift` |
 | HCL (Terraform) | `.tf`, `.tfvars`, `.hcl` (top-level blocks only; a nested block is not a boundary) |
 | SQL | `.sql` (one boundary per statement) |
+| YAML | `.yaml`, `.yml` (top-level keys and list items only; a nested key is not a boundary) |
+| JSON | `.json` (top-level keys only; a nested key is not a boundary) |
+| Bash | `.sh`, `.bash` (function definitions only; a nested function is not a boundary) |
+| TOML | `.toml` (tables and arrays of tables; keys above the first table form the first chunk) |
 
-For Go, Rust, C#, Kotlin, Swift, HCL and SQL, the comments (and, in Rust, the
-attributes) on the lines directly above a declaration travel with it, so a
-chunk does not end on the doc comment of the next declaration. Extensions are
+For Go, Rust, C#, Kotlin, Swift, HCL, SQL, Bash and TOML, the comments (and, in
+Rust, the attributes) on the lines directly above a declaration travel with
+it, so a chunk does not end on the doc comment of the next declaration. In
+YAML a comment between two keys parses inside the previous key, and in TOML a
+comment between two tables parses inside the table above it, so only a comment
+above the first TOML table travels forward. Extensions are
 matched exactly as written, so `.SQL` is not chunked as SQL. Parsing is capped
 at 5 seconds to guard against pathological input; the chunker falls back to the character-offset chunker above whenever
 the extension isn't recognized, parsing fails, or the parse yields no
