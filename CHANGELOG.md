@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- YAML (`.yaml`, `.yml`), JSON (`.json`), Bash (`.sh`, `.bash`) and TOML (`.toml`) files are now
+  chunked at structural boundaries instead of as plain text, so `rqmd status` no longer lists them
+  after `Without:`. YAML and JSON chunk at top-level keys (YAML also at top-level list items), Bash
+  at function definitions, and TOML at tables and arrays of tables; a nested key, function or table
+  is not a boundary. Comments above a Bash function or the first TOML table stay with it. Each
+  language carries its own fingerprint marker, so only these files are re-embedded once, and a chunk
+  whose text is unchanged (every file of up to 3,600 bytes) reuses its stored vector. See
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#ast-chunking-source-code).
 - The interrupt message of `rqmd embed`, `update` and `watch` now names the process that sent the
   signal: `rqmd: interrupted by SIGTERM from pid 4242 (zsh)`. A stray `kill` or `pkill` that stops
   a long run can now be traced. The name is read while the sender is still alive

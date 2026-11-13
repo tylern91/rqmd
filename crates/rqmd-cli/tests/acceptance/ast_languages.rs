@@ -54,7 +54,7 @@ fn ac_1_status_lists_every_grammar_extension() {
         .collect();
     for ext in [
         "ts", "tsx", "js", "jsx", "mjs", "cjs", "java", "py", "go", "rs", "cs", "kt", "kts",
-        "swift", "tf", "tfvars", "hcl", "sql",
+        "swift", "tf", "tfvars", "hcl", "sql", "yaml", "yml", "json", "sh", "bash", "toml",
     ] {
         assert!(listed.contains(&ext), "{ext} missing from {listed:?}");
     }
@@ -92,11 +92,12 @@ fn ac_3_status_has_no_missing_grammar_line_when_every_file_is_covered() {
             ("a.go", "package main\n"),
             ("b.md", "# note\n"),
             ("c.tf", "x = 1\n"),
+            ("d.yaml", "a: 1\n"),
         ],
     );
 
     let out = status(index_dir.path())
-        .stdout(contains("Total:    3 files indexed"))
+        .stdout(contains("Total:    4 files indexed"))
         .stdout(contains("Grammars:"))
         .stdout(contains("Without:").not())
         .get_output()

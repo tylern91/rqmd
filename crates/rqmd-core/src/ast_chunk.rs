@@ -167,6 +167,46 @@ static REGISTRY: &[Language] = &[
         outermost_only: true,
         marker: "ast_chunking:1\nast_language:sql:1",
     },
+    #[cfg(feature = "ast-yaml")]
+    Language {
+        extensions: &["yaml", "yml"],
+        grammar: || tree_sitter_yaml::LANGUAGE.into(),
+        kinds: YAML_KINDS,
+        // A comment between two keys parses inside the previous pair, so it
+        // cannot travel with the key below it.
+        leading: &[],
+        outermost_only: true,
+        marker: "ast_chunking:1\nast_language:yaml:1",
+    },
+    #[cfg(feature = "ast-json")]
+    Language {
+        extensions: &["json"],
+        grammar: || tree_sitter_json::LANGUAGE.into(),
+        kinds: JSON_KINDS,
+        leading: &[],
+        outermost_only: true,
+        marker: "ast_chunking:1\nast_language:json:1",
+    },
+    #[cfg(feature = "ast-bash")]
+    Language {
+        extensions: &["sh", "bash"],
+        grammar: || tree_sitter_bash::LANGUAGE.into(),
+        kinds: BASH_KINDS,
+        leading: &["comment"],
+        outermost_only: true,
+        marker: "ast_chunking:1\nast_language:bash:1",
+    },
+    #[cfg(feature = "ast-toml")]
+    Language {
+        extensions: &["toml"],
+        grammar: || tree_sitter_toml_ng::LANGUAGE.into(),
+        kinds: TOML_KINDS,
+        // Only a comment above the first table is a sibling; one between
+        // tables parses inside the table above it.
+        leading: &["comment"],
+        outermost_only: true,
+        marker: "ast_chunking:1\nast_language:toml:1",
+    },
 ];
 
 fn language_for(ext: &str) -> Option<&'static Language> {
@@ -267,6 +307,14 @@ static SWIFT_KINDS: &[&str] = &[
 static HCL_KINDS: &[&str] = &["block"];
 #[cfg(feature = "ast-sql")]
 static SQL_KINDS: &[&str] = &["statement"];
+#[cfg(feature = "ast-yaml")]
+static YAML_KINDS: &[&str] = &["block_mapping_pair", "block_sequence_item"];
+#[cfg(feature = "ast-json")]
+static JSON_KINDS: &[&str] = &["pair"];
+#[cfg(feature = "ast-bash")]
+static BASH_KINDS: &[&str] = &["function_definition"];
+#[cfg(feature = "ast-toml")]
+static TOML_KINDS: &[&str] = &["table", "table_array_element"];
 
 /// Cap on tree-sitter parse time, guarding against pathological input hanging
 /// the parser indefinitely (tree-sitter has no built-in limit otherwise).
@@ -403,6 +451,25 @@ mod tests {
         assert!(chunk_source("x = 1\ny = 2\n", "py").is_none());
     }
 
+    /// Start offsets of every chunk boundary the grammar finds in `text`.
+    #[cfg(any(
+        feature = "ast-yaml",
+        feature = "ast-json",
+        feature = "ast-bash",
+        feature = "ast-toml"
+    ))]
+    fn boundaries(text: &str, ext: &str) -> Vec<usize> {
+        let language = language_for(ext).expect("a grammar for the extension");
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&(language.grammar)()).expect("abi");
+        let tree = parser.parse(text, None).expect("parse");
+        let mut out = Vec::new();
+        collect_boundaries(tree.root_node(), language, &mut out);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// Chunks `first + second_head + body + tail` and asserts the first chunk
     /// ends exactly where `second_head` begins. `first` is sized so that
     /// offset falls inside the search window around the 3,600-byte target but
@@ -414,7 +481,11 @@ mod tests {
         feature = "ast-csharp",
         feature = "ast-kotlin",
         feature = "ast-swift",
-        feature = "ast-hcl"
+        feature = "ast-hcl",
+        feature = "ast-yaml",
+        feature = "ast-json",
+        feature = "ast-bash",
+        feature = "ast-toml"
     ))]
     fn assert_splits_before(ext: &str, head: &str, line: &str, tail: &str, second_head: &str) {
         let mut first = head.to_string();
@@ -568,6 +639,60 @@ mod tests {
         assert_eq!(chunks[0].text.len(), table.len());
     }
 
+    #[cfg(feature = "ast-yaml")]
+    #[test]
+    fn yaml_chunks_at_top_level_keys_and_list_items() {
+        for ext in ["yaml", "yml"] {
+            assert_splits_before(ext, "alpha:\n", "  key: value\n", "", "beta:\n");
+        }
+        let keys = "alpha: 1\nbeta:\n  nested: 2\ngamma: 3\n";
+        assert_eq!(boundaries(keys, "yaml"), vec![0, 9, 27]);
+        let list = "- a: 1\n- b: 2\n";
+        assert_eq!(boundaries(list, "yaml"), vec![0, 7]);
+    }
+
+    #[cfg(feature = "ast-json")]
+    #[test]
+    fn json_chunks_at_top_level_keys() {
+        assert_splits_before(
+            "json",
+            "{\"alpha\": {\n",
+            "  \"k\": 1,\n",
+            "  \"z\": 0},\n",
+            "\"beta\": {\n",
+        );
+        let text = "{\"a\": {\"x\": 1}, \"b\": [1, 2]}";
+        assert_eq!(boundaries(text, "json"), vec![1, 16]);
+    }
+
+    #[cfg(feature = "ast-bash")]
+    #[test]
+    fn bash_chunks_at_functions_and_keeps_comments_with_them() {
+        for ext in ["sh", "bash"] {
+            assert_splits_before(
+                ext,
+                "alpha() {\n",
+                "  echo hi\n",
+                "}\n\n",
+                "# Docs for beta.\nbeta() {\n",
+            );
+        }
+        let text =
+            "x=1\n# helper\nfoo() {\n  inner() { :; }\n  echo hi\n}\nfunction bar { echo; }\n";
+        // The comment above `foo` starts its chunk, the nested function is not
+        // a boundary, and `bar` is.
+        let bar = text.find("function bar").unwrap();
+        assert_eq!(boundaries(text, "sh"), vec![4, bar]);
+    }
+
+    #[cfg(feature = "ast-toml")]
+    #[test]
+    fn toml_chunks_at_tables_and_keeps_comments_with_them() {
+        let text = "name = \"x\"\n# deps\n[dependencies]\na = 1\n[[bin]]\nname = \"y\"\n";
+        assert_eq!(boundaries(text, "toml"), vec![11, 39]);
+        assert_splits_before("toml", "[alpha]\n", "key = 1\n", "\n", "[beta]\n");
+    }
+
     #[test]
     fn languages_that_predate_the_registry_share_one_marker() {
         for ext in ["ts", "tsx", "js", "jsx", "mjs", "cjs", "java", "py"] {
@@ -606,6 +731,10 @@ mod tests {
             ("tf", "tfvars"),
             ("tf", "hcl"),
             ("sql", "sql"),
+            ("yaml", "yml"),
+            ("json", "json"),
+            ("sh", "bash"),
+            ("toml", "toml"),
         ];
         for (a, b) in added {
             if let (Some(ma), Some(mb)) = (fingerprint_marker(a), fingerprint_marker(b)) {
