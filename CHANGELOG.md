@@ -40,6 +40,11 @@
   existing index opens as before and is not rebuilt. The bump moves zstd to 0.14 and lru to 0.18,
   which carry the fixes for the zstd-safe advisories, so the ignore entries for RUSTSEC-2026-0391,
   0395 to 0406 and 0410 are gone from `.cargo/audit.toml`.
+- SQLite is now rusqlite 0.41.0 with libsqlite3-sys 0.39.1, which bundles SQLite 3.54.1 (was
+  rusqlite 0.40.2 and SQLite 3.53.2). This carries the fix for RUSTSEC-2026-0459, so its ignore
+  entry is gone from `.cargo/audit.toml` and `cargo audit` still exits 0. The `-wal` page-size
+  check in `open_db` stays as defence in depth. Search output on a copy of a real index is
+  byte-identical to rqmd 0.34.0, and the index format is unchanged.
 
 ### Security
 - rqmd now refuses to open an index whose `-wal` file declares a different page size than the
