@@ -23,15 +23,14 @@ const WAL_MAGICS: [u32; 2] = [0x377f_0682, 0x377f_0683];
 
 /// Refuse a database whose `-wal` file declares a different page size.
 ///
-/// SQLite before 3.54.0 can return uninitialized memory when it opens a
-/// database next to a write-ahead log with another page size
-/// (RUSTSEC-2026-0459). A cloned repo can ship such a pair as `.rqmd/`, and
-/// any command run inside it opens that index, so the pair is checked before
-/// SQLite sees it. An honest index always agrees with its log, so this never
-/// refuses one. A log without a valid magic number is ignored by SQLite and
-/// passes here too.
-// lean: covers this one advisory only, remove with the rusqlite 0.41 bump
-// (libsqlite3-sys 0.39 bundles SQLite 3.54).
+/// Kept as defence in depth. SQLite before 3.54.0 can return uninitialized
+/// memory when it opens a database next to a write-ahead log with another
+/// page size (RUSTSEC-2026-0459, CVE-2026-119375). The bundled SQLite is now
+/// 3.54.1, which carries the fix, but a cloned repo can still ship a crafted
+/// `.rqmd/` pair and any command run inside it opens that index, so the pair
+/// is checked before SQLite sees it. An honest index always agrees with its
+/// log, so this never refuses one. A log without a valid magic number is
+/// ignored by SQLite and passes here too.
 pub fn check_wal_matches_db(db_path: &Path) -> Result<()> {
     use std::io::Read;
 
