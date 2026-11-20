@@ -11,6 +11,8 @@ accepted = [
     "Unicode-3.0",
     "Zlib",
     "MPL-2.0",
+    "ISC",
+    "BSD-2-Clause",
 ]
 
 # The two release targets (publish-assets.yml).
