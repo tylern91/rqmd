@@ -48,6 +48,11 @@
   existing index opens as before and is not rebuilt. The bump moves zstd to 0.14 and lru to 0.18,
   which carry the fixes for the zstd-safe advisories, so the ignore entries for RUSTSEC-2026-0391,
   0395 to 0406 and 0410 are gone from `.cargo/audit.toml`.
+- The MCP server now uses rmcp 3.9.0 (was 3.6.0). rqmd-mcp's rmcp feature list is unchanged (`server`,
+  `macros`, `schemars`, `transport-io`, `transport-streamable-http-server`), so no OAuth or HTTP
+  client code is compiled in, and no change to the MCP tools or transports is needed. The patched
+  release carries the fixes for RUSTSEC-2026-0457 and RUSTSEC-2026-0462, so both ignore entries are
+  gone from `.cargo/audit.toml`.
 
 ### Security
 - rqmd now refuses to open an index whose `-wal` file declares a different page size than the
