@@ -14,6 +14,7 @@
 | Index location | `~/.cache/qmd/` | `~/.cache/rqmd/` (Linux) / `~/Library/Caches/rqmd/` (macOS) |
 | File exclusion | `.gitignore` aware | Built-in exclusions + per-collection `ignore` list |
 | Update hooks | n/a | A project-local `.rqmd/` index only runs its `update_command` hook with `rqmd update --run-hooks` — an explicit `--index-dir`/global index runs it automatically. See [SECURITY.md](../SECURITY.md#update-hook-trust). |
+| Collections outside the project | n/a | On a project-local `.rqmd/` index, `rqmd update`, `rqmd watch` and the MCP `refresh: true` pass skip a collection whose directory resolves outside the project directory (the directory that holds `.rqmd/`) and warn once; nothing is read or pruned. To index it anyway pass `--allow-external-paths` to `rqmd update`, `rqmd watch` or `rqmd mcp`, or keep that collection in an explicit `--index-dir` or the global index, which are not checked. `--allow-refresh` does not imply the flag. See [SECURITY.md](../SECURITY.md#collections-outside-the-project). |
 | MCP result limit | n/a | `search`/`query` clamp a client-supplied `limit` to 1000 rather than trusting it unbounded. |
 
 Search quality is equivalent — the RRF formula, BM25 field weights, chunk size (900 tokens / 15% overlap), and docid scheme are all ported verbatim from qmd.

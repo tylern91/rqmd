@@ -18,7 +18,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use rqmd_core::{Collection, IndexLock, db};
 
-use super::index::{ExternalWarnings, UpdateRun, update_one_collection};
+use super::index::{ExternalGuard, UpdateRun, update_one_collection};
 use crate::exit::Interrupted;
 use crate::hook::HookConfig;
 use crate::{document, exclusions, format as fmt, signals, store};
@@ -71,7 +71,7 @@ pub fn run_watch(
         seen: HashMap::new(),
         deferred: None,
         deferrals: 0,
-        external: ExternalWarnings::new(project_root),
+        external: ExternalGuard::new(project_root),
     };
     loop {
         let wait = if watcher.tick()? {
@@ -92,8 +92,8 @@ struct Watcher<'a> {
     deferred: Option<Deferral>,
     /// Consecutive deferred passes, for the backoff.
     deferrals: u32,
-    /// Which collections outside the project have been warned about.
-    external: ExternalWarnings,
+    /// Skips the collections outside the project, naming each once.
+    external: ExternalGuard,
 }
 
 impl Watcher<'_> {
@@ -159,12 +159,11 @@ impl Watcher<'_> {
                     hooks_allowed: false,
                     full: false,
                     hook_config: HookConfig::from_env(),
-                    project_root: self.external.root_for(&col),
+                    external: Some(&self.external),
                 },
                 &|| lock.heartbeat(),
                 &signals::pending,
             )?;
-            self.external.note(&col);
             if let Some(report) = &outcome.report {
                 println!("{report}");
             }
