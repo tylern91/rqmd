@@ -24,11 +24,11 @@
 //! ~2 GB generate model resident once query expansion (on by default) has
 //! triggered it once.
 
+mod hub;
+
 use anyhow::{Context, Result};
-use hf_hub::{
-    Cache, Repo, RepoType,
-    api::tokio::{Api, ApiBuilder},
-};
+use hf_hub::{HFClient, HFError};
+use hub::{Cache, Repo, RepoType};
 use llama_cpp_2::{
     LogOptions,
     context::params::{LlamaContextParams, LlamaPoolingType},
@@ -561,18 +561,19 @@ fn status_is_auth_failure(status: u16) -> bool {
     status == 401 || status == 403
 }
 
-/// Walk an `ApiError`, including a `TooManyRetries`-boxed inner error, looking
-/// for an HTTP response whose status means the credential was rejected.
-fn is_auth_failure(err: &hf_hub::api::tokio::ApiError) -> bool {
-    use hf_hub::api::tokio::ApiError;
-    match err {
-        ApiError::RequestError(e) => e
-            .status()
-            .map(|s| status_is_auth_failure(s.as_u16()))
-            .unwrap_or(false),
-        ApiError::TooManyRetries(inner) => is_auth_failure(inner),
-        _ => false,
-    }
+/// One download of `filename` at the repo's pinned revision into the hub cache.
+async fn fetch_file(
+    api: &HFClient,
+    repo: &Repo,
+    filename: &str,
+) -> std::result::Result<PathBuf, HFError> {
+    let (owner, name) = hf_hub::split_id(repo.id());
+    api.model(owner, name)
+        .download_file()
+        .filename(filename)
+        .revision(repo.revision())
+        .send()
+        .await
 }
 
 /// Download `filename` from `repo` via `api`, retrying anonymously via
@@ -584,18 +585,18 @@ fn is_auth_failure(err: &hf_hub::api::tokio::ApiError) -> bool {
 /// unaffected either way: the caller still verifies SHA-256 against the
 /// pinned hash regardless of which client answered.
 async fn get_with_auth_fallback(
-    api: &Api,
-    anon_api: Option<&Api>,
+    api: &HFClient,
+    anon_api: Option<&HFClient>,
     cache: &Cache,
     repo_id: &str,
     repo: &Repo,
     filename: &str,
 ) -> Result<PathBuf> {
-    let err = match api.repo(repo.clone()).get(filename).await {
+    let err = match fetch_file(api, repo, filename).await {
         Ok(path) => return Ok(path),
         Err(e) => e,
     };
-    if !is_auth_failure(&err) {
+    if !hub::is_auth_failure(&err) {
         return Err(err.into());
     }
     let Some(anon_api) = anon_api else {
@@ -607,7 +608,7 @@ async fn get_with_auth_fallback(
          ({err}); retrying anonymously — the cached or configured token may be \
          expired or invalid"
     );
-    match anon_api.repo(repo.clone()).get(filename).await {
+    match fetch_file(anon_api, repo, filename).await {
         Ok(path) => Ok(path),
         Err(anon_err) => anyhow::bail!(
             "HuggingFace rejected both the authenticated ({err}) and anonymous \
@@ -628,8 +629,8 @@ async fn get_with_auth_fallback(
 /// trust-on-first-use model `git-lfs` itself uses — it checks the blob hash
 /// on checkout, not on every subsequent read).
 pub(crate) async fn get_verified(
-    api: &Api,
-    anon_api: Option<&Api>,
+    api: &HFClient,
+    anon_api: Option<&HFClient>,
     cache: &Cache,
     repo_id: &str,
     revision: &str,
@@ -691,24 +692,14 @@ fn discard_bad_download(path: &Path) {
 /// Build the primary hf-hub API client and, when a credential is in play, an
 /// anonymous fallback client to retry without one on a 401/403 (see
 /// `get_with_auth_fallback`). Token precedence: `HF_TOKEN` /
-/// `HUGGING_FACE_HUB_TOKEN` env vars override hf-hub's own cache-file token
-/// (which `ApiBuilder::from_env` already picks up via `Cache::token()`); with
-/// neither, no token is sent.
-pub(crate) fn build_hf_api_clients(cache: &Cache) -> Result<(Api, Option<Api>)> {
+/// `HUGGING_FACE_HUB_TOKEN` env vars override hf-hub's own `HF_TOKEN_PATH` /
+/// `$HF_HOME/token` lookup; with none of them, no token is sent.
+pub(crate) fn build_hf_api_clients(cache: &Cache) -> Result<(HFClient, Option<HFClient>)> {
     let env_token = env_hf_token();
-    let mut builder = ApiBuilder::from_env();
-    if let Some(tok) = env_token.clone() {
-        builder = builder.with_token(Some(tok));
-    }
-    let api = builder.build().context("hf-hub API init")?;
+    let api = hub::build_client(cache, env_token.as_deref()).context("hf-hub API init")?;
 
-    let anon_api = if env_token.is_some() || cache.token().is_some() {
-        Some(
-            ApiBuilder::from_env()
-                .with_token(None)
-                .build()
-                .context("hf-hub anonymous API init")?,
-        )
+    let anon_api = if env_token.is_some() || cache.has_stored_token() {
+        Some(hub::build_client(cache, Some("")).context("hf-hub anonymous API init")?)
     } else {
         None
     };
@@ -722,13 +713,9 @@ pub(crate) fn build_hf_api_clients(cache: &Cache) -> Result<(Api, Option<Api>)> 
 /// implemented exactly once instead of duplicated per branch.
 async fn download_models(config: &LlamaCppConfig) -> Result<(PathBuf, PathBuf, PathBuf)> {
     validate_hf_endpoint()?;
-    // `from_env()` (not `Api::new()`) so HF_HOME/HF_ENDPOINT are actually
-    // honoured here — `Api::new()` silently ignores both and always talks to
-    // the default https://huggingface.co using the default cache directory,
-    // which previously left `validate_hf_endpoint` checking an env var the
-    // downloader itself never read, and left `model_cache_report` (which does
-    // use `Cache::from_env()`) checking a different directory than downloads
-    // actually landed in whenever HF_HOME was set.
+    // The clients read HF_ENDPOINT themselves and download into this cache's
+    // directory, so `validate_hf_endpoint` and `model_cache_report` check the
+    // same endpoint and directory the downloader uses.
     let cache = Cache::from_env();
     let (api, anon_api) = build_hf_api_clients(&cache)?;
 
