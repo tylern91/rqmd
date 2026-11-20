@@ -44,7 +44,7 @@ const SAMPLE_JSON: &str = include_str!("fixtures/engine_bump_sample.json");
 /// fixture stays readable while the long samples reach the truncation limit.
 ///
 /// Token counts under the EmbeddingGemma tokenizer with the passage prefix, measured once with
-/// `LlamaModel::str_to_token`: `long_near_limit` 2009, just under the 2044-token limit
+/// `LlamaVocab::tokenize` (via `model.vocab().tokenize`): `long_near_limit` 2009, just under the 2044-token limit
 /// (`safe_limit` in `LlamaCppBackend::embed_texts`); `long_over_limit` about 2210, so it is
 /// truncated. A model or tokenizer change moves these numbers.
 #[derive(Debug, Deserialize)]

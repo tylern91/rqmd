@@ -19,6 +19,14 @@
   message as before, and so does Ctrl-C at a macOS terminal (see Fixed). The exit code, the resume
   hint and the second-signal behaviour are unchanged.
 
+### Changed
+- `llama-cpp-2` and `llama-cpp-sys-2` `0.1.154` -> `0.1.160` (published 2026-10-15, past the 30-day
+  soak), through the llama.cpp bump gate: the cosine of all 14 sample vectors against the old
+  engine is 1.000000 on Metal and on the CPU (`RQMD_FORCE_CPU=1`), so stored vectors stay valid,
+  nothing needs `rqmd embed --rebuild` and the embed fingerprint is unchanged. The new crate
+  moves tokenizing and detokenizing to `LlamaModel::vocab()`; rqmd-llm follows. One difference:
+  a text with an interior NUL byte is now tokenized instead of rejected. Closes #250.
+
 ### Fixed
 - Ctrl-C at a macOS terminal now prints `rqmd: interrupted by SIGINT` without naming the terminal
   emulator. macOS reports the process that wrote the key to the terminal as the sender; that
