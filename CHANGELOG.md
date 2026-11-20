@@ -63,7 +63,8 @@
   target, where SQLite looks for the log. An honest index always agrees with its log, so nothing
   changes for one. The error names the two page sizes and the `-wal` file to delete if the
   database is trusted. This closes the one advisory's trigger only: other crafted indexes still
-  open, and the full fix is the rusqlite 0.41 bump.
+  open. The rusqlite 0.41 bump in this release bundles SQLite 3.54.1, which carries the fix for
+  RUSTSEC-2026-0459 itself, and the check stays as defence in depth.
 
 ## [0.34.0] - 2026-11-08
 
