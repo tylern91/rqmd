@@ -14,19 +14,4 @@ ignore = [
     # only by the optional `ort-backend` feature of rqmd-llm.
     # lean: remove when a tokenizers release drops macro_rules_attribute.
     "RUSTSEC-2024-0436",
-
-    # rmcp 3.6.0 has two advisories in code that rqmd does not enable.
-    # rqmd-mcp builds rmcp with the `server`, `macros`, `schemars`,
-    # `transport-io` and `transport-streamable-http-server` features only
-    # (`cargo tree -e features -i rmcp`), and uses `serve_server` and
-    # `streamable_http_server` (crates/rqmd-mcp/src/lib.rs:18, :201, :204;
-    # rg over crates/ finds no other rmcp use). No OAuth or HTTP client
-    # feature is on, so neither advisory's code is compiled in:
-    #   0457  OAuth client SSRF filter (patched in rmcp 3.7.0)
-    #   0462  unbounded body buffering in the Streamable HTTP clients
-    #         (patched in rmcp 3.9.0)
-    # lean: unreachable, remove with the rmcp bump to >= 3.9.0, which passes
-    # the 30-day soak on 2026-12-05 (3.9.0 released 2026-11-05).
-    "RUSTSEC-2026-0457",
-    "RUSTSEC-2026-0462",
 ]
