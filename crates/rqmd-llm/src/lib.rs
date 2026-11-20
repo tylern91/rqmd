@@ -1219,9 +1219,8 @@ impl InferenceBackend for LlamaCppBackend {
             .new_context(&self._backend, self.generate_ctx_params.clone())
             .context("generate context")?;
 
-        // Qwen3 uses ChatML — BOS is embedded in the template, so add_special = false avoids
-        // a double BOS token.  If the prompt is a raw ChatML string this is correct;
-        // if a bare question is passed, add_special = true is equally fine (one extra token).
+        // add_special = true matches the 0.1.154 AddBos::Always behaviour.  With a raw ChatML
+        // prompt this may add one extra BOS token, which is harmless.
         let tokens = self
             .generate_model_ref()?
             .vocab()
@@ -1265,8 +1264,13 @@ impl InferenceBackend for LlamaCppBackend {
                 .generate_model_ref()?
                 .vocab()
                 .token_to_piece(tok, false, None);
-            // Each input byte yields at most one output char, as in the 0.1.154 helper.
-            let mut piece = String::with_capacity(bytes.len());
+            // Size for the worst case: a malformed byte becomes U+FFFD (3 UTF-8 bytes), and
+            // decode_to_string writes only into spare capacity.
+            let mut piece = String::with_capacity(
+                decoder
+                    .max_utf8_buffer_length(bytes.len())
+                    .unwrap_or(bytes.len() * 3),
+            );
             let _ = decoder.decode_to_string(&bytes, &mut piece, false);
             out.push_str(&piece);
 
