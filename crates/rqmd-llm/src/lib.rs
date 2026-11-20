@@ -34,7 +34,7 @@ use llama_cpp_2::{
     context::params::{LlamaContextParams, LlamaPoolingType},
     llama_backend::LlamaBackend,
     llama_batch::LlamaBatch,
-    model::{AddBos, LlamaModel, params::LlamaModelParams},
+    model::{LlamaModel, params::LlamaModelParams},
     sampling::LlamaSampler,
     send_logs_to_tracing,
     token::LlamaToken,
@@ -1074,9 +1074,8 @@ impl LlamaCppBackend {
         let safe_limit = EMBED_CONTEXT_SIZE - EMBED_TOKEN_MARGIN; // 2044
         let mut out = Vec::with_capacity(texts.len());
         for text in texts {
-            let mut tokens = model
-                .str_to_token(text, AddBos::Always)
-                .context("embed tokenization")?;
+            // BOS added, special tokens parsed: the 0.1.154 `str_to_token(.., AddBos::Always)` calls.
+            let mut tokens = model.vocab().tokenize(text.as_bytes(), true, true);
             if tokens.len() > safe_limit {
                 tracing::debug!(
                     tokens = tokens.len(),
@@ -1154,10 +1153,10 @@ impl InferenceBackend for LlamaCppBackend {
                 .new_context(&self._backend, self.rerank_ctx_params.clone())
                 .context("rerank context")?;
             let input = format!("Query: {query}\nDocument: {doc}");
-            let mut tokens = self
-                .rerank_model_ref()?
-                .str_to_token(&input, AddBos::Always)
-                .context("rerank tokenization")?;
+            let mut tokens =
+                self.rerank_model_ref()?
+                    .vocab()
+                    .tokenize(input.as_bytes(), true, true);
             // Guard: ctx.decode() also aborts on n_ubatch < n_tokens.
             // Truncate to the rerank context window with the same BOS/EOS margin.
             let rerank_limit = self.rerank_n_ctx.saturating_sub(EMBED_TOKEN_MARGIN);
@@ -1207,13 +1206,12 @@ impl InferenceBackend for LlamaCppBackend {
             .new_context(&self._backend, self.generate_ctx_params.clone())
             .context("generate context")?;
 
-        // Qwen3 uses ChatML — BOS is embedded in the template, so AddBos::Never avoids
-        // a double BOS token.  If the prompt is a raw ChatML string this is correct;
-        // if a bare question is passed, AddBos::Always is equally fine (one extra token).
+        // add_special = true matches the 0.1.154 AddBos::Always behaviour.  With a raw ChatML
+        // prompt this may add one extra BOS token, which is harmless.
         let tokens = self
             .generate_model_ref()?
-            .str_to_token(prompt, AddBos::Always)
-            .context("generate tokenization")?;
+            .vocab()
+            .tokenize(prompt.as_bytes(), true, true);
 
         let n_prompt = tokens.len();
         if n_prompt + MAX_EXPANSION_TOKENS > self.generate_n_ctx {
@@ -1245,14 +1243,22 @@ impl InferenceBackend for LlamaCppBackend {
             let tok = sampler.sample(&ctx, batch_last);
             sampler.accept(tok);
 
-            if self.generate_model_ref()?.is_eog_token(tok) {
+            if self.generate_model_ref()?.vocab().is_eog(tok) {
                 break;
             }
 
-            let piece = self
+            let bytes = self
                 .generate_model_ref()?
-                .token_to_piece(tok, &mut decoder, false, None)
-                .context("token_to_piece")?;
+                .vocab()
+                .token_to_piece(tok, false, None);
+            // Size for the worst case: a malformed byte becomes U+FFFD (3 UTF-8 bytes), and
+            // decode_to_string writes only into spare capacity.
+            let mut piece = String::with_capacity(
+                decoder
+                    .max_utf8_buffer_length(bytes.len())
+                    .unwrap_or(bytes.len() * 3),
+            );
+            let _ = decoder.decode_to_string(&bytes, &mut piece, false);
             out.push_str(&piece);
 
             // Early stop: EOG token and MAX_EXPANSION_TOKENS are additional
