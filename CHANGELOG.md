@@ -48,6 +48,11 @@
   existing index opens as before and is not rebuilt. The bump moves zstd to 0.14 and lru to 0.18,
   which carry the fixes for the zstd-safe advisories, so the ignore entries for RUSTSEC-2026-0391,
   0395 to 0406 and 0410 are gone from `.cargo/audit.toml`.
+- SQLite is now rusqlite 0.41.0 with libsqlite3-sys 0.39.1, which bundles SQLite 3.54.1 (was
+  rusqlite 0.40.2 and SQLite 3.53.2). This carries the fix for RUSTSEC-2026-0459, so its ignore
+  entry is gone from `.cargo/audit.toml` and `cargo audit` still exits 0. The `-wal` page-size
+  check in `open_db` stays as defence in depth. Search output on a copy of a real index is
+  byte-identical to rqmd 0.34.0, and the index format is unchanged.
 
 ### Security
 - rustix is now 1.1.6 (was 1.1.4), which carries the fix for RUSTSEC-2026-0486. rustix reaches
@@ -61,7 +66,8 @@
   target, where SQLite looks for the log. An honest index always agrees with its log, so nothing
   changes for one. The error names the two page sizes and the `-wal` file to delete if the
   database is trusted. This closes the one advisory's trigger only: other crafted indexes still
-  open, and the full fix is the rusqlite 0.41 bump.
+  open. The rusqlite 0.41 bump in this release bundles SQLite 3.54.1, which carries the fix for
+  RUSTSEC-2026-0459 itself, and the check stays as defence in depth.
 
 ## [0.34.0] - 2026-11-08
 
