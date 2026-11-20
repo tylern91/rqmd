@@ -293,9 +293,13 @@ added, edited files replaced and deleted files removed. It differs in what it le
 - **Hooks never run.** A collection's `update_command` is not run by a refresh, whatever the
   index's origin: a search tool is not what the hook was set up for.
 - **Outside the project.** On a project-local `.rqmd/` index, a collection whose directory
-  resolves outside the project directory is named once on stderr (never stdout), the first time a
-  refresh walks it, and still indexed. A daemon (`--daemon`) does the same in its log file,
-  `mcp.log` in the index directory; see
+  resolves outside the project directory is skipped by every refresh and named once on stderr
+  (never stdout), the first time a refresh passes over it; nothing is read from it and nothing is
+  pruned. `--allow-refresh` does not lift this: start the server with `--allow-external-paths` as
+  well to index such a collection. A daemon (`--daemon`) skips it the same way and names it in its
+  log file, `mcp.log` in the index directory; it keeps the decision of the command that started
+  it, so `rqmd mcp --daemon --allow-external-paths` refreshes outside collections and a plain
+  `--daemon` never does. See
   [Collections outside the project](../SECURITY.md#collections-outside-the-project).
 - **Bounded.** The pass stops between files once `RQMD_MCP_TOOL_TIMEOUT_SECS` (default 120) has
   passed since it began, keeps what it indexed and prunes nothing. A `query` then has its full

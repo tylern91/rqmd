@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
@@ -15,7 +16,7 @@ use crate::exit::{Interrupted, PartialFailure};
 use crate::hook::{self, HookConfig, HookOutcome};
 use crate::{document, exclusions, format as fmt, signals, store};
 
-pub fn run_status(index_dir: &Path) -> Result<()> {
+pub fn run_status(index_dir: &Path, project_root: Option<&Path>) -> Result<()> {
     if store::report_if_no_index(index_dir) {
         return Ok(());
     }
@@ -107,7 +108,7 @@ pub fn run_status(index_dir: &Path) -> Result<()> {
 
     // ── Collections (qmd.ts:565-586, per-collection multi-line blocks) ───────────
     let cols = db::list_collections(&s.db)?;
-    print_status_collections(&s.db, &cols)?;
+    print_status_collections(&s.db, &cols, outside_count(&cols, project_root))?;
 
     // ── Models (qmd.ts:606-617) — show repo (browsable) + exact downloaded file ──
     println!("\n{}", p.bold("Models"));
@@ -164,7 +165,7 @@ fn describe_excluded(excluded: &ExcludedDocs) -> String {
 
 /// Print the "Collections" and "Examples" blocks of `rqmd status`
 /// (qmd.ts:565-601).
-fn print_status_collections(conn: &Connection, cols: &[Collection]) -> Result<()> {
+fn print_status_collections(conn: &Connection, cols: &[Collection], outside: usize) -> Result<()> {
     let p = fmt::Paint::stdout();
     if cols.is_empty() {
         println!(
@@ -175,6 +176,14 @@ fn print_status_collections(conn: &Connection, cols: &[Collection]) -> Result<()
     }
 
     println!("\n{}", p.bold("Collections"));
+    if outside > 0 {
+        println!(
+            "  {}",
+            p.yellow(format!(
+                "Outside project: {outside} skipped by update, watch and mcp refresh (pass --allow-external-paths to index them)"
+            ))
+        );
+    }
     for col in cols {
         let (count, last_mod) = db::collection_doc_stats(conn, &col.name).unwrap_or((0, None));
         let last_mod_str = last_mod
@@ -978,6 +987,7 @@ fn run_update_with(
     // suppresses `warn_if_raw_backfill_pending` forever once set.
     let mut all_collections_clean = true;
     let mut hook_failures: Vec<(String, String)> = Vec::new();
+    let external = ExternalGuard::new(project_root.map(Path::to_path_buf));
 
     for (ci, col) in cols.iter().enumerate() {
         if let Some(signal) = signals::pending() {
@@ -999,7 +1009,7 @@ fn run_update_with(
                 hooks_allowed,
                 full,
                 hook_config,
-                project_root,
+                external: Some(&external),
             },
             &|| lock.heartbeat(),
             &signals::pending,
@@ -1116,9 +1126,8 @@ pub(super) struct UpdateRun<'a> {
     pub(super) hooks_allowed: bool,
     pub(super) full: bool,
     pub(super) hook_config: HookConfig,
-    /// The project directory of a project-local index (`store::project_root`),
-    /// or `None` for any other index, or to skip the outside-the-project check.
-    pub(super) project_root: Option<&'a Path>,
+    /// Skips the collections outside the project directory; `None` skips nothing.
+    pub(super) external: Option<&'a ExternalGuard>,
 }
 
 /// Whether `col`'s directory exists and resolves outside `root`. A relative
@@ -1131,36 +1140,72 @@ pub(super) fn is_outside_project(col: &Collection, root: &Path) -> bool {
         .is_ok_and(|dir| !dir.starts_with(root))
 }
 
-/// The outside-the-project warning for a command that passes over the same
-/// collections again and again (`watch`, the MCP refresh): each collection is
-/// named once, the first time its pass finds it outside.
-pub(super) struct ExternalWarnings {
-    root: Option<PathBuf>,
-    warned: HashSet<String>,
+/// The marker to print after the path of `col`: empty unless it is outside `project_root`.
+pub(super) fn outside_marker(col: &Collection, project_root: Option<&Path>) -> String {
+    match project_root {
+        Some(root) if is_outside_project(col, root) => format!(" {OUTSIDE_MARKER}"),
+        _ => String::new(),
+    }
 }
 
-impl ExternalWarnings {
+/// How many of `cols` lie outside `project_root`, which is `None` for an index
+/// that is not project-local.
+fn outside_count(cols: &[Collection], project_root: Option<&Path>) -> usize {
+    project_root.map_or(0, |root| {
+        cols.iter().filter(|c| is_outside_project(c, root)).count()
+    })
+}
+
+/// What `collection list`, `collection show` and `rqmd doctor` append to the path of
+/// a collection that `update`, `watch` and the MCP refresh skip.
+const OUTSIDE_MARKER: &str = "(outside project; skipped)";
+
+/// Skips the collections outside the project directory. Every pass skips them;
+/// a command that passes over the same collections again and again (`watch`,
+/// the MCP refresh) names each one on stderr once per process.
+pub(super) struct ExternalGuard {
+    root: Option<PathBuf>,
+    named: Mutex<HashSet<String>>,
+}
+
+impl ExternalGuard {
+    /// `root` is the project directory to enforce (`store::enforced_root`); with
+    /// `None` nothing is skipped.
     pub(super) fn new(root: Option<PathBuf>) -> Self {
         Self {
             root,
-            warned: HashSet::new(),
+            named: Mutex::new(HashSet::new()),
         }
     }
 
-    /// The root to hand to `UpdateRun` for `col`: `None` once it has been warned about.
-    pub(super) fn root_for(&self, col: &Collection) -> Option<&Path> {
-        self.root
-            .as_deref()
-            .filter(|_| !self.warned.contains(&col.name))
-    }
-
-    /// Record, after `col`'s pass, whether that pass warned about it.
-    pub(super) fn note(&mut self, col: &Collection) {
-        if let Some(root) = self.root_for(col)
-            && is_outside_project(col, root)
-        {
-            self.warned.insert(col.name.clone());
+    /// Whether `col` is outside the project and so must be skipped. The first
+    /// time for a collection this also prints the warning.
+    fn skips(&self, col: &Collection) -> bool {
+        let Some(root) = self.root.as_deref() else {
+            return false;
+        };
+        if !is_outside_project(col, root) {
+            return false;
         }
+        let first = self
+            .named
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(col.name.clone());
+        if first {
+            // Name and path come from the index file, which may not be ours.
+            let plain = |text: &str| -> String {
+                text.chars()
+                    .map(|c| if c.is_control() { '?' } else { c })
+                    .collect()
+            };
+            eprintln!(
+                "  WARN: skipping collection '{}' ({}): outside the project directory; pass --allow-external-paths to index it",
+                plain(&col.name),
+                plain(&col.path)
+            );
+        }
+        true
     }
 }
 
@@ -1176,7 +1221,7 @@ pub(super) fn update_one_collection(
         hooks_allowed,
         full,
         hook_config,
-        project_root,
+        external,
     } = run;
     let mut progress = fmt::Progress::new(progress_mode);
     let dir = Path::new(&col.path);
@@ -1189,22 +1234,15 @@ pub(super) fn update_one_collection(
             report: None,
         });
     }
-    // Stage 1 of #227: a project-local index can name a directory outside the
-    // project, so say so; the collection is still indexed.
-    if let Some(root) = project_root
-        && is_outside_project(col, root)
-    {
-        // Name and path come from the index file, which may not be ours.
-        let plain = |text: &str| -> String {
-            text.chars()
-                .map(|c| if c.is_control() { '?' } else { c })
-                .collect()
-        };
-        eprintln!(
-            "  WARN: collection '{}' ({}) is outside the project directory; it is still indexed, and a future release will skip it",
-            plain(&col.name),
-            plain(&col.path)
-        );
+    // A project-local index can name a directory outside the project: skip it
+    // before any hook or walk, and leave its documents as they are.
+    if external.is_some_and(|guard| guard.skips(col)) {
+        return Ok(CollectionOutcome {
+            clean: false,
+            hook_failure: None,
+            interrupted: None,
+            report: None,
+        });
     }
 
     // Run the collection's pre-update hook (e.g. `git fetch && git pull ...`)
@@ -1449,7 +1487,7 @@ pub fn run_init() -> Result<()> {
     Ok(())
 }
 
-pub fn run_doctor(index_dir: &Path) -> Result<()> {
+pub fn run_doctor(index_dir: &Path, project_root: Option<&Path>) -> Result<()> {
     println!("RQMD Doctor (Rust engine)\n");
 
     let db_path = index_dir.join("index.sqlite");
@@ -1518,7 +1556,18 @@ pub fn run_doctor(index_dir: &Path) -> Result<()> {
         println!("\n  Collections:   {}", cols.len());
         for col in &cols {
             let (count, _) = db::collection_doc_stats(&s.db, &col.name)?;
-            println!("    {} — {count} docs at {}", col.name, col.path);
+            println!(
+                "    {} — {count} docs at {}{}",
+                col.name,
+                col.path,
+                outside_marker(col, project_root)
+            );
+        }
+        let outside = outside_count(&cols, project_root);
+        if outside > 0 {
+            println!(
+                "    WARN: {outside} collection(s) outside the project directory are skipped by update, watch and mcp refresh; pass --allow-external-paths to index them"
+            );
         }
 
         print_doctor_stale_fingerprint_check(&s.db);
@@ -1717,7 +1766,7 @@ mod tests {
         hooks_allowed: true,
         full: false,
         hook_config: TEST_HOOKS,
-        project_root: None,
+        external: None,
     };
 
     #[test]
