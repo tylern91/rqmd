@@ -661,11 +661,18 @@ pub(crate) async fn get_verified(
         .await
         .with_context(|| format!("download {repo_id}/{filename}@{revision}"))?;
     if let Err(e) = verify_sha256(&path, expected_sha256) {
-        // hf-hub has already written refs/<revision>, which the next run's fast
-        // path in `resolve_cached` trusts for a large file, so a bad download
-        // left in place would be accepted unverified then. Remove it.
+        // Remove the bad blob so the next run downloads it again instead of
+        // finding a snapshot entry that nothing verified.
         discard_bad_download(&path);
         return Err(e.context(format!("{repo_id}/{filename}@{revision}")));
+    }
+    // hf-hub 1.0 does not write refs/<revision> for a commit-hash revision
+    // (0.5 did). Write it now that the hash matched, so the next run takes the
+    // fast path in `resolve_cached` and the cache keeps the layout the Python
+    // client and hf-hub 0.5 produce. Best effort: without it the next run
+    // re-hashes the file once and heals the ref there.
+    if let Err(e) = cache.repo(repo.clone()).create_ref(repo.revision()) {
+        tracing::warn!("could not write the cache ref for {repo_id}@{revision}: {e}");
     }
     Ok(path)
 }
