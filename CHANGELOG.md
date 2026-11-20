@@ -27,6 +27,18 @@
   moves tokenizing and detokenizing to `LlamaModel::vocab()`; rqmd-llm follows. One difference:
   a text with an interior NUL byte is now tokenized instead of rejected. Closes #250.
 
+### Changed
+- Model downloads now use hf-hub 1.0 and reqwest 0.13, moved together because
+  hf-hub 1.0 needs reqwest 0.13. The Hugging Face cache layout on disk is
+  unchanged (`models--<owner>--<name>/{refs,snapshots,blobs}`), so models
+  you have already downloaded are found without a new download, and
+  `HF_HUB_OFFLINE`, `HF_ENDPOINT`, `HF_HOME` and the token lookup behave as
+  before. Build requirement: reqwest 0.13 uses rustls with `aws-lc-sys`, which
+  is compiled from source with the C compiler you already need for llama.cpp
+  (cmake is used only where aws-lc has no pre-generated bindings; no NASM or
+  Go on macOS arm64 or Linux x86_64). The third-party license file now also
+  lists ISC and BSD-2-Clause crates.
+
 ### Fixed
 - Ctrl-C at a macOS terminal now prints `rqmd: interrupted by SIGINT` without naming the terminal
   emulator. macOS reports the process that wrote the key to the terminal as the sender; that

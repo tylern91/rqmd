@@ -15,7 +15,7 @@ brew install rqmd
 
 ### cargo install (source build, cross-platform)
 
-Requires Rust stable ≥1.99 (the MSRV, enforced by a pinned CI job), cmake ≥3.14, and a C/C++ toolchain (builds llama.cpp from source).
+Requires Rust stable ≥1.99 (the MSRV, enforced by a pinned CI job), cmake ≥3.14, and a C/C++ toolchain (builds llama.cpp and `aws-lc-sys`, the TLS crypto library behind model downloads, from source; no NASM or Go is needed on macOS arm64 or Linux x86_64).
 
 ```sh
 cargo install --git https://github.com/tylern91/rqmd --locked rqmd-cli
@@ -54,7 +54,7 @@ install -m 0755 rqmd ~/.local/bin/rqmd
 
 ### From source (recommended while in development)
 
-Requirements: Rust stable (≥1.99, the MSRV, enforced by a pinned CI job), cmake ≥3.14 (cmake 4.x supported), Xcode Command Line Tools (macOS) or `build-essential` (Linux).
+Requirements: Rust stable (≥1.99, the MSRV, enforced by a pinned CI job), cmake ≥3.14 (cmake 4.x supported), Xcode Command Line Tools (macOS) or `build-essential` (Linux). The same toolchain builds `aws-lc-sys`: its build script compiles it with the C compiler and falls back to cmake only where it has no pre-generated bindings.
 
 ```sh
 # Clone the repo
