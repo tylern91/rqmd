@@ -55,6 +55,9 @@
   byte-identical to rqmd 0.34.0, and the index format is unchanged.
 
 ### Security
+- rustix is now 1.1.6 (was 1.1.4), which carries the fix for RUSTSEC-2026-0486. rustix reaches
+  rqmd through `fs4` (the tantivy index lock) and `tempfile`. Only `Cargo.lock` changes;
+  `cargo tree -i rustix` shows the single version 1.1.6.
 - rqmd now refuses to open an index whose `-wal` file declares a different page size than the
   database (RUSTSEC-2026-0459, SQLite before 3.54.0 can return uninitialized memory for such a
   pair). A cloned repo can ship a crafted `.rqmd/index.sqlite` and `-wal`, and any command run
