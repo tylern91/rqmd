@@ -474,7 +474,13 @@ fn ac_10_the_flags_override_the_default() {
     let (cwd, fx) = setup_project_local("alpha body\n");
     std::fs::write(fx.path.join("fresh.md"), "quaggaword arrives\n").expect("write");
     {
-        let mut mcp = Mcp::launch(None, cwd.path(), &["--allow-refresh"]);
+        // The fixture collection is outside the project, which `--allow-refresh`
+        // does not cover (see external_paths ac_9).
+        let mut mcp = Mcp::launch(
+            None,
+            cwd.path(),
+            &["--allow-refresh", "--allow-external-paths"],
+        );
         let reply = mcp.search("quaggaword", Some(true));
         assert!(reply.text.contains("c/fresh.md"), "{}", reply.text);
         assert!(!reply.text.contains("Note:"), "{}", reply.text);

@@ -76,18 +76,34 @@ files under that path into the index, wherever it points. In a repo someone else
 authored, that can name a directory such as your home directory, and a later
 `search`, `get` or MCP call returns what was copied.
 
-On a project-local index, these three now print one warning on stderr for each
-collection whose directory resolves outside the project directory (the current
-directory that holds `.rqmd/`), and still index it:
+On a project-local index, these three skip every collection whose directory
+resolves outside the project directory (the current directory that holds
+`.rqmd/`) unless you pass `--allow-external-paths`. The skip comes before the
+update hook and the directory walk, so nothing is read from the directory, and
+nothing is pruned: documents the collection already holds stay in the index and
+stay searchable. Each skipped collection is named once on stderr:
 
 ```
-  WARN: collection '<name>' (<path>) is outside the project directory; it is still indexed, and a future release will skip it
+  WARN: skipping collection '<name>' (<path>): outside the project directory; pass --allow-external-paths to index it
 ```
 
-A relative stored path is read against the project directory, a symlinked root
-is judged by its target, and a path that does not exist keeps only its
-`directory not found` warning. `rqmd watch` and the MCP server name a collection
-once per process. An explicit `--index-dir` and the global index are chosen by
-you and print nothing new. A future release will skip these collections by
-default; design and threat model:
+The run goes on with the other collections and ends as it does for a missing
+directory, with exit status 0. A relative stored path is read against the project
+directory, a symlinked root is judged by its target, and a path that does not
+exist keeps only its `directory not found` warning. Control characters in the
+printed name and path are replaced. `rqmd watch` and the MCP server skip the
+collection on every pass and name it once per process.
+
+`--allow-external-paths` is accepted by `rqmd update`, `rqmd watch` and
+`rqmd mcp`. It applies to that invocation only and is not stored in the index.
+`rqmd mcp --allow-refresh` does not imply it, so accepting refreshes and
+accepting reads outside the project stay separate decisions. An
+`rqmd mcp --daemon` keeps the decision of the command that started it. An
+explicit `--index-dir` and the global index are chosen by you and are not
+checked, so `rqmd --index-dir .rqmd update` remains a way to index an outside
+collection.
+
+`rqmd collection list` and `rqmd collection show` mark such a collection
+`(outside project; skipped)`, `rqmd doctor` marks it and warns, and `rqmd status`
+prints a count. Design and threat model:
 [docs/research/2026-10-27-external-collection-paths.md](docs/research/2026-10-27-external-collection-paths.md).

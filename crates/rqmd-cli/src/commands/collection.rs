@@ -3,9 +3,12 @@ use std::path::{Path, PathBuf};
 
 use rqmd_core::{Collection, IndexLock, db};
 
+use super::index::outside_marker;
 use crate::{CollectionCommand, document, exclusions, format as fmt, store};
 
-pub fn run(index_dir: &Path, cmd: CollectionCommand) -> Result<()> {
+/// `project_root` is that of a project-local index (`store::project_root`); `list`
+/// and `show` mark a collection outside it.
+pub fn run(index_dir: &Path, cmd: CollectionCommand, project_root: Option<&Path>) -> Result<()> {
     match cmd {
         CollectionCommand::Add {
             path,
@@ -27,10 +30,10 @@ pub fn run(index_dir: &Path, cmd: CollectionCommand) -> Result<()> {
                 max_file_bytes,
             },
         ),
-        CollectionCommand::List => list(index_dir),
+        CollectionCommand::List => list(index_dir, project_root),
         CollectionCommand::Remove { name } => remove(index_dir, &name),
         CollectionCommand::Rename { old, new } => rename(index_dir, &old, &new),
-        CollectionCommand::Show { name } => show(index_dir, &name),
+        CollectionCommand::Show { name } => show(index_dir, &name, project_root),
         CollectionCommand::UpdateCmd { name, cmd } => update_cmd(index_dir, &name, cmd.as_deref()),
         CollectionCommand::Include { name } => set_include(index_dir, &name, true),
         CollectionCommand::Exclude { name } => set_include(index_dir, &name, false),
@@ -254,7 +257,7 @@ fn add(
     Ok(())
 }
 
-fn list(index_dir: &Path) -> Result<()> {
+fn list(index_dir: &Path, project_root: Option<&Path>) -> Result<()> {
     if store::report_if_no_index(index_dir) {
         return Ok(());
     }
@@ -270,8 +273,12 @@ fn list(index_dir: &Path) -> Result<()> {
         let (count, _) = db::collection_doc_stats(&s.db, &col.name)?;
         let included = if col.include_by_default { "yes" } else { "no" };
         println!(
-            "{:<30}  {:<8}  {:<12}  {}",
-            col.name, count, included, col.path
+            "{:<30}  {:<8}  {:<12}  {}{}",
+            col.name,
+            count,
+            included,
+            col.path,
+            outside_marker(col, project_root)
         );
     }
     Ok(())
@@ -362,7 +369,7 @@ fn rename(index_dir: &Path, old: &str, new: &str) -> Result<()> {
     Ok(())
 }
 
-fn show(index_dir: &Path, name: &str) -> Result<()> {
+fn show(index_dir: &Path, name: &str, project_root: Option<&Path>) -> Result<()> {
     let s = store::open_store_no_backend(index_dir, true)?;
     let cols = db::list_collections(&s.db)?;
     let col = cols
@@ -372,7 +379,11 @@ fn show(index_dir: &Path, name: &str) -> Result<()> {
     let (count, _) = db::collection_doc_stats(&s.db, name)?;
 
     println!("Collection: {}", col.name);
-    println!("  Path:     {}", col.path);
+    println!(
+        "  Path:     {}{}",
+        col.path,
+        outside_marker(col, project_root)
+    );
     println!("  Pattern:  {}", col.pattern);
     println!("  Docs:     {count}");
     println!("  Included: {}", col.include_by_default);
