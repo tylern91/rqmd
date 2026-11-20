@@ -42,6 +42,13 @@
   running process, and `tantivy/`, the SQLite files and symlinks are untouched. One hundred such
   orphans had grown to 44 GB. `rqmd doctor` now reports the orphan count and size.
 
+### Changed
+- The full-text index now uses tantivy 0.27.0 (was 0.26.1). The analyzer tokens are unchanged
+  (the golden-corpus test passes as captured on 0.26.1) and the index format version stays 7, so an
+  existing index opens as before and is not rebuilt. The bump moves zstd to 0.14 and lru to 0.18,
+  which carry the fixes for the zstd-safe advisories, so the ignore entries for RUSTSEC-2026-0391,
+  0395 to 0406 and 0410 are gone from `.cargo/audit.toml`.
+
 ### Security
 - rqmd now refuses to open an index whose `-wal` file declares a different page size than the
   database (RUSTSEC-2026-0459, SQLite before 3.54.0 can return uninitialized memory for such a
