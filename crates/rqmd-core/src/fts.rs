@@ -1433,6 +1433,13 @@ mod tests {
         );
     }
 
+    /// An index written before a tantivy bump must still open: the on-disk
+    /// format version is part of that contract.
+    #[test]
+    fn tantivy_index_format_version_is_unchanged() {
+        assert_eq!(tantivy::INDEX_FORMAT_VERSION, 7);
+    }
+
     /// Golden tokens captured on tantivy 0.26.1. A tantivy bump must not change
     /// them: an index built before the bump is queried with the analyzer after
     /// it, so any drift silently breaks matching.
