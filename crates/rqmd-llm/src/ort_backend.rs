@@ -112,7 +112,7 @@ impl OrtBackend {
         // LlamaCppBackend::new().
         let download = || async {
             crate::validate_hf_endpoint()?;
-            let cache = hf_hub::Cache::from_env();
+            let cache = crate::hub::Cache::from_env();
             let (api, anon_api) = crate::build_hf_api_clients(&cache)?;
             let model = crate::get_verified(
                 &api,
