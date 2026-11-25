@@ -29,6 +29,7 @@ mod recency;
 mod security;
 mod status_cost;
 mod unknown_collection;
+mod update_exclude;
 mod update_skip;
 mod walk_filters;
 mod watch;

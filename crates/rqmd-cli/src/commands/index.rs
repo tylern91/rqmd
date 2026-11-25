@@ -913,6 +913,7 @@ pub fn run_cleanup(index_dir: &Path) -> Result<()> {
 pub fn run_update(
     index_dir: &Path,
     collection: Option<&str>,
+    exclude: &[String],
     hooks_allowed: bool,
     full: bool,
     project_root: Option<&Path>,
@@ -920,6 +921,7 @@ pub fn run_update(
     run_update_with(
         index_dir,
         collection,
+        exclude,
         hooks_allowed,
         full,
         HookConfig::from_env(),
@@ -932,6 +934,7 @@ pub fn run_update(
 fn run_update_with(
     index_dir: &Path,
     collection: Option<&str>,
+    exclude: &[String],
     hooks_allowed: bool,
     full: bool,
     hook_config: HookConfig,
@@ -954,7 +957,20 @@ fn run_update_with(
                     .find(|col| col.name == c)
                     .with_context(|| format!("collection '{c}' not found"))?,
             ],
-            None => db::list_collections(&s.db)?,
+            None => {
+                let all = db::list_collections(&s.db)?;
+                // A misspelt name would otherwise silently re-index the very
+                // collection the user meant to skip.
+                if let Some(unknown) = exclude
+                    .iter()
+                    .find(|name| !all.iter().any(|col| &col.name == *name))
+                {
+                    anyhow::bail!("collection '{unknown}' not found");
+                }
+                all.into_iter()
+                    .filter(|col| !exclude.contains(&col.name))
+                    .collect()
+            }
         }
     };
 
@@ -1048,17 +1064,21 @@ fn run_update_with(
         );
     }
 
+    // An excluded collection is left as it was, so the run is as partial as a
+    // `-c` one.
+    let scoped = collection.is_some() || !exclude.is_empty();
+
     // Only an unscoped run that touched every document cleanly can certify the
     // raw-split backfill complete — a skipped collection or file leaves some
     // `documents.raw` rows at their empty-string default.
-    if collection.is_none() && all_collections_clean {
+    if !scoped && all_collections_clean {
         store::mark_raw_split_backfilled(&s)?;
     }
     // The rebuild reads document text from `content`, which is trustworthy once
     // a clean pass (this one or an earlier one) has certified the backfill. A
     // later unclean pass — a collection directory gone, one unreadable file —
     // cannot undo that, so it must not block the rebuild forever.
-    if collection.is_none() && store::raw_split_backfilled(&s) {
+    if !scoped && store::raw_split_backfilled(&s) {
         if s.rebuild_fts_if_needed()? {
             println!("Rebuilt the full-text index for the current tokenizer and schema.");
         }
@@ -2408,7 +2428,8 @@ mod tests {
             own_process_group: true,
         };
 
-        let err = run_update_with(index_dir.path(), None, true, false, config, None).unwrap_err();
+        let err =
+            run_update_with(index_dir.path(), None, &[], true, false, config, None).unwrap_err();
 
         let partial = err
             .downcast_ref::<PartialFailure>()
@@ -2437,7 +2458,7 @@ mod tests {
             let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
             db::upsert_collection(&s.db, &test_collection("c", src.path())).unwrap();
         }
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
+        run_update_with(index_dir.path(), None, &[], true, false, TEST_HOOKS, None).unwrap();
 
         // Make the index look like one built by the previous tokenizer: no
         // version marker, and the document absent from Tantivy. The file is
@@ -2451,7 +2472,7 @@ mod tests {
             assert!(s.fts_rebuild_pending().unwrap());
         }
 
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
+        run_update_with(index_dir.path(), None, &[], true, false, TEST_HOOKS, None).unwrap();
 
         let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
         assert_eq!(s.search_fts("東京都", 10, None).unwrap().len(), 1);
@@ -2500,10 +2521,10 @@ mod tests {
             let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
             store::mark_raw_split_backfilled(&s).unwrap();
         }
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
+        run_update_with(index_dir.path(), None, &[], true, false, TEST_HOOKS, None).unwrap();
         make_full_text_index_legacy(index_dir.path());
 
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
+        run_update_with(index_dir.path(), None, &[], true, false, TEST_HOOKS, None).unwrap();
 
         let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
         assert_eq!(s.search_fts("東京都", 10, None).unwrap().len(), 1);
@@ -2513,10 +2534,10 @@ mod tests {
     #[test]
     fn a_legacy_index_with_an_unclean_pass_still_defers_the_rebuild() {
         let (index_dir, _src) = index_with_a_missing_collection_dir();
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
+        run_update_with(index_dir.path(), None, &[], true, false, TEST_HOOKS, None).unwrap();
         make_full_text_index_legacy(index_dir.path());
 
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
+        run_update_with(index_dir.path(), None, &[], true, false, TEST_HOOKS, None).unwrap();
 
         let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
         assert!(!store::raw_split_backfilled(&s));
@@ -2537,7 +2558,43 @@ mod tests {
             db::upsert_collection(&s.db, &test_collection("c", src.path())).unwrap();
         }
 
-        run_update_with(index_dir.path(), Some("c"), true, false, TEST_HOOKS, None).unwrap();
+        run_update_with(
+            index_dir.path(),
+            Some("c"),
+            &[],
+            true,
+            false,
+            TEST_HOOKS,
+            None,
+        )
+        .unwrap();
+
+        let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
+        assert!(s.fts_rebuild_pending().unwrap());
+    }
+
+    #[test]
+    fn an_update_with_exclude_leaves_the_full_text_rebuild_pending() {
+        let index_dir = tempfile::tempdir().unwrap();
+        let (src, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(src.path().join("jp.md"), "# 旅行記\n\n東京都庁").unwrap();
+        {
+            let s = store::open_store_no_backend(index_dir.path(), false).unwrap();
+            db::upsert_collection(&s.db, &test_collection("c", src.path())).unwrap();
+            db::upsert_collection(&s.db, &test_collection("x", other.path())).unwrap();
+        }
+        let exclude = ["x".to_string()];
+
+        run_update_with(
+            index_dir.path(),
+            None,
+            &exclude,
+            true,
+            false,
+            TEST_HOOKS,
+            None,
+        )
+        .unwrap();
 
         let s = store::open_store_no_backend(index_dir.path(), true).unwrap();
         assert!(s.fts_rebuild_pending().unwrap());
@@ -2553,7 +2610,7 @@ mod tests {
             db::upsert_collection(&s.db, &hook_collection("c", src.path(), Some("exit 0")))
                 .unwrap();
         }
-        run_update_with(index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
+        run_update_with(index_dir.path(), None, &[], true, false, TEST_HOOKS, None).unwrap();
     }
 
     // ── Chunk-vector reuse across `update` → `embed` ─────────────────────────
@@ -2644,7 +2701,16 @@ mod tests {
         }
 
         fn update(&self) {
-            run_update_with(self.index_dir.path(), None, true, false, TEST_HOOKS, None).unwrap();
+            run_update_with(
+                self.index_dir.path(),
+                None,
+                &[],
+                true,
+                false,
+                TEST_HOOKS,
+                None,
+            )
+            .unwrap();
         }
 
         /// The embed pass `rqmd embed` runs, against the counting backend.
