@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- `rqmd query --json` and the MCP `query` tool now return the raw reranker score of each hit as
+  `rerank_score`, beside the blended `score`. It is `null` in JSON (and left out of the MCP text)
+  when reranking was skipped or failed, and for `search` and `vsearch`. Result order and the
+  blended `score` are unchanged.
 - A keyword query for a number written with thousands separators, such as `1,031,369`, now also
   matches the same number written as `1031369`. Terms with a decimal part, groups that are not
   three digits (`1,23,456`) and other comma uses (`a,b`) are searched as before. The reverse, a

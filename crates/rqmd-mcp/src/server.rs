@@ -664,8 +664,12 @@ fn format_results(
         let section = sections[i]
             .map(|(n, of)| format!(" · section {n} of {of}"))
             .unwrap_or_default();
+        let rerank = r
+            .rerank_score
+            .map(|s| format!(" · rerank_score {s:.3}"))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "[{}] {} #{}\n  rqmd://{}/{} · score {:.3}{section}\n",
+            "[{}] {} #{}\n  rqmd://{}/{} · score {:.3}{rerank}{section}\n",
             offset + i + 1,
             r.title,
             r.docid,
@@ -1138,6 +1142,27 @@ mod tests {
         assert_eq!(page, ranked);
         assert!(!more);
         assert_eq!(fetch_len(0, 10), 11);
+    }
+
+    #[test]
+    fn format_results_shows_the_rerank_score_only_when_present() {
+        let result = |rerank_score| rqmd_core::SearchResult {
+            file: "rqmd://notes/a.md".into(),
+            title: "A".into(),
+            body: String::new(),
+            best_chunk: String::new(),
+            best_chunk_pos: 0,
+            score: 0.5,
+            rerank_score,
+            docid: "abc123".into(),
+            collection: "notes".into(),
+            path: "a.md".into(),
+            context: None,
+        };
+        let with = format_results(&[result(Some(0.25))], "q", 0, false);
+        assert!(with.contains("score 0.500 · rerank_score 0.250"), "{with}");
+        let without = format_results(&[result(None)], "q", 0, false);
+        assert!(!without.contains("rerank_score"), "{without}");
     }
 
     #[test]
