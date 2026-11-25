@@ -1064,6 +1064,7 @@ impl Store {
                     doc: docs.len(),
                     rank,
                     score: factor.map_or(sim, |factor| sim * factor),
+                    rerank_score: None,
                     chunk: (String::new(), pos),
                 });
             }
@@ -1868,11 +1869,11 @@ impl Store {
         {
             let rrf_score = cand.backend_score;
             for (rank, chunk) in chunks.into_iter().enumerate() {
-                let score = if let Some(ref rscores) = rerank_scores {
+                let (score, rerank_score) = if let Some(ref rscores) = rerank_scores {
                     let rs = rscores.get(next_score).copied().unwrap_or(rrf_score);
-                    BLEND_HI * rs + BLEND_LO * rrf_score
+                    (BLEND_HI * rs + BLEND_LO * rrf_score, Some(rs))
                 } else {
-                    rrf_score
+                    (rrf_score, None)
                 };
                 next_score += 1;
                 let score = score * recency.as_ref().map_or(1.0, |factors| factors[i]);
@@ -1881,6 +1882,7 @@ impl Store {
                     doc: i,
                     rank,
                     score,
+                    rerank_score,
                     chunk,
                 });
             }
@@ -1927,6 +1929,7 @@ impl Store {
                 best_chunk: pick.chunk.0,
                 best_chunk_pos: pick.chunk.1,
                 score: pick.score,
+                rerank_score: pick.rerank_score,
                 docid: docid_from_hash(&hash).to_string(),
                 collection: collection.to_string(),
                 path: path.to_string(),
@@ -1964,6 +1967,7 @@ impl Store {
             best_chunk,
             best_chunk_pos: 0,
             score,
+            rerank_score: None,
             docid,
             collection: doc.collection.clone(),
             path: doc.path.clone(),
@@ -2045,6 +2049,7 @@ impl Store {
                     doc: docs.len(),
                     rank,
                     score,
+                    rerank_score: None,
                     chunk,
                 });
             }
@@ -2487,6 +2492,8 @@ struct Pick {
     /// 0 for the document's best section, then 1, 2, ... in order.
     rank: usize,
     score: f32,
+    /// Raw reranker score, when the rerank stage scored this section.
+    rerank_score: Option<f32>,
     chunk: (String, usize),
 }
 

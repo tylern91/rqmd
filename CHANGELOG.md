@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- `rqmd query --json` and the MCP `query` tool now return the raw reranker score of each hit as
+  `rerank_score`, beside the blended `score`. It is `null` in JSON (and left out of the MCP text)
+  when reranking was skipped or failed, and for `search` and `vsearch`. Result order and the
+  blended `score` are unchanged.
 - YAML (`.yaml`, `.yml`), JSON (`.json`), Bash (`.sh`, `.bash`) and TOML (`.toml`) files are now
   chunked at structural boundaries instead of as plain text, so `rqmd status` no longer lists them
   after `Without:`. YAML and JSON chunk at top-level keys (YAML also at top-level list items), Bash
