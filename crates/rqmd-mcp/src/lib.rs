@@ -1,3 +1,4 @@
+mod prefetch;
 mod refresh;
 mod server;
 
@@ -200,6 +201,7 @@ impl HttpBody for Held {
 pub async fn run_stdio(server: RqmdServer) -> Result<()> {
     use rmcp::{serve_server, transport::stdio};
     spawn_idle_eviction(server.clone());
+    prefetch::spawn();
     let transport = stdio();
     serve_server(server, transport).await?.waiting().await?;
     Ok(())
@@ -383,6 +385,7 @@ pub async fn run_http(
     on_bound: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     spawn_idle_eviction(server.clone());
+    prefetch::spawn();
 
     let mut allowed_hosts = vec!["localhost".to_string(), "127.0.0.1".to_string()];
     let host_entry = authority_host(host);

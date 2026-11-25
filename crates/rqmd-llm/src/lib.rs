@@ -763,6 +763,35 @@ async fn download_models(config: &LlamaCppConfig) -> Result<(PathBuf, PathBuf, P
     Ok((ep, rp, gp))
 }
 
+/// Whether a background download would do anything: only the llama backend
+/// downloads GGUF files, and there is nothing to do offline or once all three
+/// are cached. Cheap and existence-only, like `model_cache_report`.
+pub fn prefetch_needed(kind: &BackendKind) -> bool {
+    match kind {
+        BackendKind::Llama => {
+            if hf_hub_offline() {
+                return false;
+            }
+            let r = model_cache_report(&LlamaCppConfig::default());
+            !(r.embed_cached && r.rerank_cached && r.generate_cached)
+        }
+        #[cfg(feature = "ort-backend")]
+        BackendKind::Ort => false,
+    }
+}
+
+/// Download the configured models into the hub cache without loading any of
+/// them, through the same pinned, SHA-256-verified path the lazy load uses.
+pub async fn prefetch_models(kind: &BackendKind) -> Result<()> {
+    match kind {
+        BackendKind::Llama => download_models(&LlamaCppConfig::default())
+            .await
+            .map(|_| ()),
+        #[cfg(feature = "ort-backend")]
+        BackendKind::Ort => Ok(()),
+    }
+}
+
 pub struct LlamaCppBackend {
     _backend: LlamaBackend,
     /// GPU layer counts (and other load params) for lazy `ensure_*` loads.
