@@ -14,4 +14,28 @@ ignore = [
     # only by the optional `ort-backend` feature of rqmd-llm.
     # lean: remove when a tokenizers release drops macro_rules_attribute.
     "RUSTSEC-2024-0436",
+
+    # url 2.5.8 overflows the stack in Url::origin() on nested blob: URLs
+    # (RUSTSEC-2026-0592). Not reachable: no rqmd crate calls Url::origin or
+    # url::quirks::origin, and neither do hf-hub, reqwest, tower-http,
+    # reqwest-middleware or the xet-* crates. The one call in the tree is
+    # rmcp's streamable_http_client.rs:520, compiled only under rmcp's
+    # `__reqwest` feature, which rqmd-mcp does not enable (crates/rqmd-mcp/
+    # Cargo.toml). The patched url 2.5.9 was published 2026-11-20 and is inside
+    # the 30-day soak (CONTRIBUTING.md, "Dependency updates"); the advisory is
+    # a denial of service, not critical, so no soak waiver.
+    # lean: remove with `cargo update -p url --precise 2.5.9`, on or after 2026-12-20.
+    "RUSTSEC-2026-0592",
+
+    # chrono 0.4.45 is unmaintained (RUSTSEC-2026-0543), a maintenance notice
+    # and not a vulnerability. rqmd depends on it only through rmcp, schemars
+    # and the xet-* crates behind hf-hub.
+    # lean: remove when rmcp, schemars and hf-xet stop depending on chrono.
+    "RUSTSEC-2026-0543",
+
+    # humantime 2.4.0 is unmaintained because it wraps chrono
+    # (RUSTSEC-2026-0542). rqmd depends on it only through xet-runtime, which
+    # hf-xet pulls in for hf-hub.
+    # lean: remove when hf-xet stops depending on humantime.
+    "RUSTSEC-2026-0542",
 ]
