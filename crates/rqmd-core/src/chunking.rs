@@ -1037,32 +1037,27 @@ mod tests {
     }
 
     #[test]
-    fn chunking_time_grows_roughly_linearly_with_size() {
-        fn doc(scale: usize) -> String {
-            let mut d = String::new();
-            for i in 0..scale * 5000 {
-                d.push_str(&format!("## H{i}\n\ntext\n\n"));
-                if i % 4 == 0 {
-                    d.push_str("```\ncode\n```\n\n");
-                }
+    fn chunking_beats_the_linear_reference_on_a_large_document() {
+        // 20,000 headings and 5,000 fences: the linear reference is quadratic here.
+        let mut d = String::new();
+        for i in 0..20_000 {
+            d.push_str(&format!("## H{i}\n\ntext\n\n"));
+            if i % 4 == 0 {
+                d.push_str("```\ncode\n```\n\n");
             }
-            d
         }
-        let time = |scale: usize| {
-            let d = doc(scale);
-            let t = std::time::Instant::now();
-            let n = chunk_document(&d).len();
-            assert!(n > 1);
-            t.elapsed()
-        };
-        let small = time(1);
-        let large = time(4);
-        // Quadratic growth would be ~16x; allow far more than linear's 4x.
+        let t = std::time::Instant::now();
+        let fast = chunk_document(&d);
+        let fast_time = t.elapsed();
+        let t = std::time::Instant::now();
+        let slow = oracle_chunks(&d);
+        let slow_time = t.elapsed();
+        assert!(fast.len() > 1);
+        assert_eq!(fast.len(), slow.len());
         assert!(
-            large < small * 12 + std::time::Duration::from_millis(500),
-            "1x took {small:?}, 4x took {large:?}"
+            fast_time * 3 < slow_time,
+            "new took {fast_time:?}, linear reference took {slow_time:?}"
         );
-        // 20,000 headings and 5,000 fences.
-        assert!(time(4) < std::time::Duration::from_secs(20));
+        assert!(fast_time < std::time::Duration::from_secs(20));
     }
 }
