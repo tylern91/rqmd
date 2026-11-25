@@ -36,7 +36,7 @@ fn age(file: &Path) {
 /// An index with collection `c` holding `doc.md` (`body`) and `gone.md`, settled
 /// by two updates: a fresh index needs its one-time full-text rebuild first, and
 /// a refresh skips while that is pending.
-fn setup(body: &str) -> (TempDir, Fixture) {
+pub(super) fn setup(body: &str) -> (TempDir, Fixture) {
     let index_dir = TempDir::new().expect("tempdir");
     let fx = fixture_collection("c", body);
     std::fs::write(fx.path.join("gone.md"), "goneword lives here\n").expect("write gone.md");
@@ -55,7 +55,7 @@ fn setup(body: &str) -> (TempDir, Fixture) {
 }
 
 /// A running `rqmd mcp` (stdio) that has finished the handshake.
-struct Mcp {
+pub(super) struct Mcp {
     child: Child,
     stdin: ChildStdin,
     lines: Receiver<String>,
@@ -64,13 +64,13 @@ struct Mcp {
 }
 
 /// What one tool call returned.
-struct Reply {
-    is_error: bool,
-    text: String,
+pub(super) struct Reply {
+    pub(super) is_error: bool,
+    pub(super) text: String,
 }
 
 impl Mcp {
-    fn start(index_dir: &Path) -> Self {
+    pub(super) fn start(index_dir: &Path) -> Self {
         Self::launch(Some(index_dir), index_dir, &[])
     }
 
@@ -151,7 +151,7 @@ impl Mcp {
         }
     }
 
-    fn call(&mut self, tool: &str, arguments: Value) -> Reply {
+    pub(super) fn call(&mut self, tool: &str, arguments: Value) -> Reply {
         let response = self.request("tools/call", json!({"name": tool, "arguments": arguments}));
         let result = &response["result"];
         assert!(result.is_object(), "no result: {response}");
@@ -164,7 +164,7 @@ impl Mcp {
         }
     }
 
-    fn search(&mut self, term: &str, refresh: Option<bool>) -> Reply {
+    pub(super) fn search(&mut self, term: &str, refresh: Option<bool>) -> Reply {
         let mut args = json!({"query": term});
         if let Some(refresh) = refresh {
             args["refresh"] = json!(refresh);
@@ -349,9 +349,9 @@ fn ac_5_a_pending_rebuild_skips_the_pass_with_a_note() {
     assert!(resumed.text.contains("c/fresh.md"), "{}", resumed.text);
 }
 
-/// Bad input is handled as before: a `refresh` that is not a boolean is refused
-/// as a parameter error that names the type, and an unknown collection returns
-/// the same reply with the flag on or off, without indexing any collection.
+/// Bad input is refused the same way with the flag on or off: a `refresh` that
+/// is not a boolean is a parameter error that names the type, and a collection
+/// name that is not registered is an error result that indexes nothing.
 #[test]
 fn ac_6_bad_input_is_unchanged() {
     let (index_dir, fx) = setup("alpha body\n");
@@ -367,12 +367,14 @@ fn ac_6_bad_input_is_unchanged() {
     );
 
     let args =
-        |refresh: bool| json!({"query": "alpha", "collections": ["nope"], "refresh": refresh});
+        |refresh: bool| json!({"query": "alpha", "collections": ["c", "nope"], "refresh": refresh});
     let off = mcp.call("search", args(false));
     let on = mcp.call("search", args(true));
+    assert!(off.is_error, "{}", off.text);
+    assert!(off.text.contains("\"nope\""), "{}", off.text);
     assert_eq!(off.is_error, on.is_error);
     assert_eq!(off.text, on.text);
-    // A name that matches no collection refreshes nothing.
+    // The refused call refreshed nothing.
     let unrefreshed = mcp.search("quaggaword", None);
     assert!(
         unrefreshed.text.contains("No results found"),

@@ -309,6 +309,15 @@ impl RqmdServer {
         require_index(&self.index_dir).map_err(|e| e.to_string())
     }
 
+    /// `Err` naming any requested collection that is not registered. Runs on
+    /// the keyword-only reader, ahead of any refresh pass or model load.
+    fn check_collections(&self, cols: Option<&[String]>) -> Result<(), String> {
+        let store = self
+            .fts()
+            .map_err(|e| format!("Error opening store: {e:#}"))?;
+        store.check_collections(cols).map_err(|e| format!("{e:#}"))
+    }
+
     /// Release any GGUF model idle for at least `ttl`. Returns how many were
     /// released, or `0` if the ML store was never initialised or is currently
     /// busy. Uses `try_lock` (never `lock`) so a periodic sweep can never block
@@ -519,6 +528,7 @@ impl RqmdServer {
         let intent = p.intent.as_deref();
         let recency = recency_of(p.recency.as_deref())?;
         self.existing_index()?;
+        self.check_collections(cols)?;
         let refresh_note = self.refresh_note(p.refresh, cols);
         let mut store = self
             .ml()
@@ -557,6 +567,7 @@ impl RqmdServer {
         let cols = p.collections.as_deref();
         let recency = recency_of(p.recency.as_deref())?;
         self.existing_index()?;
+        self.check_collections(cols)?;
         let refresh_note = self.refresh_note(p.refresh, cols);
         let store = self
             .fts()
@@ -592,6 +603,7 @@ impl RqmdServer {
 
     fn multi_get_blocking(&self, p: MultiGetInput) -> Result<String, String> {
         self.existing_index()?;
+        self.check_collections(p.collections.as_deref())?;
         let store = self
             .fts()
             .map_err(|e| format!("Error opening store: {e:#}"))?;
@@ -2024,6 +2036,23 @@ mod tests {
         std::fs::create_dir_all(&index_dir).expect("index dir");
         {
             let mut store = Store::open(make_config(&index_dir), no_backend()).expect("store");
+            db::upsert_collection(
+                &store.db,
+                &rqmd_core::Collection {
+                    name: "col".to_string(),
+                    path: dir.path().to_string_lossy().to_string(),
+                    pattern: "**/*.md".to_string(),
+                    ignore: vec![],
+                    include_by_default: true,
+                    update_command: None,
+                    allow_hidden: false,
+                    respect_gitignore: false,
+                    max_file_bytes: None,
+                    embed_ignore: vec![],
+                    embed_max_bytes: None,
+                },
+            )
+            .expect("register collection");
             store
                 .index_document_fts_only("col", "doc1.md", "Doc 1", "hello world")
                 .expect("index doc");

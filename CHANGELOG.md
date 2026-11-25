@@ -60,6 +60,7 @@
   (cmake is used only where aws-lc has no pre-generated bindings; no NASM or
   Go on macOS arm64 or Linux x86_64). The third-party license file now also
   lists ISC and BSD-2-Clause crates.
+- A `-c` or `collections` name that is not registered is now an error that names it and lists the registered collections, instead of "No results". `rqmd query`, `search` and `vsearch` and the MCP `query`, `search` and `multi_get` tools check it before any refresh or model load; a registered collection with no matching documents still answers "No results".
 
 ### Fixed
 - Ctrl-C at a macOS terminal now prints `rqmd: interrupted by SIGINT` without naming the terminal
