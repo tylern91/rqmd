@@ -90,6 +90,17 @@ fn query_without_rerank_reports_none_and_keeps_the_order() {
     let skipped = query(&mut store, true);
     assert!(!skipped.is_empty());
     assert!(skipped.iter().all(|r| r.rerank_score.is_none()));
+    assert!(skipped.windows(2).all(|w| w[0].score >= w[1].score));
+}
+
+#[test]
+fn reranked_results_stay_ordered_by_blended_score() {
+    let dir = TempDir::new().unwrap();
+    let mut store = store_with_docs(&dir);
+    let hits = query(&mut store, false);
+    assert!(hits.windows(2).all(|w| w[0].score >= w[1].score));
+    assert_eq!(hits.len(), 2);
+    assert!(hits[0].file.ends_with("one.md"), "{:?}", hits[0].file);
 }
 
 #[test]
