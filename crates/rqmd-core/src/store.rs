@@ -2254,6 +2254,48 @@ impl Store {
         Ok((lists, metas))
     }
 
+    /// Fail when `requested` names a collection that is not registered, so a
+    /// typo is an error rather than an empty result that reads like a real
+    /// miss. `None` and an empty slice mean "unspecified" and always pass.
+    ///
+    /// Not part of `effective_collections`: documents can sit in a collection
+    /// that was never registered (library use, the eval corpus), and those
+    /// searches stay valid. The CLI and MCP boundaries call this before any
+    /// refresh or model load.
+    pub fn check_collections(&self, requested: Option<&[String]>) -> Result<()> {
+        let Some(cols) = requested.filter(|c| !c.is_empty()) else {
+            return Ok(());
+        };
+        let registered = db::list_collections(&self.db).context("list collections to validate")?;
+        let unknown: Vec<&str> = cols
+            .iter()
+            .map(String::as_str)
+            .filter(|c| !registered.iter().any(|r| r.name == *c))
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        let names: Vec<&str> = registered.iter().map(|r| r.name.as_str()).collect();
+        let registered_list = if names.is_empty() {
+            "none".to_string()
+        } else {
+            names.join(", ")
+        };
+        let noun = if unknown.len() == 1 {
+            "collection"
+        } else {
+            "collections"
+        };
+        anyhow::bail!(
+            "unknown {noun} {}; registered collections: {registered_list}",
+            unknown
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
     /// Resolve the collections a query should search when the caller passed no
     /// explicit filter (`None`, or an empty slice — the two are equivalent
     /// "unspecified" inputs throughout this API). An explicit, non-empty filter

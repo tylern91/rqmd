@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use predicates::prelude::*;
 use predicates::str::contains;
 use tempfile::TempDir;
 
@@ -126,7 +127,7 @@ fn ac_2_collection_remove_keeps_a_hash_shared_with_another_collection() {
 }
 
 /// After a rename, keyword search scoped to the new name finds the collection's
-/// documents and the old name no longer matches anything.
+/// documents and the old name is refused as unknown.
 #[test]
 fn ac_3_rename_keeps_scoped_keyword_search_working() {
     let index_dir = TempDir::new().expect("tempdir");
@@ -145,11 +146,13 @@ fn ac_3_rename_keeps_scoped_keyword_search_working() {
         scoped_new.contains("doc.md"),
         "scoped search under the new name found nothing: {scoped_new}"
     );
-    let scoped_old = search_stdout(index_dir.path(), &["zebra", "-c", "a"]);
-    assert!(
-        !scoped_old.contains("doc.md"),
-        "old name still matches: {scoped_old}"
-    );
+    // The old name is no longer registered, so it is refused rather than empty.
+    rqmd(index_dir.path())
+        .args(["search", "zebra", "-c", "a"])
+        .assert()
+        .failure()
+        .stdout(contains("doc.md").not())
+        .stderr(contains("unknown collection \"a\""));
 
     let stdout = String::from_utf8_lossy(&renamed.stdout);
     assert!(

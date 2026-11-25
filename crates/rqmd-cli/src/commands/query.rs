@@ -21,14 +21,21 @@ fn run_search_command(
     fmt: Format,
     full: bool,
     with_backend: bool,
+    collections: Option<&[String]>,
     search: impl FnOnce(&mut Store) -> Result<Vec<SearchResult>>,
 ) -> Result<()> {
+    if with_backend {
+        // A bare store is cheap; a model load is not, and a typo should fail first.
+        store::open_existing_store_no_backend(index_dir, true)?.check_collections(collections)?;
+    }
     let mut s = if with_backend {
         let s = store::open_existing_store_with_backend(index_dir, true)?;
         store::warn_if_fingerprint_stale(&s);
         s
     } else {
-        store::open_existing_store_no_backend(index_dir, true)?
+        let s = store::open_existing_store_no_backend(index_dir, true)?;
+        s.check_collections(collections)?;
+        s
     };
     store::warn_if_raw_backfill_pending(&s);
     store::warn_if_fts_rebuild_pending(&s);
@@ -240,24 +247,32 @@ fn render_timings(t: &QueryTimings) -> String {
 
 pub fn run_query(index_dir: &Path, query: &str, opts: QueryOptions) -> Result<()> {
     let mut timings = None;
-    run_search_command(index_dir, query, opts.fmt, opts.full, true, |s| {
-        if let Some(recency) = &opts.recency {
-            eprintln!("rqmd: {}", recency.notice());
-        }
-        if opts.cache
-            && let Some(line) = enable_query_cache(s, index_dir)
-        {
-            eprintln!("{line}");
-        }
-        s.set_query_timings(opts.timings);
-        let progress = Progress::new(ProgressMode::detect());
-        let outcome = query_with_progress(s, query, &opts, progress)?;
-        timings = s.take_query_timings();
-        if let Some(line) = rerank_warning(outcome.rerank, opts.timeout) {
-            eprintln!("{line}");
-        }
-        Ok(outcome.results)
-    })?;
+    run_search_command(
+        index_dir,
+        query,
+        opts.fmt,
+        opts.full,
+        true,
+        opts.collections,
+        |s| {
+            if let Some(recency) = &opts.recency {
+                eprintln!("rqmd: {}", recency.notice());
+            }
+            if opts.cache
+                && let Some(line) = enable_query_cache(s, index_dir)
+            {
+                eprintln!("{line}");
+            }
+            s.set_query_timings(opts.timings);
+            let progress = Progress::new(ProgressMode::detect());
+            let outcome = query_with_progress(s, query, &opts, progress)?;
+            timings = s.take_query_timings();
+            if let Some(line) = rerank_warning(outcome.rerank, opts.timeout) {
+                eprintln!("{line}");
+            }
+            Ok(outcome.results)
+        },
+    )?;
     // After the results, so a terminal shows the report last.
     if let Some(timings) = timings {
         eprint!("{}", render_timings(&timings));
@@ -298,7 +313,7 @@ pub fn run_search(
     fmt: Format,
     full: bool,
 ) -> Result<()> {
-    run_search_command(index_dir, query, fmt, full, false, |s| {
+    run_search_command(index_dir, query, fmt, full, false, collections, |s| {
         announce_recency(&options);
         s.search_fts_multi_with(query, num, collections, &options)
     })
@@ -313,7 +328,7 @@ pub fn run_vsearch(
     fmt: Format,
     full: bool,
 ) -> Result<()> {
-    run_search_command(index_dir, query, fmt, full, true, |s| {
+    run_search_command(index_dir, query, fmt, full, true, collections, |s| {
         announce_recency(&options);
         s.search_vec_multi_with(query, num, collections, &options)
     })

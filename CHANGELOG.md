@@ -20,6 +20,7 @@
   hint and the second-signal behaviour are unchanged.
 
 ### Changed
+- A `-c` or `collections` name that is not registered is now an error that names it and lists the registered collections, instead of "No results". `rqmd query`, `search` and `vsearch` and the MCP `query`, `search` and `multi_get` tools check it before any refresh or model load; a registered collection with no matching documents still answers "No results".
 - `llama-cpp-2` and `llama-cpp-sys-2` `0.1.154` -> `0.1.160` (published 2026-10-15, past the 30-day
   soak), through the llama.cpp bump gate: the cosine of all 14 sample vectors against the old
   engine is 1.000000 on Metal and on the CPU (`RQMD_FORCE_CPU=1`), so stored vectors stay valid,
