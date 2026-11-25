@@ -29,7 +29,8 @@
 - Keyword search behaviour for hyphenated terms is now pinned by tests: `foo-bar` is matched as the
   adjacent phrase `foo bar` (so `foo` and `bar` alone also find the document), a leading `-foo`
   excludes `foo` and is reported as a parse warning, and a spaced `foo - bar` excludes `bar`. No
-  search behaviour changes.
+  search behaviour changes. An end-to-end test indexes a document with `foo-bar` and checks that
+  `rqmd search foo-bar` and `rqmd search foo` both find it.
 
 ### Changed
 - Model downloads now use hf-hub 1.0 and reqwest 0.13, moved together because
