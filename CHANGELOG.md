@@ -22,6 +22,11 @@
   pid alone. A signal the kernel raises itself, such as Ctrl-C at a Linux terminal, prints the
   message as before, and so does Ctrl-C at a macOS terminal (see Fixed). The exit code, the resume
   hint and the second-signal behaviour are unchanged.
+- The MCP server now downloads any missing models in the background when it starts, so the first
+  `query` on a fresh machine no longer spends its deadline on the download. Only the `llama`
+  backend downloads; nothing is loaded into memory. It is skipped when `HF_HUB_OFFLINE` is set,
+  when all models are cached, or with `RQMD_NO_MODEL_PREFETCH=1`. A failed download is logged to
+  stderr and the first `query` retries it.
 
 ### Changed
 - Chunking a large document is no longer quadratic in its size: code fences and break points are
