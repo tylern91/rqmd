@@ -26,6 +26,11 @@
   nothing needs `rqmd embed --rebuild` and the embed fingerprint is unchanged. The new crate
   moves tokenizing and detokenizing to `LlamaModel::vocab()`; rqmd-llm follows. One difference:
   a text with an interior NUL byte is now tokenized instead of rejected. Closes #250.
+- Keyword search behaviour for hyphenated terms is now pinned by tests: `foo-bar` is matched as the
+  adjacent phrase `foo bar` (so `foo` and `bar` alone also find the document), a leading `-foo`
+  excludes `foo` and is reported as a parse warning, and a spaced `foo - bar` excludes `bar`. No
+  search behaviour changes. An end-to-end test indexes a document with `foo-bar` and checks that
+  `rqmd search foo-bar` and `rqmd search foo` both find it.
 
 ### Changed
 - Model downloads now use hf-hub 1.0 and reqwest 0.13, moved together because

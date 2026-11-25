@@ -1503,4 +1503,67 @@ mod tests {
             assert_eq!(&tokens, expected, "tokens for {text:?}");
         }
     }
+
+    fn parsed_query(text: &str) -> (String, usize) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        let (query, errs) = idx.query_parser.parse_query_lenient(text);
+        (format!("{query:?}"), errs.len())
+    }
+
+    #[test]
+    fn a_hyphenated_term_builds_a_phrase_query_on_every_field() {
+        let (query, errors) = parsed_query("foo-bar");
+        assert_eq!(errors, 0);
+        assert_eq!(query.matches("PhraseQuery").count(), 4);
+        assert!(!query.contains("MustNot"));
+        assert!(!query.contains("TermQuery"));
+    }
+
+    #[test]
+    fn a_leading_hyphen_builds_a_must_not_clause_and_a_parse_warning() {
+        let (query, errors) = parsed_query("-foo");
+        assert_eq!(errors, 1);
+        assert_eq!(query.matches("MustNot").count(), 1);
+        assert!(query.contains("AllQuery"));
+    }
+
+    #[test]
+    fn a_spaced_hyphen_excludes_the_term_after_it() {
+        let (query, errors) = parsed_query("foo - bar");
+        assert_eq!(errors, 0);
+        assert_eq!(query.matches("MustNot").count(), 1);
+        assert!(!query.contains("PhraseQuery"));
+        let must_not = query.find("MustNot").unwrap();
+        assert!(query[..must_not].contains("\"foo\""));
+        assert!(!query[..must_not].contains("\"bar\""));
+        assert!(query[must_not..].contains("\"bar\""));
+    }
+
+    #[test]
+    fn a_hyphenated_document_term_is_found_by_the_whole_term_and_each_part() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("notes/hyphen.md", "Title", "a foo-bar widget", 1)
+            .unwrap();
+        idx.add_document("notes/apart.md", "Title", "foo and bar apart", 2)
+            .unwrap();
+        idx.commit().unwrap();
+
+        let paths = |q: &str| -> Vec<String> {
+            let mut v: Vec<String> = idx
+                .search_fts(q, 10, None)
+                .unwrap()
+                .into_iter()
+                .map(|(p, _, _)| p)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(paths("foo-bar"), ["notes/hyphen.md"]);
+        assert_eq!(paths("foo"), ["notes/apart.md", "notes/hyphen.md"]);
+        assert_eq!(paths("bar"), ["notes/apart.md", "notes/hyphen.md"]);
+        assert_eq!(paths("foo - bar"), Vec::<String>::new());
+        assert_eq!(paths("bar -foo"), Vec::<String>::new());
+    }
 }
