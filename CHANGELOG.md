@@ -72,6 +72,14 @@
   byte-identical to rqmd 0.34.0, and the index format is unchanged.
 
 ### Security
+- `.cargo/audit.toml` now ignores RUSTSEC-2026-0592 (`url` 2.5.8, stack overflow in
+  `Url::origin()` on nested `blob:` URLs), RUSTSEC-2026-0543 (`chrono`) and RUSTSEC-2026-0542
+  (`humantime`), the last two being unmaintained notices. `Url::origin()` is not reachable:
+  no rqmd crate calls it, and the only call in the dependency tree sits behind rmcp's
+  `__reqwest` feature, which rqmd-mcp does not enable. The patched `url` 2.5.9 was published
+  2026-11-20, so the bump waits for the 30-day soak and the ignore comes out with it on or after
+  2026-12-20. `chrono` and `humantime` reach rqmd only through rmcp, schemars and the hf-hub
+  download crates.
 - rustix is now 1.1.6 (was 1.1.4), which carries the fix for RUSTSEC-2026-0486. rustix reaches
   rqmd through `fs4` (the tantivy index lock) and `tempfile`. Only `Cargo.lock` changes;
   `cargo tree -i rustix` shows the single version 1.1.6.
