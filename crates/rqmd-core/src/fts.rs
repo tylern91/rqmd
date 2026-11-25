@@ -116,6 +116,46 @@ fn strip_keyword_stopwords(query: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(kept.join(" "))
 }
 
+/// True for `1,031,369`: one to three digits, then one or more `,ddd` groups.
+fn is_digit_grouped(term: &str) -> bool {
+    let mut groups = term.split(',');
+    let first_ok = groups
+        .next()
+        .is_some_and(|g| (1..=3).contains(&g.len()) && g.bytes().all(|b| b.is_ascii_digit()));
+    let mut rest = 0;
+    let rest_ok = groups.all(|g| {
+        rest += 1;
+        g.len() == 3 && g.bytes().all(|b| b.is_ascii_digit())
+    });
+    first_ok && rest_ok && rest > 0
+}
+
+/// Rewrite each digit-grouped number term (`1,031,369`) to
+/// `("1 031 369" OR 1031369)`.
+///
+/// The index tokenizer splits on `,`, so a grouped number is indexed as the
+/// tokens `1 031 369` and a joined `1031369` as one token. Matching both from
+/// the query side needs no re-index. The reverse, a joined query finding an
+/// indexed grouped number, would need the joined form written at index time
+/// and is not attempted. A query containing a quote is left alone so a number
+/// inside a phrase keeps its position semantics.
+fn expand_digit_grouped_numbers(query: &str) -> std::borrow::Cow<'_, str> {
+    if query.contains('"') || !query.split_whitespace().any(is_digit_grouped) {
+        return std::borrow::Cow::Borrowed(query);
+    }
+    let out: Vec<String> = query
+        .split_whitespace()
+        .map(|t| {
+            if is_digit_grouped(t) {
+                format!("(\"{}\" OR {})", t.replace(',', " "), t.replace(',', ""))
+            } else {
+                t.to_string()
+            }
+        })
+        .collect();
+    std::borrow::Cow::Owned(out.join(" "))
+}
+
 fn analyzer() -> TextAnalyzer {
     TextAnalyzer::builder(SimpleTokenizer::default())
         .filter(CjkBigramFilter)
@@ -615,6 +655,7 @@ impl FtsIndex {
         // whatever's indexed, or the two can silently miss each other.
         let query_text = normalize_nfc(query_text);
         let query_text = strip_keyword_stopwords(&query_text);
+        let query_text = expand_digit_grouped_numbers(&query_text);
 
         // `parse_query` fails hard on a fragment tantivy reads as a field specifier
         // (e.g. "error: connection refused" — the colon looks like `field:value`).
@@ -1259,6 +1300,57 @@ mod tests {
                 "{label} {query:?} must match both the NFC- and NFD-indexed document"
             );
         }
+    }
+
+    #[test]
+    fn digit_grouped_number_expands_to_phrase_or_joined() {
+        assert_eq!(
+            expand_digit_grouped_numbers("1,031,369"),
+            "(\"1 031 369\" OR 1031369)"
+        );
+        assert_eq!(
+            expand_digit_grouped_numbers("revenue 12,345 up"),
+            "revenue (\"12 345\" OR 12345) up"
+        );
+    }
+
+    #[test]
+    fn digit_grouped_expansion_leaves_other_forms_alone() {
+        for q in [
+            "1031369",
+            "a,b",
+            "1,23,456",
+            "1,031.5",
+            "1,031,369.5",
+            "1234,567",
+            "1,0314",
+            ",031",
+            "1,",
+            "\"total 1,031,369\"",
+        ] {
+            assert_eq!(expand_digit_grouped_numbers(q), q, "query {q:?}");
+        }
+    }
+
+    #[test]
+    fn grouped_number_query_finds_grouped_and_joined_documents() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut idx = FtsIndex::open_or_create(dir.path()).unwrap();
+        idx.add_document("n/grouped.md", "A", "total 1,031,369 units", 1)
+            .unwrap();
+        idx.add_document("n/joined.md", "B", "total 1031369 units", 2)
+            .unwrap();
+        idx.add_document("n/other.md", "C", "total 1,031 and 369 units", 3)
+            .unwrap();
+        idx.commit().unwrap();
+        let mut paths: Vec<String> = idx
+            .search_fts_multi("1,031,369", 10, None)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.0)
+            .collect();
+        paths.sort();
+        assert_eq!(paths, ["n/grouped.md", "n/joined.md"]);
     }
 
     #[test]

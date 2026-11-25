@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- A keyword query for a number written with thousands separators, such as `1,031,369`, now also
+  matches the same number written as `1031369`. Terms with a decimal part, groups that are not
+  three digits (`1,23,456`) and other comma uses (`a,b`) are searched as before. The reverse, a
+  query for `1031369` finding a document that writes `1,031,369`, still does not match.
 - YAML (`.yaml`, `.yml`), JSON (`.json`), Bash (`.sh`, `.bash`) and TOML (`.toml`) files are now
   chunked at structural boundaries instead of as plain text, so `rqmd status` no longer lists them
   after `Without:`. YAML and JSON chunk at top-level keys (YAML also at top-level list items), Bash
