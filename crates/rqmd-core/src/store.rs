@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, hash_map::Entry};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1662,9 +1662,22 @@ impl Store {
         });
 
         let resolve = self.tick();
+        let roots: HashMap<String, String> = db::list_collections(&self.db)?
+            .into_iter()
+            .map(|c| (c.name, c.path))
+            .collect();
+        // Nested collection roots index one file twice. Candidates arrive best
+        // first, so the first sighting of (content, absolute path) is kept.
+        let mut seen: HashSet<(String, PathBuf)> = HashSet::new();
         let mut candidate_docs: Vec<(RankedResult, String, String)> = Vec::new();
         for cand in candidates {
             if let Some((doc, body)) = self.filepath_to_doc_body(&cand.filepath)? {
+                if let Some(root) = roots.get(&doc.collection) {
+                    let abs = Path::new(root).join(&doc.path);
+                    if !seen.insert((doc.hash.clone(), abs)) {
+                        continue;
+                    }
+                }
                 candidate_docs.push((cand.clone(), doc.hash, body));
             }
         }
@@ -5225,5 +5238,61 @@ mod tests {
         );
         assert!(!sim.contains(&excluded), "similar: {sim:?}");
         assert!(sim.contains(&"rqmd://b/same.md".to_string()), "{sim:?}");
+    }
+    fn register_root(store: &Store, name: &str, path: &str) {
+        db::upsert_collection(
+            &store.db,
+            &crate::types::Collection {
+                name: name.into(),
+                path: path.into(),
+                pattern: "**/*.md".into(),
+                ignore: vec![],
+                include_by_default: true,
+                update_command: None,
+                allow_hidden: false,
+                respect_gitignore: false,
+                max_file_bytes: None,
+                embed_ignore: vec![],
+                embed_max_bytes: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// One file reachable through two collections whose roots nest is one
+    /// result; identical content at two unrelated paths stays two results.
+    #[test]
+    fn query_collapses_one_file_seen_through_nested_collections() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = open_stub_store_with(dir.path(), Box::new(TwoTopicBackend));
+        let body = "nestedtoken shared body";
+        register_root(&store, "outer", "/w/docs");
+        register_root(&store, "inner", "/w/docs/sub");
+        register_root(&store, "elsewhere", "/w/unrelated");
+        store
+            .index_document("outer", "sub/a.md", "A", body)
+            .unwrap();
+        store.index_document("inner", "a.md", "A", body).unwrap();
+        store
+            .index_document("elsewhere", "a.md", "A", body)
+            .unwrap();
+        store.flush().unwrap();
+
+        let files: Vec<String> = store
+            .hybrid_query_multi("nestedtoken", None, 10, None, true, true)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.file)
+            .collect();
+
+        assert_eq!(
+            files.iter().filter(|f| f.ends_with("/a.md")).count(),
+            2,
+            "{files:?}"
+        );
+        assert!(
+            files.contains(&"rqmd://elsewhere/a.md".to_string()),
+            "{files:?}"
+        );
     }
 }

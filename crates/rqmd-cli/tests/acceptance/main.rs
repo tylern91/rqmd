@@ -19,6 +19,7 @@ mod mcp_refresh;
 mod mcp_stop_force;
 mod model_cache;
 mod multi_get;
+mod nested_collections;
 mod output_plain;
 mod per_file;
 mod query_timeout;
