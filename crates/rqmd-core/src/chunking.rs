@@ -117,7 +117,7 @@ fn code_fence_regex() -> &'static Regex {
 // ── Core algorithms ───────────────────────────────────────────────────────────
 
 fn scan_code_fences(text: &str) -> Vec<CodeFenceRegion> {
-    let mut fences = Vec::new();
+    let mut fences: Vec<CodeFenceRegion> = Vec::new();
     let mut opens: Vec<usize> = Vec::new();
     for m in code_fence_regex().find_iter(text) {
         if opens.is_empty() {
@@ -137,11 +137,16 @@ fn scan_code_fences(text: &str) -> Vec<CodeFenceRegion> {
             end: text.len(),
         });
     }
+    // Regions never overlap, so ordering by start also orders by end, which
+    // `inside_fence` relies on to binary-search.
+    fences.sort_by_key(|f| f.start);
     fences
 }
 
+/// `fences` must be sorted and non-overlapping, as `scan_code_fences` returns them.
 fn inside_fence(pos: usize, fences: &[CodeFenceRegion]) -> bool {
-    fences.iter().any(|f| pos > f.start && pos < f.end)
+    let after = fences.partition_point(|f| f.start < pos);
+    after > 0 && pos < fences[after - 1].end
 }
 
 fn scan_break_points(text: &str, fences: &[CodeFenceRegion]) -> Vec<BreakPoint> {
@@ -167,6 +172,7 @@ fn scan_break_points(text: &str, fences: &[CodeFenceRegion]) -> Vec<BreakPoint> 
 }
 
 /// Find the best break point within [window_start, window_end).
+/// `break_points` must be sorted by `pos`, as `scan_break_points` returns them.
 /// Returns `None` if no candidate falls in the window — callers must decide
 /// their own fallback (previously this returned `window_end`, which a caller
 /// couldn't distinguish from a genuine break found exactly at `window_end`,
@@ -177,9 +183,11 @@ pub(crate) fn best_break_in_window(
     window_start: usize,
     window_end: usize,
 ) -> Option<usize> {
-    break_points
+    // `break_points` is sorted by position, so skip straight to the window.
+    let first = break_points.partition_point(|b| b.pos < window_start);
+    break_points[first..]
         .iter()
-        .filter(|b| b.pos >= window_start && b.pos < window_end)
+        .take_while(|b| b.pos < window_end)
         // Among equal top scores, prefer the latest position — keeps the
         // chunk closer to CHUNK_SIZE_CHARS instead of cutting early.
         .max_by(|a, b| a.score.cmp(&b.score).then(a.pos.cmp(&b.pos)))
@@ -818,5 +826,243 @@ mod tests {
             result.snippet.ends_with("..."),
             "snippet should be truncated with ellipsis"
         );
+    }
+
+    // ── Sorted-lookup equivalence ────────────────────────────────────────────
+    // Verbatim copies of the linear implementations, kept as the reference.
+
+    fn oracle_inside_fence(pos: usize, fences: &[CodeFenceRegion]) -> bool {
+        fences.iter().any(|f| pos > f.start && pos < f.end)
+    }
+
+    fn oracle_best_break_in_window(
+        break_points: &[BreakPoint],
+        window_start: usize,
+        window_end: usize,
+    ) -> Option<usize> {
+        break_points
+            .iter()
+            .filter(|b| b.pos >= window_start && b.pos < window_end)
+            .max_by(|a, b| a.score.cmp(&b.score).then(a.pos.cmp(&b.pos)))
+            .map(|b| b.pos)
+    }
+
+    fn oracle_scan_break_points(text: &str, fences: &[CodeFenceRegion]) -> Vec<BreakPoint> {
+        let mut seen: std::collections::HashMap<usize, i32> = std::collections::HashMap::new();
+        for (re, score) in compiled_patterns() {
+            for m in re.find_iter(text) {
+                let pos = m.start();
+                if oracle_inside_fence(pos, fences) {
+                    continue;
+                }
+                let entry = seen.entry(pos).or_insert(-1);
+                if *score > *entry {
+                    *entry = *score;
+                }
+            }
+        }
+        let mut points: Vec<BreakPoint> = seen
+            .into_iter()
+            .map(|(pos, score)| BreakPoint { pos, score })
+            .collect();
+        points.sort_by_key(|b| b.pos);
+        points
+    }
+
+    fn oracle_chunks(text: &str) -> Vec<(usize, String)> {
+        if text.len() <= CHUNK_SIZE_CHARS {
+            return vec![(0, text.to_string())];
+        }
+        let fences = scan_code_fences(text);
+        let break_points = oracle_scan_break_points(text, &fences);
+        let mut chunks = Vec::new();
+        let mut start = 0;
+        while start < text.len() {
+            let ideal_end = (start + CHUNK_SIZE_CHARS).min(text.len());
+            if ideal_end == text.len() {
+                chunks.push((start, text[start..].to_string()));
+                break;
+            }
+            let window_start = ideal_end.saturating_sub(CHUNK_WINDOW_CHARS / 2);
+            let window_end = (ideal_end + CHUNK_WINDOW_CHARS / 2).min(text.len());
+            let break_at = oracle_best_break_in_window(&break_points, window_start, window_end)
+                .unwrap_or(ideal_end);
+            let end = snap_char_boundary_forward(text, break_at.min(text.len()));
+            chunks.push((start, text[start..end].to_string()));
+            start = snap_char_boundary_backward(text, end.saturating_sub(CHUNK_OVERLAP_CHARS));
+            if start >= end {
+                start = end;
+            }
+        }
+        chunks
+    }
+
+    /// Deterministic xorshift so the randomized cases are reproducible.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    fn random_doc(rng: &mut Rng, pieces: usize) -> String {
+        const PARTS: [&str; 9] = [
+            "# Heading\n",
+            "## Sub heading\n",
+            "\n\n",
+            "```\ncode line\n",
+            "```\n",
+            "---\n",
+            "- item\n",
+            "word word word é — ",
+            "| a | b |\n|---|---|\n| 1 | 2 |\n",
+        ];
+        let mut doc = String::new();
+        for _ in 0..pieces {
+            doc.push_str(PARTS[rng.below(PARTS.len())]);
+        }
+        doc
+    }
+
+    fn assert_same_chunks(doc: &str) {
+        let new: Vec<(usize, String)> = unadorned_chunks(doc)
+            .into_iter()
+            .map(|c| (c.pos, c.text))
+            .collect();
+        assert_eq!(new, oracle_chunks(doc));
+    }
+
+    fn fixture_docs() -> Vec<String> {
+        let section = |n: usize| format!("# Section {n}\n\n{}\n\n", "word ".repeat(300));
+        vec![
+            table_doc(400),
+            "word ".repeat(2000),
+            (0..12).map(section).collect(),
+            "é".repeat(5000),
+            format!(
+                "{}```\n{}",
+                "intro\n\n".repeat(900),
+                "unclosed ".repeat(900)
+            ),
+        ]
+    }
+
+    fn fenced_doc(fences: usize) -> String {
+        let mut doc = String::new();
+        for i in 0..fences {
+            doc.push_str(&format!(
+                "## Part {i}\n\ntext {i}\n\n```\nlet x = {i};\n\n# not a heading\n```\n\n"
+            ));
+        }
+        doc
+    }
+
+    #[test]
+    fn chunk_boundaries_match_the_linear_reference_on_fixtures() {
+        for doc in fixture_docs() {
+            assert_same_chunks(&doc);
+        }
+    }
+
+    #[test]
+    fn chunk_boundaries_match_the_linear_reference_on_a_5000_fence_document() {
+        let doc = fenced_doc(5000);
+        assert_eq!(scan_code_fences(&doc).len(), 5000);
+        assert_same_chunks(&doc);
+    }
+
+    #[test]
+    fn chunk_boundaries_match_the_linear_reference_on_random_documents() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..60 {
+            let pieces = 50 + rng.below(1500);
+            assert_same_chunks(&random_doc(&mut rng, pieces));
+        }
+    }
+
+    #[test]
+    fn inside_fence_matches_the_linear_reference_on_random_inputs() {
+        let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+        for _ in 0..200 {
+            let pieces = 5 + rng.below(200);
+            let doc = random_doc(&mut rng, pieces);
+            let fences = scan_code_fences(&doc);
+            for pos in 0..=doc.len() + 1 {
+                assert_eq!(
+                    inside_fence(pos, &fences),
+                    oracle_inside_fence(pos, &fences),
+                    "pos {pos}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn best_break_in_window_matches_the_linear_reference_on_random_inputs() {
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        for _ in 0..300 {
+            let mut pos = 0;
+            let points: Vec<BreakPoint> = (0..rng.below(60))
+                .map(|_| {
+                    pos += 1 + rng.below(40);
+                    BreakPoint {
+                        pos,
+                        score: rng.below(6) as i32,
+                    }
+                })
+                .collect();
+            for _ in 0..50 {
+                let a = rng.below(pos + 60);
+                let b = rng.below(pos + 60);
+                let (lo, hi) = (a.min(b), a.max(b));
+                assert_eq!(
+                    best_break_in_window(&points, lo, hi),
+                    oracle_best_break_in_window(&points, lo, hi),
+                    "window {lo}..{hi}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_strategy_version_is_unchanged() {
+        // Bumping it re-embeds every existing index.
+        assert_eq!(CHUNK_STRATEGY_VERSION, 2);
+    }
+
+    #[test]
+    fn chunking_time_grows_roughly_linearly_with_size() {
+        fn doc(scale: usize) -> String {
+            let mut d = String::new();
+            for i in 0..scale * 5000 {
+                d.push_str(&format!("## H{i}\n\ntext\n\n"));
+                if i % 4 == 0 {
+                    d.push_str("```\ncode\n```\n\n");
+                }
+            }
+            d
+        }
+        let time = |scale: usize| {
+            let d = doc(scale);
+            let t = std::time::Instant::now();
+            let n = chunk_document(&d).len();
+            assert!(n > 1);
+            t.elapsed()
+        };
+        let small = time(1);
+        let large = time(4);
+        // Quadratic growth would be ~16x; allow far more than linear's 4x.
+        assert!(
+            large < small * 12 + std::time::Duration::from_millis(500),
+            "1x took {small:?}, 4x took {large:?}"
+        );
+        // 20,000 headings and 5,000 fences.
+        assert!(time(4) < std::time::Duration::from_secs(20));
     }
 }

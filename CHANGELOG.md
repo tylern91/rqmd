@@ -20,6 +20,10 @@
   hint and the second-signal behaviour are unchanged.
 
 ### Changed
+- Chunking a large document is no longer quadratic in its size: code fences and break points are
+  now found by binary search instead of a scan per match and per window, so a document with
+  thousands of headings and fences chunks in linear time. Chunk boundaries and text are
+  byte-identical, so the embed fingerprint is unchanged and no index is re-embedded.
 - `llama-cpp-2` and `llama-cpp-sys-2` `0.1.154` -> `0.1.160` (published 2026-10-15, past the 30-day
   soak), through the llama.cpp bump gate: the cosine of all 14 sample vectors against the old
   engine is 1.000000 on Metal and on the CPU (`RQMD_FORCE_CPU=1`), so stored vectors stay valid,
