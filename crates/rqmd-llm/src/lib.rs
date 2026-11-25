@@ -768,16 +768,19 @@ async fn download_models(config: &LlamaCppConfig) -> Result<(PathBuf, PathBuf, P
 /// are cached. Cheap and existence-only, like `model_cache_report`.
 pub fn prefetch_needed(kind: &BackendKind) -> bool {
     match kind {
-        BackendKind::Llama => {
-            if hf_hub_offline() {
-                return false;
-            }
-            let r = model_cache_report(&LlamaCppConfig::default());
-            !(r.embed_cached && r.rerank_cached && r.generate_cached)
-        }
+        BackendKind::Llama => download_pending(
+            hf_hub_offline(),
+            &model_cache_report(&LlamaCppConfig::default()),
+        ),
         #[cfg(feature = "ort-backend")]
         BackendKind::Ort => false,
     }
+}
+
+/// Split from `prefetch_needed` so the offline and all-cached cases are
+/// testable without a real cache.
+fn download_pending(offline: bool, report: &ModelCacheReport) -> bool {
+    !offline && !(report.embed_cached && report.rerank_cached && report.generate_cached)
 }
 
 /// Download the configured models into the hub cache without loading any of
@@ -1645,6 +1648,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn cache_report(embed: bool, rerank: bool, generate: bool) -> ModelCacheReport {
+        ModelCacheReport {
+            cache_root: std::path::PathBuf::new(),
+            embed_cached: embed,
+            rerank_cached: rerank,
+            generate_cached: generate,
+        }
+    }
+
+    #[test]
+    fn download_pending_skips_offline_and_fully_cached() {
+        assert!(!download_pending(true, &cache_report(false, false, false)));
+        assert!(!download_pending(false, &cache_report(true, true, true)));
+        assert!(download_pending(false, &cache_report(true, false, true)));
+        assert!(download_pending(false, &cache_report(false, false, false)));
+    }
+
+    #[test]
+    #[serial(inference_backend_env)]
+    fn prefetch_needed_is_false_when_hf_hub_offline() {
+        let _guard = EnvVarGuard::set("HF_HUB_OFFLINE", "1");
+        assert!(!prefetch_needed(&BackendKind::Llama));
     }
 
     #[test]

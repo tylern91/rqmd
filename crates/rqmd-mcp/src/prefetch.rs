@@ -57,17 +57,28 @@ where
     }
 }
 
-/// Start the download on the runtime and return at once.
-pub(crate) fn spawn() {
-    tokio::spawn(async {
-        let kind = BackendKind::from_env();
-        run(
-            opted_out(),
-            || rqmd_llm::prefetch_needed(&kind),
-            || rqmd_llm::prefetch_models(&kind),
-        )
-        .await;
-    });
+/// Run `run` on the runtime and return at once, so server startup never waits
+/// on a download.
+pub(crate) fn spawn_with<D, Fut>(
+    opted_out: bool,
+    needed: impl FnOnce() -> bool + Send + 'static,
+    download: D,
+) -> tokio::task::JoinHandle<Outcome>
+where
+    D: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    tokio::spawn(run(opted_out, needed, download))
+}
+
+pub(crate) fn spawn() -> tokio::task::JoinHandle<Outcome> {
+    let kind = BackendKind::from_env();
+    let download_kind = BackendKind::from_env();
+    spawn_with(
+        opted_out(),
+        move || rqmd_llm::prefetch_needed(&kind),
+        move || async move { rqmd_llm::prefetch_models(&download_kind).await },
+    )
 }
 
 #[cfg(test)]
@@ -153,16 +164,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_returns_while_download_is_still_running() {
+    async fn spawn_with_returns_while_download_is_still_running() {
         // A download that never finishes must not hold the caller: the server
         // keeps answering while models are still downloading.
-        let task = tokio::spawn(run(
+        let started = Arc::new(AtomicUsize::new(0));
+        let s = started.clone();
+        let handle = spawn_with(
             false,
             || true,
-            std::future::pending::<anyhow::Result<()>>,
-        ));
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(!task.is_finished());
-        task.abort();
+            move || async move {
+                s.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<anyhow::Result<()>>().await
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(started.load(Ordering::SeqCst), 1, "download never started");
+        assert!(!handle.is_finished());
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn failure_leaves_no_state_so_a_later_download_still_runs() {
+        // The lazy path in `RqmdServer::ml` downloads on its own; a failed
+        // prefetch must not latch anything that stops a later attempt.
+        let (seen, c) = counter();
+        let first = run(false, || true, || async { anyhow::bail!("network down") }).await;
+        assert_eq!(first, Outcome::Failed);
+        let second = run(
+            false,
+            || true,
+            || async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(second, Outcome::Downloaded);
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
     }
 }
