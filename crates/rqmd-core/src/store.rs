@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, hash_map::Entry};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1064,6 +1064,7 @@ impl Store {
                     doc: docs.len(),
                     rank,
                     score: factor.map_or(sim, |factor| sim * factor),
+                    rerank_score: None,
                     chunk: (String::new(), pos),
                 });
             }
@@ -1661,9 +1662,22 @@ impl Store {
         });
 
         let resolve = self.tick();
+        let roots: HashMap<String, String> = db::list_collections(&self.db)?
+            .into_iter()
+            .map(|c| (c.name, c.path))
+            .collect();
+        // Nested collection roots index one file twice. Candidates arrive best
+        // first, so the first sighting of (content, absolute path) is kept.
+        let mut seen: HashSet<(String, PathBuf)> = HashSet::new();
         let mut candidate_docs: Vec<(RankedResult, String, String)> = Vec::new();
         for cand in candidates {
             if let Some((doc, body)) = self.filepath_to_doc_body(&cand.filepath)? {
+                if let Some(root) = roots.get(&doc.collection) {
+                    let abs = Path::new(root).join(&doc.path);
+                    if !seen.insert((doc.hash.clone(), abs)) {
+                        continue;
+                    }
+                }
                 candidate_docs.push((cand.clone(), doc.hash, body));
             }
         }
@@ -1868,11 +1882,11 @@ impl Store {
         {
             let rrf_score = cand.backend_score;
             for (rank, chunk) in chunks.into_iter().enumerate() {
-                let score = if let Some(ref rscores) = rerank_scores {
+                let (score, rerank_score) = if let Some(ref rscores) = rerank_scores {
                     let rs = rscores.get(next_score).copied().unwrap_or(rrf_score);
-                    BLEND_HI * rs + BLEND_LO * rrf_score
+                    (BLEND_HI * rs + BLEND_LO * rrf_score, Some(rs))
                 } else {
-                    rrf_score
+                    (rrf_score, None)
                 };
                 next_score += 1;
                 let score = score * recency.as_ref().map_or(1.0, |factors| factors[i]);
@@ -1881,6 +1895,7 @@ impl Store {
                     doc: i,
                     rank,
                     score,
+                    rerank_score,
                     chunk,
                 });
             }
@@ -1927,6 +1942,7 @@ impl Store {
                 best_chunk: pick.chunk.0,
                 best_chunk_pos: pick.chunk.1,
                 score: pick.score,
+                rerank_score: pick.rerank_score,
                 docid: docid_from_hash(&hash).to_string(),
                 collection: collection.to_string(),
                 path: path.to_string(),
@@ -1964,6 +1980,7 @@ impl Store {
             best_chunk,
             best_chunk_pos: 0,
             score,
+            rerank_score: None,
             docid,
             collection: doc.collection.clone(),
             path: doc.path.clone(),
@@ -2045,6 +2062,7 @@ impl Store {
                     doc: docs.len(),
                     rank,
                     score,
+                    rerank_score: None,
                     chunk,
                 });
             }
@@ -2252,6 +2270,48 @@ impl Store {
         }
 
         Ok((lists, metas))
+    }
+
+    /// Fail when `requested` names a collection that is not registered, so a
+    /// typo is an error rather than an empty result that reads like a real
+    /// miss. `None` and an empty slice mean "unspecified" and always pass.
+    ///
+    /// Not part of `effective_collections`: documents can sit in a collection
+    /// that was never registered (library use, the eval corpus), and those
+    /// searches stay valid. The CLI and MCP boundaries call this before any
+    /// refresh or model load.
+    pub fn check_collections(&self, requested: Option<&[String]>) -> Result<()> {
+        let Some(cols) = requested.filter(|c| !c.is_empty()) else {
+            return Ok(());
+        };
+        let registered = db::list_collections(&self.db).context("list collections to validate")?;
+        let unknown: Vec<&str> = cols
+            .iter()
+            .map(String::as_str)
+            .filter(|c| !registered.iter().any(|r| r.name == *c))
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        let names: Vec<&str> = registered.iter().map(|r| r.name.as_str()).collect();
+        let registered_list = if names.is_empty() {
+            "none".to_string()
+        } else {
+            names.join(", ")
+        };
+        let noun = if unknown.len() == 1 {
+            "collection"
+        } else {
+            "collections"
+        };
+        anyhow::bail!(
+            "unknown {noun} {}; registered collections: {registered_list}",
+            unknown
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 
     /// Resolve the collections a query should search when the caller passed no
@@ -2487,6 +2547,8 @@ struct Pick {
     /// 0 for the document's best section, then 1, 2, ... in order.
     rank: usize,
     score: f32,
+    /// Raw reranker score, when the rerank stage scored this section.
+    rerank_score: Option<f32>,
     chunk: (String, usize),
 }
 
@@ -5176,5 +5238,61 @@ mod tests {
         );
         assert!(!sim.contains(&excluded), "similar: {sim:?}");
         assert!(sim.contains(&"rqmd://b/same.md".to_string()), "{sim:?}");
+    }
+    fn register_root(store: &Store, name: &str, path: &str) {
+        db::upsert_collection(
+            &store.db,
+            &crate::types::Collection {
+                name: name.into(),
+                path: path.into(),
+                pattern: "**/*.md".into(),
+                ignore: vec![],
+                include_by_default: true,
+                update_command: None,
+                allow_hidden: false,
+                respect_gitignore: false,
+                max_file_bytes: None,
+                embed_ignore: vec![],
+                embed_max_bytes: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// One file reachable through two collections whose roots nest is one
+    /// result; identical content at two unrelated paths stays two results.
+    #[test]
+    fn query_collapses_one_file_seen_through_nested_collections() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = open_stub_store_with(dir.path(), Box::new(TwoTopicBackend));
+        let body = "nestedtoken shared body";
+        register_root(&store, "outer", "/w/docs");
+        register_root(&store, "inner", "/w/docs/sub");
+        register_root(&store, "elsewhere", "/w/unrelated");
+        store
+            .index_document("outer", "sub/a.md", "A", body)
+            .unwrap();
+        store.index_document("inner", "a.md", "A", body).unwrap();
+        store
+            .index_document("elsewhere", "a.md", "A", body)
+            .unwrap();
+        store.flush().unwrap();
+
+        let files: Vec<String> = store
+            .hybrid_query_multi("nestedtoken", None, 10, None, true, true)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.file)
+            .collect();
+
+        assert_eq!(
+            files.iter().filter(|f| f.ends_with("/a.md")).count(),
+            2,
+            "{files:?}"
+        );
+        assert!(
+            files.contains(&"rqmd://elsewhere/a.md".to_string()),
+            "{files:?}"
+        );
     }
 }

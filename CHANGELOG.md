@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- `rqmd query --json` and the MCP `query` tool now return the raw reranker score of each hit as
+  `rerank_score`, beside the blended `score`. It is `null` in JSON (and left out of the MCP text)
+  when reranking was skipped or failed, and for `search` and `vsearch`. Result order and the
+  blended `score` are unchanged.
 - A keyword query for a number written with thousands separators, such as `1,031,369`, now also
   matches the same number written as `1031369`. Terms with a decimal part, groups that are not
   three digits (`1,23,456`) and other comma uses (`a,b`) are searched as before. The reverse, a
@@ -25,6 +29,11 @@
   pid alone. A signal the kernel raises itself, such as Ctrl-C at a Linux terminal, prints the
   message as before, and so does Ctrl-C at a macOS terminal (see Fixed). The exit code, the resume
   hint and the second-signal behaviour are unchanged.
+- The MCP server now downloads any missing models in the background when it starts, so the first
+  `query` on a fresh machine no longer spends its deadline on the download. Only the `llama`
+  backend downloads; nothing is loaded into memory. It is skipped when `HF_HUB_OFFLINE` is set,
+  when all models are cached, or with `RQMD_NO_MODEL_PREFETCH=1`. A failed download is logged to
+  stderr and the first `query` retries it.
 
 ### Changed
 - Chunking a large document is no longer quadratic in its size: code fences and break points are
@@ -54,6 +63,7 @@
   (cmake is used only where aws-lc has no pre-generated bindings; no NASM or
   Go on macOS arm64 or Linux x86_64). The third-party license file now also
   lists ISC and BSD-2-Clause crates.
+- A `-c` or `collections` name that is not registered is now an error that names it and lists the registered collections, instead of "No results". `rqmd query`, `search` and `vsearch` and the MCP `query`, `search` and `multi_get` tools check it before any refresh or model load; a registered collection with no matching documents still answers "No results".
 
 ### Fixed
 - Ctrl-C at a macOS terminal now prints `rqmd: interrupted by SIGINT` without naming the terminal
@@ -62,6 +72,12 @@
   while rqmd has one is treated as the terminal's own. A `kill -INT` from a shell still names its
   sender, as does every other signal. Limit: a `kill -INT` from a process with no controlling
   terminal (a launchd job, for example) is not named either, because it looks the same as Ctrl-C.
+- `rqmd collection add` now warns on stderr when the new root lies inside, contains or equals the
+  root of another collection, names that collection and suggests `--ignore` for the inner subtree.
+  The collection is still added and the exit code stays 0. Re-adding a name never warns against
+  itself. `rqmd query` also shows one file once when two collection roots nest: hits that share a
+  content hash and resolve to the same absolute path collapse to the best-ranked one, while
+  different files with identical content stay separate.
 - An interrupted `rqmd embed` no longer leaks a multi-hundred-megabyte `.hnsw.usearch.tmp-<pid>` file
   in the index directory. The checkpoint writer now deletes its temp file on any failed save, fsync
   or rename, and every writer (`embed`, `update`, `watch`, `collection`) sweeps temp files that a

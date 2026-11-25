@@ -622,7 +622,12 @@ fn print_json(results: &[SearchResult], show_full: bool, query: &str) {
         println!("[]");
         return;
     }
-    let arr: Vec<serde_json::Value> = results
+    let arr = results_json(results, show_full, query);
+    println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
+}
+
+fn results_json(results: &[SearchResult], show_full: bool, query: &str) -> Vec<serde_json::Value> {
+    results
         .iter()
         .map(|r| {
             let snippet_info = extract_snippet(
@@ -639,6 +644,7 @@ fn print_json(results: &[SearchResult], show_full: bool, query: &str) {
                 "file": r.file,
                 "line": snippet_info.line,
                 "title": r.title,
+                "rerank_score": r.rerank_score,
             });
             if let Some(ref ctx) = r.context {
                 obj["context"] = serde_json::Value::String(ctx.clone());
@@ -650,8 +656,7 @@ fn print_json(results: &[SearchResult], show_full: bool, query: &str) {
             }
             obj
         })
-        .collect();
-    println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
+        .collect()
 }
 
 // ── CSV ───────────────────────────────────────────────────────────────────────
@@ -865,6 +870,30 @@ pub fn print_document(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn result(rerank_score: Option<f32>) -> SearchResult {
+        SearchResult {
+            file: "rqmd://notes/a.md".into(),
+            title: "A".into(),
+            body: "alpha".into(),
+            best_chunk: "alpha".into(),
+            best_chunk_pos: 0,
+            score: 0.5,
+            rerank_score,
+            docid: "abc123".into(),
+            collection: "notes".into(),
+            path: "a.md".into(),
+            context: None,
+        }
+    }
+
+    #[test]
+    fn json_carries_rerank_score_as_number_or_null() {
+        let out = results_json(&[result(Some(0.25)), result(None)], false, "alpha");
+        assert_eq!(out[0]["rerank_score"], serde_json::json!(0.25));
+        assert!(out[1]["rerank_score"].is_null());
+        assert_eq!(out[0]["score"], out[1]["score"]);
+    }
 
     #[test]
     fn highlight_terms_handles_turkish_capital_i_growing_under_lowercasing() {

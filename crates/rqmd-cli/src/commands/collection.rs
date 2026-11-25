@@ -86,6 +86,66 @@ struct WalkFlags {
     max_file_bytes: Option<u64>,
 }
 
+/// How a new collection root relates to another collection's root.
+#[derive(Debug, PartialEq, Eq)]
+enum RootOverlap {
+    Same,
+    /// The new root lies inside the other collection's root.
+    Inside,
+    /// The new root contains the other collection's root.
+    Contains,
+}
+
+/// Collections other than `name` whose root equals, contains or lies inside
+/// `root`. `Path::starts_with` compares whole components, so `/a/sub` and
+/// `/a/sub2` are siblings.
+fn overlapping_roots(
+    name: &str,
+    root: &Path,
+    others: &[(String, PathBuf)],
+) -> Vec<(String, RootOverlap)> {
+    others
+        .iter()
+        .filter(|(other, _)| other != name)
+        .filter_map(|(other, other_root)| {
+            let overlap = if other_root == root {
+                RootOverlap::Same
+            } else if root.starts_with(other_root) {
+                RootOverlap::Inside
+            } else if other_root.starts_with(root) {
+                RootOverlap::Contains
+            } else {
+                return None;
+            };
+            Some((other.clone(), overlap))
+        })
+        .collect()
+}
+
+/// A file under two roots is indexed once per collection, so a result list
+/// can show it twice. Adding still works; the warning points at the fix.
+fn warn_overlapping_roots(name: &str, root: &Path, collections: &[Collection]) {
+    // Stored roots were canonical when added; re-resolve in case a symlink moved.
+    let others: Vec<(String, PathBuf)> = collections
+        .iter()
+        .map(|c| {
+            let path = PathBuf::from(&c.path);
+            (c.name.clone(), path.canonicalize().unwrap_or(path))
+        })
+        .collect();
+    for (other, overlap) in overlapping_roots(name, root, &others) {
+        let relation = match overlap {
+            RootOverlap::Same => "the same directory as",
+            RootOverlap::Inside => "inside",
+            RootOverlap::Contains => "a parent of",
+        };
+        eprintln!(
+            "WARN: '{name}' is {relation} collection '{other}'; files under both roots are \
+             indexed twice. Add --ignore for the inner subtree to avoid the duplicates."
+        );
+    }
+}
+
 fn add(
     index_dir: &Path,
     dir: &str,
@@ -129,7 +189,9 @@ fn add(
     // Re-adding a name keeps what `add` has no flag for: the update hook, the
     // include-by-default setting and the embed-exclusion rules (`collection
     // set`). Walk settings come from this invocation.
-    let existing = db::list_collections(&s.db)?
+    let all_collections = db::list_collections(&s.db)?;
+    warn_overlapping_roots(&collection_name, &abs_dir, &all_collections);
+    let existing = all_collections
         .into_iter()
         .find(|c| c.name == collection_name);
     if existing.is_some() {
@@ -484,6 +546,55 @@ fn set_include(index_dir: &Path, name: &str, include: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn roots(list: &[(&str, &str)]) -> Vec<(String, PathBuf)> {
+        list.iter()
+            .map(|(n, p)| (n.to_string(), PathBuf::from(p)))
+            .collect()
+    }
+
+    #[test]
+    fn overlapping_roots_flags_an_ancestor() {
+        let found = overlapping_roots(
+            "inner",
+            Path::new("/w/docs/sub"),
+            &roots(&[("docs", "/w/docs")]),
+        );
+        assert_eq!(found, vec![("docs".to_string(), RootOverlap::Inside)]);
+    }
+
+    #[test]
+    fn overlapping_roots_flags_a_descendant() {
+        let found = overlapping_roots(
+            "docs",
+            Path::new("/w/docs"),
+            &roots(&[("inner", "/w/docs/sub")]),
+        );
+        assert_eq!(found, vec![("inner".to_string(), RootOverlap::Contains)]);
+    }
+
+    #[test]
+    fn overlapping_roots_flags_an_equal_path_under_another_name() {
+        let found = overlapping_roots("copy", Path::new("/w/docs"), &roots(&[("docs", "/w/docs")]));
+        assert_eq!(found, vec![("docs".to_string(), RootOverlap::Same)]);
+    }
+
+    #[test]
+    fn overlapping_roots_ignores_siblings_and_shared_name_prefixes() {
+        let others = roots(&[
+            ("a", "/w/docs/sub"),
+            ("b", "/w/docs/sub2"),
+            ("c", "/w/other"),
+        ]);
+        assert!(overlapping_roots("new", Path::new("/w/docs/subx"), &others).is_empty());
+        assert!(overlapping_roots("new", Path::new("/w/docs/sub3"), &others).is_empty());
+    }
+
+    #[test]
+    fn overlapping_roots_ignores_the_collection_being_re_added() {
+        let others = roots(&[("docs", "/w/docs")]);
+        assert!(overlapping_roots("docs", Path::new("/w/docs"), &others).is_empty());
+    }
 
     #[test]
     fn ensure_is_dir_rejects_a_plain_file() {

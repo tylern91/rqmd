@@ -356,6 +356,9 @@ pub struct SearchResult {
     pub best_chunk_pos: usize,
     /// Blended final score (RRF for vsearch/search, rerank-blended for query).
     pub score: f32,
+    /// Raw cross-encoder score the blended `score` was built from. `None` when
+    /// the rerank stage did not run, and for keyword and vector search.
+    pub rerank_score: Option<f32>,
     /// First 6 hex chars of SHA-256(content) — matches qmd's docid format.
     pub docid: String,
     pub collection: String,
