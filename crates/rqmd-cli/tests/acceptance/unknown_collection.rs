@@ -56,6 +56,16 @@ fn ac_2_mcp_unknown_collection_is_an_error_before_any_refresh() {
             "search",
             json!({"query": "alpha", "collections": ["nope"], "refresh": true}),
         ),
+        // A registered name beside the unknown one would let a refresh index
+        // fresh.md if the check ran after it.
+        (
+            "query",
+            json!({"query": "alpha", "collections": ["c", "nope"], "refresh": true}),
+        ),
+        (
+            "search",
+            json!({"query": "alpha", "collections": ["c", "nope"], "refresh": true}),
+        ),
         (
             "multi_get",
             json!({"pattern": "*.md", "collections": ["nope"]}),

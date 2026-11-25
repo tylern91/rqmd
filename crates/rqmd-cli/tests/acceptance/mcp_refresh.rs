@@ -367,7 +367,7 @@ fn ac_6_bad_input_is_unchanged() {
     );
 
     let args =
-        |refresh: bool| json!({"query": "alpha", "collections": ["nope"], "refresh": refresh});
+        |refresh: bool| json!({"query": "alpha", "collections": ["c", "nope"], "refresh": refresh});
     let off = mcp.call("search", args(false));
     let on = mcp.call("search", args(true));
     assert!(off.is_error, "{}", off.text);
