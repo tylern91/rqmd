@@ -18,12 +18,6 @@
   pid alone. A signal the kernel raises itself, such as Ctrl-C at a Linux terminal, prints the
   message as before, and so does Ctrl-C at a macOS terminal (see Fixed). The exit code, the resume
   hint and the second-signal behaviour are unchanged.
-- `rqmd collection add` now warns on stderr when the new root lies inside, contains or equals the
-  root of another collection, names that collection and suggests `--ignore` for the inner subtree.
-  The collection is still added and the exit code stays 0. Re-adding a name never warns against
-  itself. `rqmd query` also shows one file once when two collection roots nest: hits that share a
-  content hash and resolve to the same absolute path collapse to the best-ranked one, while
-  different files with identical content stay separate.
 
 ### Changed
 - `llama-cpp-2` and `llama-cpp-sys-2` `0.1.154` -> `0.1.160` (published 2026-10-15, past the 30-day
@@ -52,6 +46,12 @@
   while rqmd has one is treated as the terminal's own. A `kill -INT` from a shell still names its
   sender, as does every other signal. Limit: a `kill -INT` from a process with no controlling
   terminal (a launchd job, for example) is not named either, because it looks the same as Ctrl-C.
+- `rqmd collection add` now warns on stderr when the new root lies inside, contains or equals the
+  root of another collection, names that collection and suggests `--ignore` for the inner subtree.
+  The collection is still added and the exit code stays 0. Re-adding a name never warns against
+  itself. `rqmd query` also shows one file once when two collection roots nest: hits that share a
+  content hash and resolve to the same absolute path collapse to the best-ranked one, while
+  different files with identical content stay separate.
 - An interrupted `rqmd embed` no longer leaks a multi-hundred-megabyte `.hnsw.usearch.tmp-<pid>` file
   in the index directory. The checkpoint writer now deletes its temp file on any failed save, fsync
   or rename, and every writer (`embed`, `update`, `watch`, `collection`) sweeps temp files that a
