@@ -66,7 +66,14 @@ RQMD_INDEX_DIR=<scratch index copy> <binary> eval --judgements <judgements.jsonl
 
 Latency was not measured. The machine was busy (load average above 13), and every variant already failed the first condition of the bar, so the latency condition was never reached.
 
-Reproducing: the variants were throwaway branches, each gated by an environment variable (`RQMD_EXPAND_MAX_TOKENS` for M2, `RQMD_PASSAGE_FROM_VECTOR` for M3, `RQMD_CHUNK_SHORT_SECTIONS` for M4) and none is merged. M4's count is `RQMD_MEASURE_INDEX=<live index.sqlite> cargo test -p rqmd-core --test short_section_chunk_measurement -- --ignored --nocapture`, prefixed with `RTK_DISABLED=1` so the output is not condensed.
+Reproducing: the variant code was never committed and has been discarded, so the measurements cannot be re-run as they stand and a re-test starts by rewriting the variants. Each was a small change gated by an environment variable that was read where the behaviour is decided:
+
+- M1: a filter on `lex:` expansion lines in the expansion parsing (`fts.rs`, `store.rs`), no variable.
+- M2: `RQMD_EXPAND_MAX_TOKENS` replacing the 256-token expansion budget in `rqmd-llm`.
+- M3: `RQMD_PASSAGE_FROM_VECTOR=1` choosing the shown passage from the chunk the vector search matched, with `RQMD_PASSAGE_FROM_VECTOR_STATS=1` printing per hit whether it differed.
+- M4: `RQMD_CHUNK_SHORT_SECTIONS` keeping sections of short instruction files as separate chunks, counted by a read-only ignored test run as `RQMD_MEASURE_INDEX=<live index.sqlite> cargo test -p rqmd-core --test short_section_chunk_measurement -- --ignored --nocapture`, prefixed with `RTK_DISABLED=1` so the output is not condensed.
+
+The eval command above is unchanged and works on any build, so the baseline row can be re-run today.
 
 ### What would change this
 
