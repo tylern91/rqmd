@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- `rqmd update --exclude <name>` (repeatable, not combinable with `-c`) updates every collection except
+  the named ones. An excluded collection is neither re-indexed nor pruned, a name that matches no
+  collection is an error, and the run leaves a pending full-text rebuild pending, as `-c` does.
 - YAML (`.yaml`, `.yml`), JSON (`.json`), Bash (`.sh`, `.bash`) and TOML (`.toml`) files are now
   chunked at structural boundaries instead of as plain text, so `rqmd status` no longer lists them
   after `Without:`. YAML and JSON chunk at top-level keys (YAML also at top-level list items), Bash

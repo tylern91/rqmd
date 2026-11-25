@@ -26,6 +26,7 @@ mod read_no_index;
 mod recency;
 mod security;
 mod status_cost;
+mod update_exclude;
 mod update_skip;
 mod walk_filters;
 mod watch;

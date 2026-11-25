@@ -197,6 +197,10 @@ enum Commands {
     Update {
         #[arg(short = 'c', long)]
         collection: Option<String>,
+        /// Skip this collection: it is neither re-indexed nor pruned. Repeat
+        /// the flag to skip several. Cannot be combined with `-c`
+        #[arg(long, value_name = "NAME", conflicts_with = "collection")]
+        exclude: Vec<String>,
         /// Run each collection's `update_command` hook even when the index
         /// directory was picked up implicitly from a project-local `.rqmd/`
         /// (that hook's command comes from whoever set up that repo, not you)
@@ -579,12 +583,14 @@ fn run() -> Result<()> {
         Commands::Unlock { force, yes } => commands::unlock::run_unlock(&index_dir, force, yes),
         Commands::Update {
             collection,
+            exclude,
             run_hooks,
             full,
             allow_external_paths,
         } => commands::index::run_update(
             &index_dir,
             collection.as_deref(),
+            &exclude,
             store::hooks_allowed(index_source, run_hooks),
             full,
             store::enforced_root(index_source, allow_external_paths).as_deref(),
