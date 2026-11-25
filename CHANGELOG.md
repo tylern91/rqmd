@@ -3,9 +3,6 @@
 ## [Unreleased]
 
 ### Added
-- `rqmd update --exclude <name>` (repeatable, not combinable with `-c`) updates every collection except
-  the named ones. An excluded collection is neither re-indexed nor pruned, a name that matches no
-  collection is an error, and the run leaves a pending full-text rebuild pending, as `-c` does.
 - YAML (`.yaml`, `.yml`), JSON (`.json`), Bash (`.sh`, `.bash`) and TOML (`.toml`) files are now
   chunked at structural boundaries instead of as plain text, so `rqmd status` no longer lists them
   after `Without:`. YAML and JSON chunk at top-level keys (YAML also at top-level list items), Bash
@@ -14,6 +11,9 @@
   language carries its own fingerprint marker, so only these files are re-embedded once, and a chunk
   whose text is unchanged (every file of up to 3,600 bytes) reuses its stored vector. See
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#ast-chunking-source-code).
+- `rqmd update --exclude <name>` (repeatable, not combinable with `-c`) updates every collection except
+  the named ones. An excluded collection is neither re-indexed nor pruned, a name that matches no
+  collection is an error, and the run leaves a pending full-text rebuild pending, as `-c` does.
 - The interrupt message of `rqmd embed`, `update` and `watch` now names the process that sent the
   signal: `rqmd: interrupted by SIGTERM from pid 4242 (zsh)`. A stray `kill` or `pkill` that stops
   a long run can now be traced. The name is read while the sender is still alive
